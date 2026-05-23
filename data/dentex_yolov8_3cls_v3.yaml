@@ -1,0 +1,9 @@
+path: /today_yolov8_work/repo_files/data/dentex_yolov8_3cls_v3
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: Caries
+  1: Periapical_Lesion
+  2: Impacted

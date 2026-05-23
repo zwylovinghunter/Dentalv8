@@ -1,0 +1,53 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+*.cache
+
+# Virtual/env/editor
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+
+# Datasets and raw data
+/datasets/
+/dataset/
+/images/
+/labels/
+/data/images/
+/data/labels/
+/data/datasets/
+/data/*.zip
+/data/*.7z
+/data/*.tar
+/data/*.tar.gz
+
+# Weights and model binaries
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+*.mlmodel
+*.tflite
+*.pb
+*.bin
+
+# Training output folders in project root
+/runs/
+/v3_exp*/
+/*_i960_b40/
+/*_e50*/
+/*_e80*/
+/*_e200*/
+
+# Root logs, keep curated logs under results/**/logs
+/logs/
+/*.log
+
+# Result artifacts: keep docs, args, csv, json, and logs; exclude weights
+/results/**/weights/
+/results/**/*.pt
