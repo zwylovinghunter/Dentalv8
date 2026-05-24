@@ -13,6 +13,7 @@ venv/
 .vscode/
 
 # Datasets and raw data
+/dentex_yolov8_3cls_v3/
 /datasets/
 /dataset/
 /images/
@@ -36,6 +37,7 @@ venv/
 *.bin
 
 # Training output folders in project root
+/outputs/
 /runs/
 /v3_exp*/
 /*_i960_b40/
