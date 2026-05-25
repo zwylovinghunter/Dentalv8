@@ -54,11 +54,11 @@ class ModelSpec:
 MODEL_SPECS = [
     ModelSpec(
         key="lightweight",
-        name="轻量级模型",
-        model_type="轻量级 YOLOv8n baseline",
-        description="强调速度和部署友好，适合快速演示和低算力场景。",
-        preferred_terms=("yolov8n+baseline", "baseline_e50"),
-        fallback_terms=("yolov8n", "baseline"),
+        name="均衡型基线模型",
+        model_type="YOLOv8m baseline",
+        description="强调综合指标均衡和结果稳定性，作为其它优化模型的对照基线。",
+        preferred_terms=("yolov8m+baseline",),
+        fallback_terms=("yolov8m", "baseline"),
     ),
     ModelSpec(
         key="high_precision",
@@ -70,11 +70,11 @@ MODEL_SPECS = [
     ),
     ModelSpec(
         key="high_recall",
-        name="高召回轻量化牙齿病变检测模型",
-        model_type="YOLOv8n + SPDConv-neck-P4 + CosLR",
+        name="高召回牙齿病变检测模型",
+        model_type="YOLOv8m + P2-highRecall",
         description="强调尽量减少漏检，适合初筛和复核优先的展示场景。",
-        preferred_terms=("yolov8n+spdconv-neck-p4_coslr", "spdconv-neck-p4_coslr"),
-        fallback_terms=("yolov8n", "spdconv", "neck", "p4", "cos"),
+        preferred_terms=("yolov8m+p2-highrecall_mosaic05_e200_p30", "p2-highrecall"),
+        fallback_terms=("yolov8m", "p2", "highrecall", "mosaic05"),
     ),
 ]
 
@@ -531,7 +531,7 @@ def compare_summary(results: list[dict[str, Any]]) -> str:
         f"- 速度最快：{fastest['model_name']}，耗时 {fastest['inference_time_ms']:.2f} ms。",
         f"- 检出目标最多：{most_boxes['model_name']}，疑似区域 {most_boxes['box_count']} 个。",
         f"- 平均置信度最高：{best_conf['model_name']}，平均置信度 {best_conf['avg_confidence']:.3f}。",
-        "- 快速筛查更适合选择轻量级模型或高召回轻量化模型。",
+        "- 快速筛查更适合选择高召回牙齿病变检测模型；常规对照可选择均衡型基线模型。",
         "- 高精度定位展示更适合选择高精度牙齿病变定位模型。",
     ]
     review_count = sum(len(r.get("review_suggestions", [])) for r in ok)
@@ -897,9 +897,9 @@ def build_app() -> gr.Blocks:
                 cmp_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
             cmp_btn = gr.Button("一键运行三个模型", variant="primary")
             with gr.Row():
-                cmp_img1 = gr.Image(type="pil", label="轻量级模型")
+                cmp_img1 = gr.Image(type="pil", label="均衡型基线模型")
                 cmp_img2 = gr.Image(type="pil", label="高精度牙齿病变定位模型")
-                cmp_img3 = gr.Image(type="pil", label="高召回轻量化牙齿病变检测模型")
+                cmp_img3 = gr.Image(type="pil", label="高召回牙齿病变检测模型")
             cmp_table = gr.Dataframe(
                 headers=[
                     "模型名称",
