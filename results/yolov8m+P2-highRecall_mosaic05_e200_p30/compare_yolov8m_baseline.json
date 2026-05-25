@@ -1,0 +1,25 @@
+{
+  "baseline_path": "results/yolov8m+baseline/results.csv",
+  "new_path": "results/yolov8m+P2-highRecall_mosaic05_e200_p30/results.csv",
+  "baseline_best": {
+    "epoch": 23,
+    "precision": 0.63287,
+    "recall": 0.69198,
+    "mAP50": 0.67715,
+    "mAP50-95": 0.42257
+  },
+  "p2_high_recall_best": {
+    "epoch": 26,
+    "precision": 0.63668,
+    "recall": 0.69893,
+    "mAP50": 0.68744,
+    "mAP50-95": 0.42339
+  },
+  "delta_new_minus_baseline": {
+    "precision": 0.00381,
+    "recall": 0.00695,
+    "mAP50": 0.01029,
+    "mAP50-95": 0.00082
+  },
+  "conclusion": "optimized"
+}
