@@ -10,6 +10,7 @@ from typing import Any
 
 import gradio as gr
 import numpy as np
+import pandas as pd
 import requests
 import torch
 import yaml
@@ -17,10 +18,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 # Hardcoded API key is only for local coursework demonstration.
 # Do not commit this pattern to public repositories or production systems.
-OLLAMA_API_KEY = "fd47adf0f1a74d5289c74948d8ccf8a6.Vqk3pY0ugHVS6pUM9e0EyQbg"
-OLLAMA_BASE_URL = "https://ollama.com/api/chat"
-OLLAMA_MODEL = "gpt-oss:20b"
-OLLAMA_TIMEOUT_SECONDS = 12
+DEEPSEEK_API_KEY = "sk-553b2bf62c484ecb899b4c1fbc4ee9f3"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_TIMEOUT_SECONDS = 45
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
@@ -55,10 +56,9 @@ MODEL_SPECS = [
     ModelSpec(
         key="lightweight",
         name="均衡型基线模型",
-        model_type="YOLOv8m baseline",
-        description="强调综合指标均衡和结果稳定性，作为其它优化模型的对照基线。",
-        preferred_terms=("yolov8m+baseline",),
-        fallback_terms=("yolov8m", "baseline"),
+        model_type="YOLOv8n baseline e50",
+        description="使用 yolov8n+baseline_e50 权重，作为其它优化模型的对照基线。",
+        preferred_terms=("yolov8n+baseline_e50",),
     ),
     ModelSpec(
         key="high_precision",
@@ -125,6 +125,12 @@ def append_history(event: dict[str, Any]) -> dict[str, Any]:
     history = load_history()
     history.setdefault("events", []).append(event)
     history["events"] = history["events"][-300:]
+    save_history(history)
+    return history
+
+
+def clear_history() -> dict[str, Any]:
+    history = {"events": []}
     save_history(history)
     return history
 
@@ -510,7 +516,19 @@ def run_single_detection(image: Any, model_name: str, conf: float, iou: float):
         explanation_markdown(result),
         steps_to_rows(result),
         result,
-        dashboard_markdown(),
+        *dashboard_outputs(),
+        registry_status_markdown(),
+    )
+
+
+def reset_single_detection_outputs():
+    return (
+        None,
+        [],
+        "等待检测。",
+        [],
+        {},
+        *dashboard_outputs(),
         registry_status_markdown(),
     )
 
@@ -583,17 +601,209 @@ def run_model_comparison(image: Any, conf: float, iou: float):
         compare_rows(results),
         compare_summary(results),
         results,
-        dashboard_markdown(),
+        *dashboard_outputs(),
         registry_status_markdown(),
     )
 
 
+def reset_model_comparison_outputs():
+    return (
+        None,
+        None,
+        None,
+        [],
+        "等待对比。",
+        [],
+        *dashboard_outputs(),
+        registry_status_markdown(),
+    )
+
+
+def chat_content_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if "text" in value:
+            return str(value.get("text") or "")
+        if "content" in value:
+            return chat_content_to_text(value.get("content"))
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = chat_content_to_text(item).strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    if hasattr(value, "text"):
+        return str(value.text)
+    if hasattr(value, "content"):
+        return chat_content_to_text(value.content)
+    return str(value)
+
+
+def is_treatment_question(question: str) -> bool:
+    return any(term in question for term in ("治疗", "用药", "手术", "怎么办", "怎么做", "处理", "拔牙", "治疗规划"))
+
+
+def safe_treatment_answer(question: str, detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> str:
+    ctx_results = comparison if comparison else ([detection] if detection else [])
+    ok = successful_results([r for r in ctx_results if isinstance(r, dict)])
+    target_terms = {
+        "Caries": ("Caries", "龋", "蛀牙"),
+        "Periapical_Lesion": ("Periapical", "根尖", "根尖周"),
+        "Impacted": ("Impacted", "阻生", "埋伏"),
+    }
+    requested_classes = [
+        class_name
+        for class_name, aliases in target_terms.items()
+        if any(alias.lower() in question.lower() for alias in aliases)
+    ]
+
+    lines = ["以下是基于当前检测结果整理的复核重点：", ""]
+    if not ok:
+        lines.append("- 当前没有成功的真实模型推理结果可用于整理疑似区域。")
+    else:
+        any_box = False
+        for result in ok:
+            boxes = result.get("boxes", [])
+            if requested_classes:
+                boxes = [b for b in boxes if b.get("class_name") in requested_classes]
+            if not boxes:
+                continue
+            any_box = True
+            lines.append(f"- {result['model_name']}：")
+            for class_name in sorted({b.get("class_name", "-") for b in boxes}):
+                class_boxes = [b for b in boxes if b.get("class_name") == class_name]
+                review_count = sum(1 for b in class_boxes if b.get("risk_level") != "可信度较高")
+                confs = ", ".join(f"{float(b.get('confidence', 0.0)):.2f}" for b in class_boxes)
+                lines.append(
+                    f"  - {class_name} 疑似区域 {len(class_boxes)} 个，置信度：{confs}；"
+                    f"建议人工复核 {review_count} 个。"
+                )
+        if not any_box:
+            target_text = "、".join(requested_classes) if requested_classes else "相关类别"
+            lines.append(f"- 当前成功推理结果中没有检出 {target_text} 的疑似区域。")
+    lines.extend(
+        [
+            "",
+            "就诊复核时可以准备这些信息：疑似区域截图、模型对比结果、是否有疼痛或不适、既往口腔治疗史。后续处理应由专业口腔医生结合临床检查、影像资料和个人情况判断。",
+            "",
+            DISCLAIMER,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def compact_result_for_chat(result: dict[str, Any]) -> dict[str, Any]:
+    boxes = []
+    for box in result.get("boxes", []):
+        boxes.append(
+            {
+                "class_name": box.get("class_name"),
+                "confidence": box.get("confidence"),
+                "bbox_xyxy": box.get("bbox_xyxy"),
+                "area_ratio": box.get("area_ratio"),
+                "risk_level": box.get("risk_level"),
+                "review_suggestion": box.get("review_suggestion"),
+            }
+        )
+    return {
+        "model_name": result.get("model_name"),
+        "model_type": result.get("model_type"),
+        "status": result.get("status"),
+        "runtime_mode": result.get("runtime_mode"),
+        "device": result.get("device"),
+        "box_count": result.get("box_count", 0),
+        "avg_confidence": result.get("avg_confidence", 0.0),
+        "max_confidence": result.get("max_confidence", 0.0),
+        "inference_time_ms": result.get("inference_time_ms", 0.0),
+        "boxes": boxes,
+        "review_suggestions": result.get("review_suggestions", []),
+        "error_message": result.get("error_message", ""),
+    }
+
+
+def chat_context_payload(detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> dict[str, Any]:
+    current_detection = compact_result_for_chat(detection) if isinstance(detection, dict) and detection else None
+    model_comparison = [
+        compact_result_for_chat(item)
+        for item in (comparison or [])
+        if isinstance(item, dict)
+    ]
+    return {
+        "current_detection": current_detection,
+        "model_comparison": model_comparison,
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def is_lifestyle_question(question: str) -> bool:
+    keywords = (
+        "生活", "日常", "平时", "注意", "护理", "饮食", "刷牙", "牙线", "含氟", "漱口", "口腔卫生",
+        "怎么保护", "如何保护", "怎么应对", "如何应对", "需要注意什么", "注意什么",
+        "避免", "习惯", "复查", "就诊前", "就诊后", "为什么", "原因", "好处",
+    )
+    return any(word in question for word in keywords)
+
+
+def lifestyle_guidance_answer(question: str, detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> str:
+    question = chat_content_to_text(question)
+    ctx_results = comparison if comparison else ([detection] if detection else [])
+    ok = successful_results([r for r in ctx_results if isinstance(r, dict)])
+    detected_classes: list[str] = []
+    for result in ok:
+        for box in result.get("boxes", []):
+            class_name = box.get("class_name")
+            if class_name and class_name not in detected_classes:
+                detected_classes.append(class_name)
+
+    lines = ["云端问答暂不可用，已切换为本地规则分析。", ""]
+    if any(word in question for word in ("为什么", "原因", "好处")):
+        lines.extend(
+            [
+                "保持良好口腔卫生的核心目的，是减少牙菌斑和食物残渣长期停留在牙面、牙缝和牙龈边缘，从而降低龋坏和牙龈问题继续发展的风险。",
+                "",
+                "- 早晚刷牙：可以清除牙面和牙龈边缘的牙菌斑，减少细菌持续产酸对牙齿硬组织的影响。",
+                "- 含氟牙膏：氟化物有助于增强牙釉质抗酸能力，并促进早期脱矿区域再矿化。",
+                "- 每次至少 2 分钟：时间太短容易漏刷牙齿内侧、咬合面和后牙区域，清洁不充分。",
+                "- 清洁各个牙面：龋坏和牙龈问题常出现在不易刷到的位置，只刷正面不够。",
+                "- 饭后漱口：可以减少食物残渣和酸性环境停留时间，但不能替代刷牙和牙线。",
+                "- 牙线或牙缝刷：牙刷很难进入牙缝，牙线可以帮助清除邻面残渣和菌斑。",
+                "",
+            ]
+        )
+    lines.append("结合当前检测结果，可以参考下面的复核和护理重点：")
+    if detected_classes:
+        lines.append(f"- 当前模型提示的疑似类别包括：{'、'.join(detected_classes)}。建议带着检测截图和原始影像尽快让口腔医生复核。")
+    else:
+        lines.append("- 当前没有可用于归纳疑似类别的成功检测结果，建议先完成检测或直接就医复核。")
+    lines.extend(
+        [
+            "- 保持口腔清洁：每天早晚刷牙，使用牙线或牙缝刷清洁牙缝，饭后可用清水漱口。",
+            "- 减少刺激：少吃高糖、过黏、过硬食物，避免频繁冷热刺激；如果咀嚼疼痛，先减少患侧咀嚼。",
+            "- 观察症状：记录疼痛、肿胀、出血、口臭、牙齿松动、冷热敏感等变化，便于复诊沟通。",
+            "- 不自行处理：不要自行挤压肿胀部位，不要随意服用或停用抗生素、止痛药，药物使用应听从医生建议。",
+            "- 及时复核：如果出现明显疼痛、面部肿胀、发热、流脓、张口受限或症状快速加重，应尽快到正规口腔科就诊。",
+            "",
+            DISCLAIMER,
+        ]
+    )
+    return "\n".join(lines)
+
+
 def local_rule_answer(question: str, detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> str:
-    question = question or ""
+    question = chat_content_to_text(question)
     ctx_results = comparison if comparison else ([detection] if detection else [])
     ok = successful_results([r for r in ctx_results if isinstance(r, dict)])
     lines = ["云端问答暂不可用，已切换为本地规则分析。"]
-    if not ok:
+    if is_treatment_question(question):
+        return safe_treatment_answer(question, detection, comparison)
+    elif is_lifestyle_question(question):
+        return lifestyle_guidance_answer(question, detection, comparison)
+    elif not ok:
         lines.append("当前没有成功的真实模型推理结果可用于分析。")
     elif "哪些" in question or "检测" in question or "区域" in question:
         for result in ok:
@@ -616,18 +826,20 @@ def local_rule_answer(question: str, detection: dict[str, Any] | None, compariso
 
 
 def cloud_chat(question: str, detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> tuple[str, bool]:
-    context = {
-        "current_detection": detection,
-        "model_comparison": comparison,
-        "rules": SAFE_TERMS,
-        "disclaimer": DISCLAIMER,
-    }
+    question = chat_content_to_text(question)
+    context = chat_context_payload(detection, comparison)
     messages = [
         {
             "role": "system",
             "content": (
-                "你是牙齿病变疑似区域辅助识别系统的展示助手。"
-                "只能基于给定 JSON 回答，不得编造。不得输出医疗结论或处置方案。"
+                "你是口腔影像辅助识别平台中的智能问答助手。"
+                "检测上下文 JSON 是患者当前辅助识别结果，回答时应优先结合这些上下文；"
+                "如果用户问的是通用口腔健康、护理习惯、原理解释、术语解释或报告描述，也要直接回答，"
+                "不要说自己只是展示助手、不能解释好处、不能回答健康知识。"
+                "不得编造检测结果；不要把疑似区域说成确诊。"
+                "若问题涉及治疗、用药、手术或处置，可以给出就诊沟通、复核重点、通用护理和风险提示，"
+                "但不要给出处方、剂量、手术决策或替代医生的个体化治疗方案。"
+                "请用自然、简洁、适合患者阅读的中文回答。"
             ),
         },
         {
@@ -637,16 +849,23 @@ def cloud_chat(question: str, detection: dict[str, Any] | None, comparison: list
     ]
     try:
         response = requests.post(
-            OLLAMA_BASE_URL,
-            headers={"Authorization": "Bearer " + OLLAMA_API_KEY},
-            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
-            timeout=OLLAMA_TIMEOUT_SECONDS,
+            DEEPSEEK_BASE_URL,
+            headers={
+                "Authorization": "Bearer " + DEEPSEEK_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"model": DEEPSEEK_MODEL, "messages": messages, "stream": False},
+            timeout=DEEPSEEK_TIMEOUT_SECONDS,
         )
         if response.status_code in {401, 403, 404} or response.status_code >= 500:
             return "", False
         response.raise_for_status()
         data = response.json()
-        content = data.get("message", {}).get("content")
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return "", False
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
         if not content or not isinstance(content, str):
             return "", False
         if DISCLAIMER not in content:
@@ -657,12 +876,31 @@ def cloud_chat(question: str, detection: dict[str, Any] | None, comparison: list
 
 
 def answer_question(message: str, history: list[Any], detection: dict[str, Any], comparison: list[dict[str, Any]]):
-    content, ok = cloud_chat(message, detection, comparison)
+    user_message = chat_content_to_text(message)
+    content, ok = cloud_chat(user_message, detection, comparison)
     if not ok:
-        content = local_rule_answer(message, detection, comparison)
+        content = local_rule_answer(user_message, detection, comparison)
     history = history or []
-    history.append((message, content))
-    return history, ""
+    normalized_history: list[dict[str, str]] = []
+    for item in history:
+        if isinstance(item, dict) and {"role", "content"} <= set(item):
+            normalized_history.append({"role": str(item["role"]), "content": chat_content_to_text(item["content"])})
+        elif hasattr(item, "role") and hasattr(item, "content"):
+            normalized_history.append({"role": str(item.role), "content": chat_content_to_text(item.content)})
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            normalized_history.extend(
+                [
+                    {"role": "user", "content": chat_content_to_text(item[0])},
+                    {"role": "assistant", "content": chat_content_to_text(item[1])},
+                ]
+            )
+    normalized_history.extend(
+        [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": content},
+        ]
+    )
+    return normalized_history, ""
 
 
 def make_report_markdown(detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> str:
@@ -823,6 +1061,44 @@ def dashboard_markdown() -> str:
     return "\n".join(lines)
 
 
+def dashboard_chart_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    stats = dashboard_stats()
+    kpi_rows = [
+        {"指标": "累计检测图片任务数", "数值": int(stats["image_tasks"])},
+        {"指标": "累计真实检测目标数", "数值": int(stats["target_count"])},
+        {"指标": "失败次数", "数值": int(stats["failure_count"])},
+        {"指标": "成功结果平均置信度(%)", "数值": round(float(stats["avg_confidence"]) * 100, 2)},
+    ]
+    risk_rows = [{"风险等级": key, "数量": int(value)} for key, value in stats["risk_counts"].items()]
+    time_rows = [
+        {"模型": name, "平均耗时(ms)": round(float(value), 2)}
+        for name, value in stats["times_by_model"].items()
+    ]
+    conf_rows = [
+        {"模型": name, "平均置信度(%)": round(float(value) * 100, 2)}
+        for name, value in stats["conf_by_model"].items()
+    ]
+    if not time_rows:
+        time_rows = [{"模型": "暂无成功推理", "平均耗时(ms)": 0.0}]
+    if not conf_rows:
+        conf_rows = [{"模型": "暂无成功推理", "平均置信度(%)": 0.0}]
+    return (
+        pd.DataFrame(kpi_rows),
+        pd.DataFrame(risk_rows),
+        pd.DataFrame(time_rows),
+        pd.DataFrame(conf_rows),
+    )
+
+
+def dashboard_outputs():
+    return (dashboard_markdown(), *dashboard_chart_data())
+
+
+def reset_dashboard_records():
+    clear_history()
+    return (*dashboard_outputs(), registry_status_markdown(), {}, [])
+
+
 def project_intro_markdown() -> str:
     return f"""
 # 牙齿病变目标区域识别与辅助分析平台
@@ -862,10 +1138,66 @@ def build_app() -> gr.Blocks:
         gr.Markdown("# 牙齿病变目标区域识别与辅助分析平台\n面向课程验收和科研展示的辅助识别系统。")
 
         with gr.Tab("首页 Dashboard"):
-            dashboard = gr.Markdown(dashboard_markdown())
+            dashboard_initial, kpi_initial, risk_initial, time_initial, conf_initial = dashboard_outputs()
+            dashboard = gr.Markdown(dashboard_initial)
+            with gr.Row():
+                kpi_chart = gr.BarPlot(
+                    kpi_initial,
+                    x="指标",
+                    y="数值",
+                    title="核心指标总览",
+                    y_title="数值",
+                    height=260,
+                    x_label_angle=-20,
+                )
+                risk_chart = gr.BarPlot(
+                    risk_initial,
+                    x="风险等级",
+                    y="数量",
+                    title="风险等级数量统计",
+                    y_title="数量",
+                    height=260,
+                )
+            with gr.Row():
+                time_chart = gr.BarPlot(
+                    time_initial,
+                    x="模型",
+                    y="平均耗时(ms)",
+                    title="模型平均推理耗时",
+                    y_title="ms",
+                    height=280,
+                    x_label_angle=-20,
+                )
+                conf_chart = gr.BarPlot(
+                    conf_initial,
+                    x="模型",
+                    y="平均置信度(%)",
+                    title="模型平均置信度",
+                    y_title="%",
+                    height=280,
+                    x_label_angle=-20,
+                )
             model_status = gr.Markdown(registry_status_markdown())
-            refresh_btn = gr.Button("刷新 Dashboard")
-            refresh_btn.click(lambda: (dashboard_markdown(), registry_status_markdown()), outputs=[dashboard, model_status])
+            with gr.Row():
+                refresh_btn = gr.Button("刷新 Dashboard")
+                clear_history_btn = gr.Button("清空所有记录，回到初始记录")
+            refresh_btn.click(
+                lambda: (*dashboard_outputs(), registry_status_markdown()),
+                outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status],
+            )
+            clear_history_btn.click(
+                reset_dashboard_records,
+                outputs=[
+                    dashboard,
+                    kpi_chart,
+                    risk_chart,
+                    time_chart,
+                    conf_chart,
+                    model_status,
+                    current_detection,
+                    current_comparison,
+                ],
+            )
 
         with gr.Tab("图像检测"):
             with gr.Row():
@@ -887,7 +1219,35 @@ def build_app() -> gr.Blocks:
             det_btn.click(
                 run_single_detection,
                 inputs=[det_image, det_model, det_conf, det_iou],
-                outputs=[det_output, det_table, det_explain, det_steps, current_detection, dashboard, model_status],
+                outputs=[
+                    det_output,
+                    det_table,
+                    det_explain,
+                    det_steps,
+                    current_detection,
+                    dashboard,
+                    kpi_chart,
+                    risk_chart,
+                    time_chart,
+                    conf_chart,
+                    model_status,
+                ],
+            )
+            det_image.clear(
+                reset_single_detection_outputs,
+                outputs=[
+                    det_output,
+                    det_table,
+                    det_explain,
+                    det_steps,
+                    current_detection,
+                    dashboard,
+                    kpi_chart,
+                    risk_chart,
+                    time_chart,
+                    conf_chart,
+                    model_status,
+                ],
             )
 
         with gr.Tab("多模型对比"):
@@ -920,7 +1280,37 @@ def build_app() -> gr.Blocks:
             cmp_btn.click(
                 run_model_comparison,
                 inputs=[cmp_image, cmp_conf, cmp_iou],
-                outputs=[cmp_img1, cmp_img2, cmp_img3, cmp_table, cmp_summary, current_comparison, dashboard, model_status],
+                outputs=[
+                    cmp_img1,
+                    cmp_img2,
+                    cmp_img3,
+                    cmp_table,
+                    cmp_summary,
+                    current_comparison,
+                    dashboard,
+                    kpi_chart,
+                    risk_chart,
+                    time_chart,
+                    conf_chart,
+                    model_status,
+                ],
+            )
+            cmp_image.clear(
+                reset_model_comparison_outputs,
+                outputs=[
+                    cmp_img1,
+                    cmp_img2,
+                    cmp_img3,
+                    cmp_table,
+                    cmp_summary,
+                    current_comparison,
+                    dashboard,
+                    kpi_chart,
+                    risk_chart,
+                    time_chart,
+                    conf_chart,
+                    model_status,
+                ],
             )
 
         with gr.Tab("智能问答助手"):

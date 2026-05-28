@@ -13,6 +13,7 @@ python app.py
 ## 主要功能
 
 - 首页 Dashboard：展示累计检测任务、真实检测目标数量、失败次数、模型平均耗时、平均置信度和最近检测摘要。
+- 首页 Dashboard：支持一键清空所有历史记录并恢复初始统计状态。
 - 图像检测：上传图像后选择模型，设置置信度阈值和 IoU 阈值，运行 YOLO CPU 推理。
 - 多模型对比：同一张图像一键运行三个模型，并展示对比表和自动总结。
 - 智能问答助手：基于当前检测结果 JSON 或多模型对比 JSON 回答问题。
@@ -23,7 +24,7 @@ python app.py
 
 系统会自动递归扫描当前项目中的 `.pt` 文件，优先使用 `results/**/weights/best.pt`，并结合目录名、README、args.yaml 和文件名关键词自动匹配三个模型：
 
-- 轻量级模型：优先匹配 `yolov8n+baseline`，如果没有该目录则使用现有 `yolov8n+baseline_e50`。
+- 均衡型基线模型：匹配 `results/yolov8n+baseline_e50/weights/best.pt`。
 - 高精度牙齿病变定位模型：匹配 `yolov8m+PIoU`。
 - 高召回轻量化牙齿病变检测模型：匹配 `yolov8n+SPDConv-neck-P4_cosLR`。
 

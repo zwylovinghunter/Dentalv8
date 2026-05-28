@@ -6,3 +6,4 @@ torch
 ultralytics
 numpy
 pyyaml
+pandas
