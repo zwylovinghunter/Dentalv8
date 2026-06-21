@@ -36,7 +36,14 @@ python app.py
 
 ## 智能问答说明
 
-演示版本使用代码内配置的 API Key，正式部署建议改为环境变量或密钥管理服务。README 不展示真实 Key。
+联网问答通过环境变量读取密钥，启动前请配置 `DEEPSEEK_API_KEY`；不要把真实密钥写入代码、提交到 Git 或上传至公开仓库。
+
+PowerShell 示例：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "你的密钥"
+python app.py
+```
 
 如果云端大模型接口不可用、网络异常、鉴权失败、模型不可用或响应字段缺失，系统会自动降级为本地规则问答，不影响检测、对比和报告功能。
 
