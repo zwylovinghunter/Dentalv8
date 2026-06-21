@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import socket
 import time
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 import gradio as gr
 import numpy as np
@@ -29,6 +32,7 @@ REPORT_DIR = OUTPUT_DIR / "reports"
 HISTORY_PATH = OUTPUT_DIR / "history.json"
 DEVICE = "cpu"
 DISCLAIMER = "本系统仅用于牙齿病变疑似区域的辅助识别与科研展示，不作为临床诊断依据，最终结果应由专业人员复核。"
+FULL_DISCLAIMER = "本系统仅用于牙齿病变疑似区域的辅助识别与科研展示，不作为临床诊断依据，最终结果应由专业口腔医生结合原始影像和其他临床资料进行复核。"
 STATUS_LABELS = {
     "success": "成功",
     "load_failed": "权重未加载",
@@ -40,6 +44,207 @@ MODEL_NOT_LOADED_MSG = "该模型权重未成功加载，请检查权重文件�
 MODEL_INFERENCE_FAILED_MSG = "该模型推理失败，请检查模型格式、类别配置或输入图像。"
 MODEL_UNAVAILABLE_MSG = "当前模型不可用，未生成检测结果。"
 SAFE_TERMS = "请仅使用“疑似区域”“辅助识别结果”“建议人工复核”等非医疗结论表述。"
+MODEL_USE_CASES = {
+    "lightweight": "作为默认对照基线，兼顾速度和基础检测效果。",
+    "high_precision": "强调定位精度和结果稳定性，适合精细辅助分析。",
+    "high_recall": "强调减少漏检，适合初筛和人工复核前的辅助提示。",
+}
+MODEL_RECOMMEND_SCENES = {
+    "lightweight": "速度优先、默认基线",
+    "high_precision": "精细定位优先",
+    "high_recall": "初筛和减少漏检优先",
+}
+CLASS_KNOWLEDGE = {
+    "Caries": {
+        "title": "Caries｜疑似龋坏区域",
+        "meaning": "模型在影像中发现可能与牙体硬组织缺损或龋坏相关的局部表现。",
+        "review": "建议结合原始影像、邻面关系、临床探诊和症状进行人工复核。",
+        "note": "低置信度结果可能来自影像重叠、金属修复体边缘或局部噪声。",
+    },
+    "Periapical_Lesion": {
+        "title": "Periapical Lesion｜疑似根尖周异常区域",
+        "meaning": "模型在牙根尖周围发现可能需要关注的局部影像异常。",
+        "review": "建议重点核对对应牙根、根尖周骨质表现、既往根管治疗史和临床症状。",
+        "note": "模型只能提示疑似影像区域，不能判断感染、炎症阶段或治疗方案。",
+    },
+    "Impacted": {
+        "title": "Impacted｜疑似阻生/埋伏牙区域",
+        "meaning": "模型在影像中发现可能与阻生牙、埋伏牙或异常萌出位置相关的区域。",
+        "review": "建议结合牙列位置、邻牙关系、萌出方向和全景片整体结构进行复核。",
+        "note": "重叠结构、拍摄角度和牙列拥挤可能影响模型定位。",
+    },
+}
+CLASS_ALIASES = {
+    "caries": "Caries",
+    "cavity": "Caries",
+    "periapical": "Periapical_Lesion",
+    "periapical_lesion": "Periapical_Lesion",
+    "impacted": "Impacted",
+}
+
+APP_CSS = """
+:root {
+  --orange: #f97316;
+  --orange-dark: #c2410c;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --panel: #ffffff;
+  --soft: #f8fafc;
+}
+.gradio-container {
+  background: linear-gradient(180deg, #fff7ed 0%, #f8fafc 240px, #f8fafc 100%);
+  color: var(--ink);
+}
+.app-hero {
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid rgba(249, 115, 22, 0.22);
+}
+.app-hero h1 {
+  margin: 0 0 6px;
+  font-size: 30px;
+  line-height: 1.2;
+}
+.app-hero p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+.section-note {
+  background: #ffffff;
+  border: 1px solid #fed7aa;
+  border-left: 5px solid var(--orange);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  margin: 10px 0 16px;
+}
+.metric-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+}
+.metric-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+.metric-value {
+  margin-top: 6px;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--orange-dark);
+}
+.metric-sub {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.result-cards {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+.result-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 78px;
+}
+.result-card b {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.result-card span {
+  display: block;
+  margin-top: 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.model-tag {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #9a3412;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.knowledge-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 10px 0 14px;
+}
+.knowledge-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+}
+.knowledge-card b {
+  display: block;
+  color: var(--orange-dark);
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+.knowledge-card span {
+  display: inline-block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.knowledge-card p {
+  margin: 6px 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.quality-grid, .fusion-legend {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+.quality-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+.quality-card b { display: block; color: var(--muted); font-size: 12px; }
+.quality-card span { display: block; margin-top: 5px; font-weight: 700; }
+.quality-ok { color: #15803d; }
+.quality-warn { color: #b45309; }
+.quality-bad { color: #b91c1c; }
+.fusion-legend { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.legend-high, .legend-low { border-radius: 8px; padding: 9px 11px; font-size: 13px; }
+.legend-high { background: #ecfdf5; border: 1px solid #86efac; color: #166534; }
+.legend-low { background: #fff1f2; border: 1px solid #fda4af; color: #9f1239; }
+.gradio-container button.primary, .gradio-container button[variant="primary"] {
+  background: var(--orange) !important;
+  border-color: var(--orange) !important;
+}
+@media (max-width: 1100px) {
+  .metric-grid, .result-cards, .knowledge-grid, .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .knowledge-grid { grid-template-columns: 1fr; }
+}
+"""
 
 
 @dataclass
@@ -219,16 +424,16 @@ def model_name_to_key(name: str) -> str:
 
 
 def registry_status_markdown() -> str:
-    lines = ["| 模型 | 类型 | 匹配状态 | 权重 |", "|---|---|---|---|"]
+    lines = ["| 模型名称 | 模型类型 | 匹配状态 | 权重路径或提示 | 适用说明 |", "|---|---|---|---|---|"]
     for spec in MODEL_SPECS:
         item = get_registry().get(spec.key, {})
-        weight = item.get("weight_rel") or "-"
+        weight = item.get("weight_rel") or "当前未检测到可用权重，请检查权重文件是否存在。"
         status = item.get("match_status", "未匹配权重")
         if item.get("load_status") == "loaded":
             status = "已加载"
         elif item.get("load_status") == "failed":
             status = "加载失败"
-        lines.append(f"| {spec.name} | {spec.model_type} | {status} | `{weight}` |")
+        lines.append(f"| {spec.name} | {spec.model_type} | {status} | `{weight}` | {MODEL_USE_CASES.get(spec.key, spec.description)} |")
     return "\n".join(lines)
 
 
@@ -327,40 +532,306 @@ def normalize_image(image: Any) -> Image.Image:
         raise ValueError("请先上传图像。")
     if isinstance(image, Image.Image):
         return image.convert("RGB")
+    if isinstance(image, (str, Path)):
+        return Image.open(image).convert("RGB")
+    if hasattr(image, "name") and image.name:
+        return Image.open(image.name).convert("RGB")
     return Image.fromarray(np.asarray(image)).convert("RGB")
 
 
-def draw_boxes(image: Image.Image, boxes: list[dict[str, Any]]) -> Image.Image:
+def image_quality_precheck(image: Any) -> str:
+    """Provide non-diagnostic acquisition-quality hints before model inference."""
+    if image is None:
+        return "<div class='section-note'>上传影像后将自动检查分辨率、亮度、对比度和清晰度；这不是医学诊断。</div>"
+    try:
+        pil_image = normalize_image(image)
+        rgb = np.asarray(pil_image, dtype=np.float32)
+        gray = rgb.mean(axis=2)
+        height, width = gray.shape
+        brightness = float(gray.mean())
+        contrast = float(gray.std())
+        dark_ratio = float((gray < 25).mean())
+        bright_ratio = float((gray > 230).mean())
+        # Mean squared finite differences is a dependency-free sharpness proxy.
+        gx = np.diff(gray, axis=1)
+        gy = np.diff(gray, axis=0)
+        sharpness = float((np.mean(gx * gx) + np.mean(gy * gy)) / 2)
+    except Exception as exc:
+        return f"<div class='section-note'>影像质量预检失败：{xml_escape(str(exc))}</div>"
+
+    issues: list[str] = []
+    if min(width, height) < 640:
+        issues.append("分辨率偏低，细小疑似区域可能难以稳定识别。")
+    if brightness < 60:
+        issues.append("整体偏暗，建议检查曝光或适当调整窗位后再分析。")
+    elif brightness > 195:
+        issues.append("整体偏亮，局部细节可能被淹没。")
+    if contrast < 28:
+        issues.append("对比度偏低，病变边界与背景可能不易区分。")
+    if sharpness < 45:
+        issues.append("图像边缘信息偏弱，可能存在模糊、缩放或压缩影响。")
+    if dark_ratio > 0.45 or bright_ratio > 0.45:
+        issues.append("极暗或极亮像素占比过高，建议确认影像显示范围。")
+
+    status = "适合辅助分析" if not issues else ("建议优化后再分析" if len(issues) >= 2 else "可分析，但建议注意")
+    status_class = "quality-ok" if not issues else ("quality-bad" if len(issues) >= 2 else "quality-warn")
+    suggestions = "影像基础质量正常，仍请结合原始影像和专业复核判断。" if not issues else "；".join(issues)
+    return "\n".join(
+        [
+            "<div class='quality-grid'>",
+            f"<div class='quality-card'><b>预检结论</b><span class='{status_class}'>{status}</span></div>",
+            f"<div class='quality-card'><b>分辨率</b><span>{width} × {height}</span></div>",
+            f"<div class='quality-card'><b>亮度 / 对比度</b><span>{brightness:.0f} / {contrast:.1f}</span></div>",
+            f"<div class='quality-card'><b>清晰度指标</b><span>{sharpness:.1f}</span></div>",
+            "</div>",
+            f"<div class='section-note'><b>预检提示：</b>{suggestions}</div>",
+        ]
+    )
+
+
+def threshold_hint(conf: float, iou: float) -> str:
+    if conf <= 0.2:
+        mode = "高召回倾向：更容易保留低置信度疑似区域，也会带来更多人工复核负担。"
+    elif conf >= 0.45:
+        mode = "高精度倾向：结果更保守，可能遗漏低置信度疑似区域。"
+    else:
+        mode = "均衡倾向：在检出数量和结果保守程度之间折中。"
+    return f"当前阈值：置信度 {float(conf):.2f}，IoU {float(iou):.2f}。{mode}"
+
+
+def apply_threshold_preset(preset: str) -> tuple[float, float, str]:
+    presets = {
+        "高召回初筛（0.15 / 0.55）": (0.15, 0.55),
+        "均衡推荐（0.25 / 0.70）": (0.25, 0.70),
+        "高精度复核（0.50 / 0.60）": (0.50, 0.60),
+    }
+    conf, iou = presets.get(preset, (0.25, 0.70))
+    return conf, iou, threshold_hint(conf, iou)
+
+
+def normalize_class_name(class_name: str) -> str:
+    normalized = str(class_name or "").strip()
+    if normalized in CLASS_KNOWLEDGE:
+        return normalized
+    return CLASS_ALIASES.get(normalized.lower().replace(" ", "_"), normalized)
+
+
+def box_color(box: dict[str, Any], idx: int, color_mode: str) -> tuple[int, int, int]:
+    palette = [(255, 80, 80), (80, 180, 255), (80, 220, 130), (255, 190, 80)]
+    class_palette = {
+        "Caries": (239, 68, 68),
+        "Periapical_Lesion": (59, 130, 246),
+        "Impacted": (16, 185, 129),
+    }
+    if color_mode == "按类别配色":
+        return class_palette.get(normalize_class_name(box.get("class_name", "")), palette[idx % len(palette)])
+    if color_mode == "按置信度配色":
+        confidence = float(box.get("confidence", 0.0))
+        if confidence >= 0.75:
+            return (22, 163, 74)
+        if confidence >= 0.45:
+            return (245, 158, 11)
+        return (220, 38, 38)
+    return palette[idx % len(palette)]
+
+
+def draw_boxes(
+    image: Image.Image,
+    boxes: list[dict[str, Any]],
+    show_label: bool = True,
+    show_confidence: bool = True,
+    line_width: int = 3,
+    color_mode: str = "按目标编号配色",
+) -> Image.Image:
     out = image.copy().convert("RGB")
     draw = ImageDraw.Draw(out)
     font = ImageFont.load_default()
-    colors = [(255, 80, 80), (80, 180, 255), (80, 220, 130), (255, 190, 80)]
+    line_width = max(1, int(line_width or 3))
     for idx, box in enumerate(boxes):
         x1, y1, x2, y2 = box["bbox_xyxy"]
-        color = colors[idx % len(colors)]
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-        label = f"{idx + 1}. {box['class_name']} {box['confidence']:.2f}"
-        tw = max(80, len(label) * 7)
-        draw.rectangle([x1, max(0, y1 - 18), x1 + tw, y1], fill=color)
-        draw.text((x1 + 3, max(0, y1 - 16)), label, fill=(0, 0, 0), font=font)
+        color = box_color(box, idx, color_mode)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+        label_parts = [f"{idx + 1}."]
+        if show_label:
+            label_parts.append(str(box["class_name"]))
+        if show_confidence:
+            label_parts.append(f"{box['confidence']:.2f}")
+        label = " ".join(label_parts).strip()
+        if label and (show_label or show_confidence):
+            tw = max(48, len(label) * 7)
+            th = 18
+            draw.rectangle([x1, max(0, y1 - th), x1 + tw, y1], fill=color)
+            draw.text((x1 + 3, max(0, y1 - th + 2)), label, fill=(0, 0, 0), font=font)
     return out
 
 
 def result_to_box_rows(result: dict[str, Any]) -> list[list[Any]]:
     rows = []
     for i, box in enumerate(result.get("boxes", []), 1):
+        x1, y1, x2, y2 = box["bbox_xyxy"]
         rows.append(
             [
                 i,
                 box["class_name"],
                 round(box["confidence"], 4),
-                box["bbox_xyxy"],
-                f"{box['area_ratio']:.2%}",
+                x1,
+                y1,
+                x2,
+                y2,
                 box["risk_level"],
                 box["review_suggestion"],
             ]
         )
     return rows
+
+
+def overall_review_level(result: dict[str, Any]) -> str:
+    if result.get("status") != "success":
+        return "无法评估"
+    levels = [b.get("risk_level") for b in result.get("boxes", [])]
+    if "强烈建议人工复核" in levels:
+        return "强烈建议人工复核"
+    if "建议人工复核" in levels:
+        return "建议人工复核"
+    if levels:
+        return "常规人工复核"
+    return "当前阈值下无疑似区域"
+
+
+def status_text(result: dict[str, Any]) -> str:
+    return STATUS_LABELS.get(result.get("status"), str(result.get("status", "-")))
+
+
+def detection_summary_cards(result: dict[str, Any] | None) -> str:
+    if not result:
+        values = [
+            ("使用模型", "-"),
+            ("推理状态", "等待检测"),
+            ("检测框数量", "-"),
+            ("平均置信度", "-"),
+            ("最高置信度", "-"),
+            ("推理耗时", "-"),
+        ]
+    else:
+        success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
+        values = [
+            ("使用模型", result.get("model_name", "-")),
+            ("推理状态", status_text(result)),
+            ("检测框数量", str(result.get("box_count", 0) if success else 0)),
+            ("平均置信度", f"{result.get('avg_confidence', 0):.3f}" if success and result.get("box_count") else "-"),
+            ("最高置信度", f"{result.get('max_confidence', 0):.3f}" if success and result.get("box_count") else "-"),
+            ("复核建议等级", overall_review_level(result)),
+        ]
+    cards = ["<div class='result-cards'>"]
+    for label, value in values:
+        cards.append(f"<div class='result-card'><b>{label}</b><span>{value}</span></div>")
+    cards.append("</div>")
+    if result and result.get("status") == "success":
+        cards.append(f"<div class='section-note'>推理耗时：{result.get('inference_time_ms', 0):.2f} ms。所有结果仅表示疑似区域，建议人工复核。</div>")
+    return "\n".join(cards)
+
+
+def crop_detection_regions(image: Any, result: dict[str, Any] | None, limit: int = 6) -> list[tuple[Image.Image, str]]:
+    if not result or not result.get("boxes"):
+        return []
+    try:
+        pil_image = normalize_image(image)
+    except Exception:
+        return []
+    crops: list[tuple[Image.Image, str]] = []
+    width, height = pil_image.size
+    for idx, box in enumerate(result.get("boxes", [])[:limit], 1):
+        x1, y1, x2, y2 = box.get("bbox_xyxy", [0, 0, 0, 0])
+        pad = max(8, int(max(x2 - x1, y2 - y1) * 0.08))
+        left = max(0, int(x1) - pad)
+        top = max(0, int(y1) - pad)
+        right = min(width, int(x2) + pad)
+        bottom = min(height, int(y2) + pad)
+        if right <= left or bottom <= top:
+            continue
+        caption = f"区域 {idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0)):.3f}｜{box.get('risk_level', '-')}"
+        crops.append((pil_image.crop((left, top, right, bottom)), caption))
+    return crops
+
+
+def crop_notice(result: dict[str, Any] | None) -> str:
+    if not result or result.get("status") != "success":
+        return "等待检测后展示疑似区域局部放大。"
+    if not result.get("boxes"):
+        return "当前阈值下未检测到疑似区域，可适当降低置信度阈值后再次尝试。"
+    return "最多展示前 6 个疑似区域局部放大图，便于答辩时说明人工复核重点。"
+
+
+def region_choices(result: dict[str, Any] | None) -> list[str]:
+    if not result or not result.get("boxes"):
+        return []
+    return [
+        f"区域 {idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0)):.3f}"
+        for idx, box in enumerate(result["boxes"], 1)
+    ]
+
+
+def render_linked_region_view(image: Any, result: dict[str, Any] | None, selected_region: str | None) -> tuple[Image.Image | None, Image.Image | None, str]:
+    """Render matching original/result crops for a selected structured detection row."""
+    if image is None or not result or not result.get("boxes"):
+        return None, None, "运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。"
+    try:
+        index = max(0, int(str(selected_region or "区域 1").split("｜", 1)[0].replace("区域", "").strip()) - 1)
+        box = result["boxes"][index]
+        original = normalize_image(image)
+        annotated = draw_boxes(
+            original,
+            result["boxes"],
+            bool(result.get("visual_options", {}).get("show_label", True)),
+            bool(result.get("visual_options", {}).get("show_confidence", True)),
+            int(result.get("visual_options", {}).get("line_width", 3)),
+            str(result.get("visual_options", {}).get("color_mode", "按目标编号配色")),
+        )
+        x1, y1, x2, y2 = box["bbox_xyxy"]
+        pad = max(25, int(max(x2 - x1, y2 - y1) * 0.35))
+        left, top = max(0, int(x1) - pad), max(0, int(y1) - pad)
+        right, bottom = min(original.width, int(x2) + pad), min(original.height, int(y2) + pad)
+        note = f"已联动定位区域 {index + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。左侧保留原始细节，右侧显示同一位置的模型框。"
+        return original.crop((left, top, right, bottom)), annotated.crop((left, top, right, bottom)), note
+    except Exception as exc:
+        return None, None, f"无法定位所选区域：{exc}"
+
+
+def class_knowledge_cards(result: dict[str, Any] | None) -> str:
+    if not result or result.get("status") != "success":
+        return "<div class='section-note'>等待检测后展示已检出类别的说明与复核知识卡片。</div>"
+    boxes = result.get("boxes", [])
+    if not boxes:
+        return "<div class='section-note'>当前阈值下未检出疑似区域，暂无可展示的类别知识卡片。</div>"
+    detected = []
+    for box in boxes:
+        class_name = normalize_class_name(box.get("class_name", ""))
+        if class_name and class_name not in detected:
+            detected.append(class_name)
+    cards = ["<div class='knowledge-grid'>"]
+    for class_name in detected:
+        info = CLASS_KNOWLEDGE.get(
+            class_name,
+            {
+                "title": f"{class_name}｜模型类别说明",
+                "meaning": "模型输出的自定义类别，请结合训练集定义理解其含义。",
+                "review": "建议结合原始影像、检测框位置和专业人员经验进行复核。",
+                "note": "该类别暂无内置医学说明，系统仅展示辅助识别结果。",
+            },
+        )
+        count = sum(1 for box in boxes if normalize_class_name(box.get("class_name", "")) == class_name)
+        cards.append(
+            "<div class='knowledge-card'>"
+            f"<b>{info['title']}</b>"
+            f"<span>本次检出：{count} 个疑似区域</span>"
+            f"<p><strong>模型含义：</strong>{info['meaning']}</p>"
+            f"<p><strong>复核重点：</strong>{info['review']}</p>"
+            f"<p><strong>注意：</strong>{info['note']}</p>"
+            "</div>"
+        )
+    cards.append("</div>")
+    cards.append(f"<div class='section-note'>{DISCLAIMER}</div>")
+    return "\n".join(cards)
 
 
 def steps_to_rows(result: dict[str, Any]) -> list[list[Any]]:
@@ -396,7 +867,16 @@ def explanation_markdown(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_detection_core(image: Any, model_key: str, conf: float, iou: float) -> tuple[dict[str, Any], Image.Image | None]:
+def run_detection_core(
+    image: Any,
+    model_key: str,
+    conf: float,
+    iou: float,
+    show_label: bool = True,
+    show_confidence: bool = True,
+    line_width: int = 3,
+    color_mode: str = "按目标编号配色",
+) -> tuple[dict[str, Any], Image.Image | None]:
     process_steps: list[dict[str, Any]] = []
     total_start = time.perf_counter()
 
@@ -463,7 +943,7 @@ def run_detection_core(image: Any, model_key: str, conf: float, iou: float) -> t
     finish_step(process_steps, "NMS 后处理", step, message=f"保留 {len(boxes)} 个疑似区域。")
 
     step = start_step(process_steps, "结果渲染")
-    rendered = draw_boxes(pil_image, boxes)
+    rendered = draw_boxes(pil_image, boxes, show_label, show_confidence, line_width, color_mode)
     finish_step(process_steps, "结果渲染", step, message="已绘制真实检测框。")
 
     step = start_step(process_steps, "结果解释生成")
@@ -505,31 +985,51 @@ def record_detection_history(result: dict[str, Any], task_kind: str) -> dict[str
     return append_history(event)
 
 
-def run_single_detection(image: Any, model_name: str, conf: float, iou: float):
+def run_single_detection(image: Any, model_name: str, conf: float, iou: float, show_label: bool, show_confidence: bool, line_width: int, color_mode: str):
     model_key = model_name_to_key(model_name)
-    result, rendered = run_detection_core(image, model_key, conf, iou)
+    result, rendered = run_detection_core(image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+    result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
+    result["visual_options"] = {
+        "show_label": bool(show_label),
+        "show_confidence": bool(show_confidence),
+        "line_width": int(line_width),
+        "color_mode": color_mode,
+    }
     record_detection_history(result, "single_detection")
     image_out = rendered if rendered is not None else None
+    choices = region_choices(result)
     return (
         image_out,
+        detection_summary_cards(result),
         result_to_box_rows(result),
         explanation_markdown(result),
+        class_knowledge_cards(result),
+        crop_detection_regions(image, result),
+        crop_notice(result),
         steps_to_rows(result),
         result,
+        gr.Dropdown(choices=choices, value=choices[0] if choices else None),
         *dashboard_outputs(),
         registry_status_markdown(),
+        history_rows(),
     )
 
 
 def reset_single_detection_outputs():
     return (
         None,
+        detection_summary_cards(None),
         [],
         "等待检测。",
+        class_knowledge_cards(None),
+        [],
+        "等待检测后展示疑似区域局部放大。",
         [],
         {},
+        gr.Dropdown(choices=[], value=None),
         *dashboard_outputs(),
         registry_status_markdown(),
+        history_rows(),
     )
 
 
@@ -579,30 +1079,189 @@ def compare_rows(results: list[dict[str, Any]]) -> list[list[Any]]:
                 f"{result['max_confidence']:.3f}" if success and result["box_count"] else "-",
                 f"{result['inference_time_ms']:.2f}" if success else "-",
                 len(result.get("review_suggestions", [])) if success else 0,
-                next(s.description for s in MODEL_SPECS if s.key == result["model_key"]),
+                MODEL_RECOMMEND_SCENES.get(result.get("model_key", ""), "-"),
                 result.get("error_message", ""),
             ]
         )
     return rows
 
 
-def run_model_comparison(image: Any, conf: float, iou: float):
+def bbox_iou(box_a: list[float], box_b: list[float]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union else 0.0
+
+
+def analyze_model_consistency(results: list[dict[str, Any]], iou_threshold: float = 0.35) -> list[dict[str, Any]]:
+    detections: list[dict[str, Any]] = []
+    for result in successful_results(results):
+        for box in result.get("boxes", []):
+            detections.append(
+                {
+                    "model": result["model_name"],
+                    "confidence": box["confidence"],
+                    "bbox": box["bbox_xyxy"],
+                    "class_name": box.get("class_name", "-"),
+                }
+            )
+    groups: list[list[dict[str, Any]]] = []
+    for det in detections:
+        target_group = None
+        for group in groups:
+            if any(
+                det["class_name"] == item["class_name"] and bbox_iou(det["bbox"], item["bbox"]) >= iou_threshold
+                for item in group
+            ):
+                target_group = group
+                break
+        if target_group is None:
+            groups.append([det])
+        else:
+            target_group.append(det)
+    rows = []
+    for idx, group in enumerate(groups, 1):
+        models = sorted({item["model"] for item in group})
+        confs = [float(item["confidence"]) for item in group]
+        high = len(models) >= 2
+        rows.append(
+            {
+                "区域编号": idx,
+                "涉及模型": "、".join(models),
+                "最高置信度": max(confs) if confs else 0.0,
+                "平均置信度": sum(confs) / len(confs) if confs else 0.0,
+                "一致性等级": "高一致性疑似区域" if high else "低一致性疑似区域",
+                "复核建议": "多个模型在相近位置检测到疑似区域，建议人工重点复核。" if high else "仅单个模型检测到，建议结合原始影像人工判断。",
+                "类别": group[0].get("class_name", "-"),
+                "融合框": [
+                    min(item["bbox"][0] for item in group),
+                    min(item["bbox"][1] for item in group),
+                    max(item["bbox"][2] for item in group),
+                    max(item["bbox"][3] for item in group),
+                ],
+            }
+        )
+    return rows
+
+
+def consistency_rows(results: list[dict[str, Any]]) -> list[list[Any]]:
+    if not results:
+        return []
+    return [
+        [
+            item["区域编号"],
+            item["涉及模型"],
+            f"{item['最高置信度']:.3f}",
+            f"{item['平均置信度']:.3f}",
+            item["一致性等级"],
+            item["复核建议"],
+        ]
+        for item in analyze_model_consistency(results)
+    ]
+
+
+def render_fusion_view(image: Any, results: list[dict[str, Any]] | None, filter_mode: str = "全部区域") -> tuple[Image.Image | None, list[list[Any]], str]:
+    """Overlay consensus groups so users can review model agreement spatially."""
+    if image is None or not results:
+        return None, [], "等待多模型对比完成后生成融合视图。"
+    try:
+        out = normalize_image(image).copy()
+    except Exception as exc:
+        return None, [], f"融合视图无法读取原图：{exc}"
+    all_groups = analyze_model_consistency(results)
+    if filter_mode == "仅高一致性区域":
+        groups = [item for item in all_groups if item["一致性等级"] == "高一致性疑似区域"]
+    elif filter_mode == "仅低一致性区域":
+        groups = [item for item in all_groups if item["一致性等级"] == "低一致性疑似区域"]
+    else:
+        groups = all_groups
+    draw = ImageDraw.Draw(out)
+    font = ImageFont.load_default()
+    rows: list[list[Any]] = []
+    for item in groups:
+        x1, y1, x2, y2 = item["融合框"]
+        high = item["一致性等级"] == "高一致性疑似区域"
+        color = (22, 163, 74) if high else (225, 29, 72)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
+        label = f"F{item['区域编号']} {'一致' if high else '待复核'}"
+        draw.rectangle([x1, max(0, y1 - 18), x1 + max(70, len(label) * 7), y1], fill=color)
+        draw.text((x1 + 3, max(0, y1 - 16)), label, fill=(0, 0, 0), font=font)
+        rows.append(
+            [
+                item["区域编号"],
+                item["类别"],
+                item["涉及模型"],
+                f"{item['最高置信度']:.3f}",
+                item["一致性等级"],
+                item["复核建议"],
+            ]
+        )
+    high_count = sum(1 for item in all_groups if item["一致性等级"] == "高一致性疑似区域")
+    low_count = len(all_groups) - high_count
+    message = (
+        "<div class='fusion-legend'><div class='legend-high'>绿色：至少两个模型在同类别、相近位置检出（高一致性）。</div>"
+        "<div class='legend-low'>红色：仅单模型检出（低一致性，建议结合原图复核）。</div></div>"
+        f"<div class='section-note'>融合区域共 {len(all_groups)} 个：高一致性 {high_count} 个，低一致性 {low_count} 个。"
+        "融合仅用于呈现模型间空间一致性，不代表诊断结论。</div>"
+    )
+    return out, rows, message
+
+
+def system_recommendation(results: list[dict[str, Any]]) -> str:
+    ok = successful_results(results)
+    if not ok:
+        return f"### 系统推荐结论\n\n当前没有成功的真实推理结果，无法生成模型推荐。\n\n{DISCLAIMER}"
+    high_rows = [row for row in analyze_model_consistency(results) if row["一致性等级"] == "高一致性疑似区域"]
+    lines = [
+        "### 系统推荐结论",
+        "- 速度优先：推荐均衡型基线模型。",
+        "- 精细定位优先：推荐高精度牙齿病变定位模型。",
+        "- 初筛和减少漏检优先：推荐高召回牙齿病变检测模型。",
+    ]
+    if high_rows:
+        lines.append("- 当前存在多模型相近检测区域，疑似区域稳定性较高，建议人工重点复核。")
+    else:
+        lines.append("- 当前不同模型结果差异较明显，建议结合原始影像人工判断。")
+    lines.extend(["", DISCLAIMER])
+    return "\n".join(lines)
+
+
+def run_model_comparison(image: Any, conf: float, iou: float, show_label: bool, show_confidence: bool, line_width: int, color_mode: str):
     results = []
     rendered_images = []
     for spec in MODEL_SPECS:
-        result, rendered = run_detection_core(image, spec.key, conf, iou)
+        result, rendered = run_detection_core(image, spec.key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
+        result["visual_options"] = {
+            "show_label": bool(show_label),
+            "show_confidence": bool(show_confidence),
+            "line_width": int(line_width),
+            "color_mode": color_mode,
+        }
         results.append(result)
         rendered_images.append(rendered)
     append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
+    summary = compare_summary(results) + "\n\n" + system_recommendation(results)
+    fusion_image, fusion_rows, fusion_note = render_fusion_view(image, results)
     return (
         rendered_images[0],
         rendered_images[1],
         rendered_images[2],
         compare_rows(results),
-        compare_summary(results),
+        consistency_rows(results),
+        summary,
         results,
+        fusion_image,
+        fusion_rows,
+        fusion_note,
         *dashboard_outputs(),
         registry_status_markdown(),
+        history_rows(),
     )
 
 
@@ -612,10 +1271,209 @@ def reset_model_comparison_outputs():
         None,
         None,
         [],
+        [],
         "等待对比。",
         [],
+        None,
+        [],
+        "等待多模型对比完成后生成融合视图。",
         *dashboard_outputs(),
         registry_status_markdown(),
+        history_rows(),
+    )
+
+
+def threshold_sensitivity_explanation() -> str:
+    return (
+        "阈值低时更容易发现疑似区域，但误检可能增加；阈值高时结果更保守，"
+        "但可能漏掉低置信度疑似区域。默认阈值仅作为科研演示参考，最终仍需人工复核。"
+    )
+
+
+def run_threshold_sensitivity(image: Any, model_name: str, iou: float):
+    if image is None:
+        return [], pd.DataFrame([{"置信度阈值": "请先上传图片", "检测框数量": 0}]), "请先上传图片后再运行阈值敏感性分析。"
+    model_key = model_name_to_key(model_name)
+    rows = []
+    for conf in [0.15, 0.25, 0.35, 0.50]:
+        result, _ = run_detection_core(image, model_key, conf, iou)
+        success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
+        if success:
+            if result.get("box_count", 0) >= 1:
+                explain = "该阈值下检出疑似区域，建议结合局部图和原始影像人工复核。"
+            else:
+                explain = "该阈值下未检出疑似区域，可作为保守筛查结果参考。"
+        else:
+            explain = result.get("error_message") or "模型未能完成推理。"
+        rows.append(
+            [
+                f"{conf:.2f}",
+                int(result.get("box_count", 0)) if success else 0,
+                f"{result.get('avg_confidence', 0):.3f}" if success and result.get("box_count") else "-",
+                f"{result.get('max_confidence', 0):.3f}" if success and result.get("box_count") else "-",
+                f"{result.get('inference_time_ms', 0):.2f}" if success else "-",
+                explain,
+            ]
+        )
+    chart_df = pd.DataFrame([{"置信度阈值": row[0], "检测框数量": row[1]} for row in rows])
+    return rows, chart_df, threshold_sensitivity_explanation()
+
+
+def image_display_name(file_obj: Any, fallback: str) -> str:
+    if hasattr(file_obj, "orig_name") and file_obj.orig_name:
+        return str(file_obj.orig_name)
+    if hasattr(file_obj, "name") and file_obj.name:
+        return Path(str(file_obj.name)).name
+    if isinstance(file_obj, (str, Path)):
+        return Path(file_obj).name
+    return fallback
+
+
+def batch_result_row(item: dict[str, Any]) -> list[Any]:
+    result = item.get("result", {})
+    success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
+    return [
+        item.get("image_name", "-"),
+        status_text(result),
+        result.get("box_count", 0) if success else 0,
+        f"{result.get('avg_confidence', 0):.3f}" if success and result.get("box_count") else "-",
+        f"{result.get('max_confidence', 0):.3f}" if success and result.get("box_count") else "-",
+        f"{result.get('inference_time_ms', 0):.2f}" if success else "-",
+        overall_review_level(result),
+        result.get("error_message", ""),
+    ]
+
+
+def batch_summary_markdown(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "尚未运行批量检测。"
+    success_items = [item for item in items if item.get("result", {}).get("status") == "success" and item.get("result", {}).get("runtime_mode") == "real_yolo_cpu"]
+    failed = len(items) - len(success_items)
+    total_boxes = sum(int(item["result"].get("box_count", 0)) for item in success_items)
+    confs = [float(item["result"].get("avg_confidence", 0.0)) for item in success_items if item["result"].get("box_count")]
+    review_images = sum(1 for item in success_items if overall_review_level(item["result"]) in {"建议人工复核", "强烈建议人工复核"})
+    return "\n".join(
+        [
+            "### 批量检测总结",
+            f"- 共处理图片：{len(items)} 张",
+            f"- 成功：{len(success_items)} 张",
+            f"- 失败：{failed} 张",
+            f"- 总检测框数量：{total_boxes}",
+            f"- 平均置信度：{sum(confs) / len(confs):.3f}" if confs else "- 平均置信度：-",
+            f"- 建议重点复核图片数量：{review_images} 张",
+            "",
+            DISCLAIMER,
+        ]
+    )
+
+
+def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    if not items:
+        return None, None
+    ensure_dirs()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = REPORT_DIR / f"batch_detection_{ts}.csv"
+    md_path = REPORT_DIR / f"batch_detection_{ts}.md"
+    df = pd.DataFrame(
+        [batch_result_row(item) for item in items],
+        columns=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
+    )
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    md_table = [
+        "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 |",
+        "|---|---|---:|---:|---:|---:|---|---|",
+    ]
+    for row in df.astype(str).values.tolist():
+        md_table.append("| " + " | ".join(row) + " |")
+    lines = [
+        "# 批量牙齿病变疑似区域辅助识别报告",
+        "",
+        f"- 报告生成时间：{now_iso()}",
+        "- 运行设备：CPU",
+        "",
+        batch_summary_markdown(items),
+        "",
+        "## 批量检测汇总表",
+        "\n".join(md_table),
+        "",
+        "## 免责声明",
+        FULL_DISCLAIMER,
+    ]
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(md_path), str(csv_path)
+
+
+def run_batch_detection(files: list[Any] | None, model_name: str, conf: float, iou: float, show_label: bool, show_confidence: bool, line_width: int, color_mode: str):
+    if not files:
+        return [], [], "请先上传一张或多张图片。", None, None, [], *dashboard_outputs(), registry_status_markdown(), history_rows()
+    model_key = model_name_to_key(model_name)
+    items: list[dict[str, Any]] = []
+    preview: list[tuple[Image.Image, str]] = []
+    for idx, file_obj in enumerate(files, 1):
+        image_name = image_display_name(file_obj, f"图片{idx}")
+        result, rendered = run_detection_core(file_obj, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
+        result["visual_options"] = {
+            "show_label": bool(show_label),
+            "show_confidence": bool(show_confidence),
+            "line_width": int(line_width),
+            "color_mode": color_mode,
+        }
+        result["image_name"] = image_name
+        item = {"image_name": image_name, "result": result}
+        items.append(item)
+        if rendered is not None and len(preview) < 6:
+            preview.append((rendered, f"{image_name}｜{status_text(result)}｜疑似区域 {result.get('box_count', 0)} 个"))
+    append_history({"type": "batch_detection", "created_at": now_iso(), "items": items})
+    md_path, csv_path = export_batch_report(items)
+    rows = [batch_result_row(item) for item in items]
+    return rows, preview, batch_summary_markdown(items), md_path, csv_path, items, *dashboard_outputs(), registry_status_markdown(), history_rows()
+
+
+def history_event_rows(events: list[dict[str, Any]]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+
+    def add_result(event: dict[str, Any], task_type: str, image_name: str, result: dict[str, Any]) -> None:
+        rows.append(
+            [
+                event.get("created_at", result.get("created_at", "-")),
+                task_type,
+                image_name,
+                result.get("model_name", "-"),
+                result.get("box_count", 0),
+                f"{result.get('avg_confidence', 0):.3f}" if result.get("box_count") else "-",
+                f"{result.get('max_confidence', 0):.3f}" if result.get("box_count") else "-",
+                f"{result.get('inference_time_ms', 0):.2f}",
+                overall_review_level(result),
+            ]
+        )
+
+    for event in events:
+        if event.get("type") == "single_detection":
+            add_result(event, "单模型检测", event.get("image_name", "单图检测图片"), event.get("result", {}))
+        elif event.get("type") == "model_comparison":
+            for result in event.get("results", []):
+                add_result(event, "多模型对比", event.get("image_name", "对比图片"), result)
+        elif event.get("type") == "batch_detection":
+            for item in event.get("items", []):
+                add_result(event, "批量检测", item.get("image_name", "-"), item.get("result", {}))
+    return rows[-300:]
+
+
+def history_rows() -> list[list[Any]]:
+    return history_event_rows(load_history().get("events", []))
+
+
+def clear_all_records():
+    clear_history()
+    return (
+        *dashboard_outputs(),
+        registry_status_markdown(),
+        {},
+        [],
+        [],
+        [],
+        "暂无检测历史，请先上传图片并运行检测。",
     )
 
 
@@ -803,6 +1661,14 @@ def local_rule_answer(question: str, detection: dict[str, Any] | None, compariso
         return safe_treatment_answer(question, detection, comparison)
     elif is_lifestyle_question(question):
         return lifestyle_guidance_answer(question, detection, comparison)
+    elif "临床诊断" in question or "诊断" in question:
+        lines.append("不能。本系统输出的是模型辅助识别到的疑似区域，只能作为科研演示和人工复核提示，不能作为临床诊断依据。涉及诊断和治疗时，应咨询专业口腔医生。")
+    elif "置信度" in question:
+        lines.append("置信度表示模型对某个疑似区域分类和定位结果的相对把握程度。置信度较低不代表一定没有问题，置信度较高也不代表可以直接下结论，仍需结合原始影像人工复核。")
+    elif "阈值" in question:
+        lines.append("置信度阈值越低，系统越容易保留疑似区域，但误检可能增加；阈值越高，结果越保守，但可能漏掉低置信度疑似区域。IoU 阈值影响重叠检测框的筛选。")
+    elif "为什么不同模型" in question or "数量不同" in question:
+        lines.append("不同模型的结构、训练目标和权重不同，对同一影像的敏感程度也不同，因此检测框数量和位置可能存在差异。多模型一致区域更适合作为人工重点复核对象。")
     elif not ok:
         lines.append("当前没有成功的真实模型推理结果可用于分析。")
     elif "哪些" in question or "检测" in question or "区域" in question:
@@ -817,7 +1683,9 @@ def local_rule_answer(question: str, detection: dict[str, Any] | None, compariso
     elif "哪个模型" in question or "适合" in question or "对比" in question:
         lines.append(compare_summary(ok).replace("### 多模型对比总结\n\n", ""))
     elif "报告" in question:
-        lines.append("可在报告中心生成 Markdown 报告，内容会包含模型、疑似区域明细、耗时和人工复核建议。")
+        lines.append("可在报告中心选择单图检测报告、多模型对比报告、批量检测报告或综合报告。报告会包含模型、阈值参数、疑似区域明细、对比表、一致性分析和人工复核建议。")
+    elif "限制" in question or "局限" in question:
+        lines.append("系统限制包括：默认 CPU 推理速度有限；权重缺失时无法推理；低质量影像会影响检测效果；模型输出只能代表疑似区域，最终仍需专业口腔医生复核。")
     else:
         lines.append("请围绕当前检测结果、复核建议、模型对比或报告描述提问。")
     lines.append("")
@@ -836,7 +1704,7 @@ def cloud_chat(question: str, detection: dict[str, Any] | None, comparison: list
                 "检测上下文 JSON 是患者当前辅助识别结果，回答时应优先结合这些上下文；"
                 "如果用户问的是通用口腔健康、护理习惯、原理解释、术语解释或报告描述，也要直接回答，"
                 "不要说自己只是展示助手、不能解释好处、不能回答健康知识。"
-                "不得编造检测结果；不要把疑似区域说成确诊。"
+                "不得编造检测结果；不要把疑似区域说成明确疾病结论。"
                 "若问题涉及治疗、用药、手术或处置，可以给出就诊沟通、复核重点、通用护理和风险提示，"
                 "但不要给出处方、剂量、手术决策或替代医生的个体化治疗方案。"
                 "请用自然、简洁、适合患者阅读的中文回答。"
@@ -884,69 +1752,100 @@ def answer_question(message: str, history: list[Any], detection: dict[str, Any],
     normalized_history: list[dict[str, str]] = []
     for item in history:
         if isinstance(item, dict) and {"role", "content"} <= set(item):
-            normalized_history.append({"role": str(item["role"]), "content": chat_content_to_text(item["content"])})
+            role = "assistant" if item.get("role") == "assistant" else "user"
+            normalized_history.append({"role": role, "content": chat_content_to_text(item["content"])})
         elif hasattr(item, "role") and hasattr(item, "content"):
-            normalized_history.append({"role": str(item.role), "content": chat_content_to_text(item.content)})
+            role = "assistant" if item.role == "assistant" else "user"
+            normalized_history.append({"role": role, "content": chat_content_to_text(item.content)})
         elif isinstance(item, (list, tuple)) and len(item) == 2:
-            normalized_history.extend(
-                [
-                    {"role": "user", "content": chat_content_to_text(item[0])},
-                    {"role": "assistant", "content": chat_content_to_text(item[1])},
-                ]
-            )
-    normalized_history.extend(
-        [
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": content},
-        ]
-    )
+            user_text = chat_content_to_text(item[0])
+            assistant_text = chat_content_to_text(item[1])
+            if user_text:
+                normalized_history.append({"role": "user", "content": user_text})
+            if assistant_text:
+                normalized_history.append({"role": "assistant", "content": assistant_text})
+    if user_message:
+        normalized_history.append({"role": "user", "content": user_message})
+    normalized_history.append({"role": "assistant", "content": content})
     return normalized_history, ""
 
 
-def make_report_markdown(detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None) -> str:
+def answer_quick_question(question: str, history: list[Any], detection: dict[str, Any], comparison: list[dict[str, Any]]):
+    return answer_question(question, history, detection, comparison)
+
+
+def make_report_markdown(
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None = None,
+    report_type: str = "综合报告",
+) -> str:
     lines = [
         "# 牙齿病变疑似区域辅助识别报告",
         "",
-        f"- 检测时间：{now_iso()}",
+        f"- 报告生成时间：{now_iso()}",
         "- 项目名称：牙齿病变目标区域识别与辅助分析平台",
         "- 运行设备：CPU",
+        f"- 报告类型：{report_type}",
         "",
     ]
-    if detection:
+    include_detection = report_type in {"单图检测报告", "综合报告"} and detection
+    include_comparison = report_type in {"多模型对比报告", "综合报告"} and comparison
+    include_batch = report_type in {"批量检测报告", "综合报告"} and batch_items
+    if include_detection:
         lines.extend(
             [
                 "## 当前检测结果",
                 f"- 使用模型：{detection.get('model_name', '-')}",
                 f"- 模型运行模式：{detection.get('runtime_mode', '-')}",
                 f"- 推理状态：{STATUS_LABELS.get(detection.get('status'), '-')}",
+                f"- 阈值参数：conf={detection.get('thresholds', {}).get('conf', '-')}, IoU={detection.get('thresholds', {}).get('iou', '-')}",
                 f"- 图像信息：{detection.get('image_info', {})}",
                 f"- 疑似区域数量：{detection.get('box_count', 0)}",
                 f"- 推理耗时：{detection.get('inference_time_ms', 0)} ms",
                 "",
                 "### 检测目标明细",
-                "| 序号 | 类别 | 置信度 | 坐标 | 面积占比 | 风险等级 | 复核建议 |",
-                "|---:|---|---:|---|---:|---|---|",
+                "| 编号 | 类别 | 置信度 | 坐标x1 | 坐标y1 | 坐标x2 | 坐标y2 | 风险等级 | 复核建议 |",
+                "|---:|---|---:|---:|---:|---:|---:|---|---|",
             ]
         )
         for i, box in enumerate(detection.get("boxes", []), 1):
+            x1, y1, x2, y2 = box["bbox_xyxy"]
             lines.append(
-                f"| {i} | {box['class_name']} | {box['confidence']:.3f} | {box['bbox_xyxy']} | "
-                f"{box['area_ratio']:.2%} | {box['risk_level']} | {box['review_suggestion']} |"
+                f"| {i} | {box['class_name']} | {box['confidence']:.3f} | {x1} | {y1} | {x2} | {y2} | {box['risk_level']} | {box['review_suggestion']} |"
             )
         if not detection.get("boxes"):
-            lines.append("| - | - | - | - | - | - | 未生成检测目标 |")
+            lines.append("| - | - | - | - | - | - | - | - | 当前阈值下未检测到疑似区域 |")
         lines.append("")
-    if comparison:
+    if include_comparison:
         lines.extend(
             [
                 "## 多模型对比结果",
-                "| 模型 | 类型 | 状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时(ms) |",
-                "|---|---|---|---:|---:|---:|---:|",
+                "| 模型 | 类型 | 状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时(ms) | 复核建议数量 | 推荐使用场景 | 失败原因 |",
+                "|---|---|---|---:|---:|---:|---:|---:|---|---|",
             ]
         )
         for row in compare_rows(comparison):
-            lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} | {row[5]} | {row[6]} |")
-        lines.extend(["", compare_summary(comparison), ""])
+            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+        lines.extend(["", "### 一致性分析", "| 区域编号 | 涉及模型 | 最高置信度 | 平均置信度 | 一致性等级 | 复核建议 |", "|---:|---|---:|---:|---|---|"])
+        c_rows = consistency_rows(comparison)
+        if c_rows:
+            for row in c_rows:
+                lines.append("| " + " | ".join(str(v) for v in row) + " |")
+        else:
+            lines.append("| - | - | - | - | - | 当前没有可分析的一致性区域 |")
+        lines.extend(["", compare_summary(comparison), system_recommendation(comparison), ""])
+    if include_batch:
+        lines.extend(["## 批量检测摘要", batch_summary_markdown(batch_items), "", "### 批量检测表格"])
+        lines.extend(
+            [
+                "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 |",
+                "|---|---|---:|---:|---:|---:|---|---|",
+            ]
+        )
+        for item in batch_items:
+            lines.append("| " + " | ".join(str(v) for v in batch_result_row(item)) + " |")
+        lines.append("")
     lines.extend(
         [
             "## 系统自动分析",
@@ -956,25 +1855,160 @@ def make_report_markdown(detection: dict[str, Any] | None, comparison: list[dict
             "建议由专业人员结合原始影像和其他资料对疑似区域进行复核。",
             "",
             "## 免责声明",
-            DISCLAIMER,
+            FULL_DISCLAIMER,
         ]
     )
     return "\n".join(lines)
 
 
-def generate_report(detection: dict[str, Any], comparison: list[dict[str, Any]]):
+def load_report_font(size: int = 16) -> ImageFont.ImageFont:
+    candidates = [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+    ]
+    for path in candidates:
+        try:
+            if Path(path).exists():
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def wrap_text_for_pdf(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    if not text:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        trial = current + char
+        try:
+            width = font.getlength(trial)
+        except Exception:
+            width = len(trial) * 8
+        if width <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = char
+    if current:
+        lines.append(current)
+    return lines
+
+
+def export_report_pdf(markdown: str, path: Path) -> str:
     ensure_dirs()
-    markdown = make_report_markdown(detection, comparison)
-    filename = f"dental_aux_report_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.md"
-    path = REPORT_DIR / filename
-    path.write_text(markdown, encoding="utf-8")
-    return markdown, str(path)
+    width, height = 1240, 1754
+    margin = 72
+    line_height = 28
+    title_font = load_report_font(24)
+    body_font = load_report_font(17)
+    pages: list[Image.Image] = []
+    page = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(page)
+    y = margin
+
+    def new_page() -> None:
+        nonlocal page, draw, y
+        pages.append(page)
+        page = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(page)
+        y = margin
+
+    for raw_line in markdown.splitlines():
+        stripped = raw_line.strip()
+        is_heading = stripped.startswith("#")
+        font = title_font if is_heading else body_font
+        clean_line = stripped.lstrip("#").strip() if is_heading else raw_line
+        clean_line = clean_line.replace("|", "  ")
+        for line in wrap_text_for_pdf(clean_line, font, width - margin * 2):
+            if y + line_height > height - margin:
+                new_page()
+            draw.text((margin, y), line, fill=(31, 41, 55), font=font)
+            y += line_height + (8 if is_heading else 0)
+        if not clean_line:
+            y += 10
+    pages.append(page)
+    first, rest = pages[0], pages[1:]
+    first.save(path, "PDF", resolution=150.0, save_all=True, append_images=rest)
+    return str(path)
+
+
+def docx_paragraph_xml(line: str) -> str:
+    style = ""
+    text = line
+    if line.startswith("#"):
+        level = min(3, len(line) - len(line.lstrip("#")))
+        style = f'<w:pPr><w:pStyle w:val="Heading{level}"/></w:pPr>'
+        text = line.lstrip("#").strip()
+    return f"<w:p>{style}<w:r><w:t xml:space=\"preserve\">{xml_escape(text)}</w:t></w:r></w:p>"
+
+
+def export_report_docx(markdown: str, path: Path) -> str:
+    ensure_dirs()
+    paragraphs = "\n".join(docx_paragraph_xml(line) for line in markdown.splitlines())
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+    document_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"""
+    styles = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
+</w:styles>"""
+    document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>{paragraphs}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body>
+</w:document>"""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as docx:
+        docx.writestr("[Content_Types].xml", content_types)
+        docx.writestr("_rels/.rels", rels)
+        docx.writestr("word/_rels/document.xml.rels", document_rels)
+        docx.writestr("word/document.xml", document)
+        docx.writestr("word/styles.xml", styles)
+    return str(path)
+
+
+def generate_report(report_type: str, detection: dict[str, Any], comparison: list[dict[str, Any]], batch_items: list[dict[str, Any]]):
+    ensure_dirs()
+    has_detection = bool(detection)
+    has_comparison = bool(comparison)
+    has_batch = bool(batch_items)
+    if report_type == "单图检测报告" and not has_detection:
+        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", None, None, None
+    if report_type == "多模型对比报告" and not has_comparison:
+        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", None, None, None
+    if report_type == "批量检测报告" and not has_batch:
+        return "当前暂无可生成报告的检测结果，请先完成批量检测。", None, None, None
+    if report_type == "综合报告" and not any([has_detection, has_comparison, has_batch]):
+        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", None, None, None
+    markdown = make_report_markdown(detection, comparison, batch_items, report_type)
+    stem = f"dental_aux_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    md_path = REPORT_DIR / f"{stem}.md"
+    pdf_path = REPORT_DIR / f"{stem}.pdf"
+    docx_path = REPORT_DIR / f"{stem}.docx"
+    md_path.write_text(markdown, encoding="utf-8")
+    export_report_pdf(markdown, pdf_path)
+    export_report_docx(markdown, docx_path)
+    return markdown, str(md_path), str(pdf_path), str(docx_path)
 
 
 def dashboard_stats() -> dict[str, Any]:
     history = load_history()
     events = history.get("events", [])
-    image_tasks = len([e for e in events if e.get("type") in {"single_detection", "model_comparison"}])
+    image_tasks = 0
     failure_count = 0
     target_count = 0
     confs = []
@@ -983,6 +2017,7 @@ def dashboard_stats() -> dict[str, Any]:
     risk_counts = {"可信度较高": 0, "建议人工复核": 0, "强烈建议人工复核": 0}
     last_detection = None
     last_comparison = None
+    last_batch = None
 
     def visit(result: dict[str, Any]) -> None:
         nonlocal failure_count, target_count, last_detection
@@ -1002,11 +2037,18 @@ def dashboard_stats() -> dict[str, Any]:
 
     for event in events:
         if event.get("type") == "single_detection":
+            image_tasks += 1
             visit(event.get("result", {}))
         elif event.get("type") == "model_comparison":
+            image_tasks += 1
             last_comparison = event.get("results", [])
             for result in event.get("results", []):
                 visit(result)
+        elif event.get("type") == "batch_detection":
+            last_batch = event.get("items", [])
+            image_tasks += len(event.get("items", []))
+            for item in event.get("items", []):
+                visit(item.get("result", {}))
 
     return {
         "image_tasks": image_tasks,
@@ -1016,20 +2058,26 @@ def dashboard_stats() -> dict[str, Any]:
         "times_by_model": {k: sum(v) / len(v) for k, v in times_by_model.items() if v},
         "conf_by_model": {k: sum(v) / len(v) for k, v in conf_by_model.items() if v},
         "risk_counts": risk_counts,
+        "high_review_count": risk_counts.get("建议人工复核", 0) + risk_counts.get("强烈建议人工复核", 0),
         "last_detection": last_detection,
         "last_comparison": last_comparison,
+        "last_batch": last_batch,
     }
 
 
 def dashboard_markdown() -> str:
     stats = dashboard_stats()
+    avg_conf = f"{stats['avg_confidence']:.3f}" if stats["avg_confidence"] else "-"
     lines = [
-        "## 首页 Dashboard",
-        f"- 当前运行设备：CPU",
-        f"- 累计检测图片任务数：{stats['image_tasks']}",
-        f"- 累计真实检测目标数：{stats['target_count']}",
-        f"- 失败次数：{stats['failure_count']}",
-        f"- 成功结果平均置信度：{stats['avg_confidence']:.3f}" if stats["avg_confidence"] else "- 成功结果平均置信度：-",
+        "<div class='section-note'><b>首页 Dashboard</b><br>集中展示检测任务统计、风险等级分布、模型权重状态和最近一次辅助识别结果。</div>",
+        "<div class='metric-grid'>",
+        f"<div class='metric-card'><div class='metric-label'>累计检测任务数</div><div class='metric-value'>{stats['image_tasks']}</div><div class='metric-sub'>单图、多模型、批量图片合计</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>累计检测框数量</div><div class='metric-value'>{stats['target_count']}</div><div class='metric-sub'>真实 YOLO 输出疑似区域</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>失败次数</div><div class='metric-value'>{stats['failure_count']}</div><div class='metric-sub'>权重或推理失败</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>平均置信度</div><div class='metric-value'>{avg_conf}</div><div class='metric-sub'>仅统计成功结果</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>建议重点复核数量</div><div class='metric-value'>{stats['high_review_count']}</div><div class='metric-sub'>建议人工复核及以上</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>当前运行设备</div><div class='metric-value'>{DEVICE.upper()}</div><div class='metric-sub'>默认 CPU 推理</div></div>",
+        "</div>",
         "",
         "### 三个模型平均推理耗时",
     ]
@@ -1103,7 +2151,9 @@ def project_intro_markdown() -> str:
     return f"""
 # 牙齿病变目标区域识别与辅助分析平台
 
-本系统用于课程验收、科研展示和牙齿病变疑似区域辅助识别。系统会自动扫描当前仓库已有 YOLO 权重，并在 CPU 环境下运行真实推理。
+## 系统简介
+
+本系统面向口腔影像中的牙齿病变疑似区域辅助识别，围绕“图片上传、YOLO 检测、多模型对比、人工复核建议、报告导出”构建科研演示闭环。
 
 ## 使用方式
 
@@ -1111,21 +2161,56 @@ def project_intro_markdown() -> str:
 python app.py
 ```
 
-## 权重发现
+## 功能模块说明
 
-系统会递归扫描当前项目中的 `.pt` 文件，优先使用 `results/**/weights/best.pt`，并结合目录名、README、args.yaml 和关键词自动匹配三个展示模型。
+- 首页 Dashboard：展示检测任务统计、风险等级、模型耗时、平均置信度和权重状态。
+- 图像检测：单张影像上传、模型选择、阈值调整、检测结果图、结构化表和局部放大。
+- 多模型对比：同一影像运行三个 YOLO 模型，展示差异和一致性分析。
+- 批量检测：多张影像逐张 CPU 推理，生成汇总表和批量报告。
+- 结果解释助手：围绕当前检测结果、多模型对比和报告内容进行安全问答。
+- 报告中心：生成单图、多模型、批量或综合 Markdown 报告。
 
-## 云端问答
+## YOLO 检测流程
 
-演示版本使用代码内配置的 API Key，正式部署建议改为环境变量或密钥管理服务。没有大模型接口、接口不可用或网络异常时，会自动降级为本地规则问答。
+上传影像后，系统会进行 RGB 预处理，加载自动匹配到的真实 YOLO 权重，在 CPU 上完成推理，再进行后处理、检测框绘制、结构化结果整理和复核建议生成。权重缺失或推理失败时，系统只显示失败原因，不生成替代检测框。
+
+## 模型类别说明
+
+- 均衡型基线模型：作为默认对照基线，兼顾速度和基础检测效果。
+- 高精度牙齿病变定位模型：强调定位精度和结果稳定性，适合精细辅助分析。
+- 高召回牙齿病变检测模型：强调减少漏检，适合初筛和人工复核前的辅助提示。
+
+## 多模型对比设计
+
+多模型对比用于观察不同 YOLO 模型在同一影像上的检测差异。系统会根据不同模型检测框之间的 IoU 分析相近疑似区域，并标记高一致性或低一致性结果。
+
+## 阈值敏感性分析说明
+
+阈值敏感性分析使用同一模型、同一影像，在多个置信度阈值下重复真实推理，用于观察阈值变化对检测框数量的影响。阈值低时更容易发现疑似区域，阈值高时结果更保守。
+
+## 批量检测说明
+
+批量检测支持一次上传多张影像，系统会逐张运行 YOLO CPU 推理，输出汇总表、预览图和 Markdown/CSV 报告。为避免页面负担过重，页面只预览前几张结果图。
+
+## 智能问答助手说明
+
+结果解释助手可围绕检测结果、置信度、阈值、多模型差异、报告生成方式和系统限制进行回答。云端接口不可用时，系统会切换为本地规则回答。
+
+## 报告生成说明
+
+报告中心支持单图检测报告、多模型对比报告、批量检测报告和综合报告。报告会记录时间、模型、阈值、检测表格、一致性分析、批量摘要、自动分析和人工复核建议。
 
 ## CPU 推理说明
 
-所有 YOLO 推理显式使用 CPU，不要求 GPU。
+所有 YOLO 推理默认使用 CPU，不要求 GPU。CPU 环境下推理速度取决于图片大小、模型大小和批量图片数量。
 
-## 免责声明
+## 权重自动发现逻辑
 
-{DISCLAIMER}
+系统会递归扫描当前项目中的 `.pt` 文件，优先使用 `results/**/weights/best.pt`，并结合目录名、README、args.yaml 和关键词自动匹配三个展示模型。
+
+## 使用限制和免责声明
+
+{FULL_DISCLAIMER}
 """
 
 
@@ -1134,201 +2219,256 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(title="牙齿病变目标区域识别与辅助分析平台") as demo:
         current_detection = gr.State({})
         current_comparison = gr.State([])
+        current_batch = gr.State([])
 
-        gr.Markdown("# 牙齿病变目标区域识别与辅助分析平台\n面向课程验收和科研展示的辅助识别系统。")
+        gr.HTML(
+            """
+            <div class="app-hero">
+              <h1>牙齿病变目标区域识别与辅助分析平台</h1>
+              <p>面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。</p>
+            </div>
+            """
+        )
 
+        dashboard_initial, kpi_initial, risk_initial, time_initial, conf_initial = dashboard_outputs()
         with gr.Tab("首页 Dashboard"):
-            dashboard_initial, kpi_initial, risk_initial, time_initial, conf_initial = dashboard_outputs()
             dashboard = gr.Markdown(dashboard_initial)
             with gr.Row():
-                kpi_chart = gr.BarPlot(
-                    kpi_initial,
-                    x="指标",
-                    y="数值",
-                    title="核心指标总览",
-                    y_title="数值",
-                    height=260,
-                    x_label_angle=-20,
-                )
-                risk_chart = gr.BarPlot(
-                    risk_initial,
-                    x="风险等级",
-                    y="数量",
-                    title="风险等级数量统计",
-                    y_title="数量",
-                    height=260,
-                )
+                refresh_btn = gr.Button("刷新 Dashboard", variant="primary")
+                clear_history_btn = gr.Button("清空历史记录")
             with gr.Row():
-                time_chart = gr.BarPlot(
-                    time_initial,
-                    x="模型",
-                    y="平均耗时(ms)",
-                    title="模型平均推理耗时",
-                    y_title="ms",
-                    height=280,
-                    x_label_angle=-20,
-                )
-                conf_chart = gr.BarPlot(
-                    conf_initial,
-                    x="模型",
-                    y="平均置信度(%)",
-                    title="模型平均置信度",
-                    y_title="%",
-                    height=280,
-                    x_label_angle=-20,
-                )
+                kpi_chart = gr.BarPlot(kpi_initial, x="指标", y="数值", title="核心指标总览", y_title="数值", height=260, x_label_angle=-20)
+                risk_chart = gr.BarPlot(risk_initial, x="风险等级", y="数量", title="风险等级数量统计", y_title="数量", height=260)
+            with gr.Row():
+                time_chart = gr.BarPlot(time_initial, x="模型", y="平均耗时(ms)", title="模型平均推理耗时", y_title="ms", height=280, x_label_angle=-20)
+                conf_chart = gr.BarPlot(conf_initial, x="模型", y="平均置信度(%)", title="模型平均置信度", y_title="%", height=280)
             model_status = gr.Markdown(registry_status_markdown())
-            with gr.Row():
-                refresh_btn = gr.Button("刷新 Dashboard")
-                clear_history_btn = gr.Button("清空所有记录，回到初始记录")
-            refresh_btn.click(
-                lambda: (*dashboard_outputs(), registry_status_markdown()),
-                outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status],
-            )
-            clear_history_btn.click(
-                reset_dashboard_records,
-                outputs=[
-                    dashboard,
-                    kpi_chart,
-                    risk_chart,
-                    time_chart,
-                    conf_chart,
-                    model_status,
-                    current_detection,
-                    current_comparison,
-                ],
-            )
+            history_notice = gr.Markdown("暂无检测历史，请先上传图片并运行检测。" if not history_rows() else "以下为最近检测历史。")
 
         with gr.Tab("图像检测"):
+            gr.HTML("<div class='section-note'><b>图像检测</b><br>按步骤完成单张口腔影像上传、模型选择、阈值设置、真实 YOLO 推理和人工复核建议查看。</div>")
             with gr.Row():
                 with gr.Column(scale=1):
+                    gr.Markdown("### 第 1 步：上传口腔或牙齿影像")
                     det_image = gr.Image(type="pil", label="上传牙齿或口腔图像")
+                    gr.Markdown("建议上传清晰的口腔全景片或牙齿相关影像。本系统仅用于科研演示和辅助识别。")
+                    det_quality = gr.HTML(image_quality_precheck(None), label="影像质量预检")
+                    gr.Markdown("### 第 2 步：选择模型和阈值")
                     det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
+                    det_preset = gr.Radio(
+                        ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.70）", "高精度复核（0.50 / 0.60）"],
+                        value="均衡推荐（0.25 / 0.70）",
+                        label="阈值预设",
+                    )
                     det_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
                     det_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-                    det_btn = gr.Button("运行检测", variant="primary")
+                    det_threshold_hint = gr.Markdown(threshold_hint(0.25, 0.70))
+                    with gr.Accordion("检测框可视化选项", open=False):
+                        det_show_label = gr.Checkbox(value=True, label="显示类别名称")
+                        det_show_conf = gr.Checkbox(value=True, label="显示置信度")
+                        det_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
+                        det_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                    det_btn = gr.Button("运行单模型检测", variant="primary")
                 with gr.Column(scale=2):
-                    det_output = gr.Image(type="pil", label="检测结果图")
-                    det_explain = gr.Markdown("等待检测。")
+                    gr.Markdown("### 第 3 步：查看检测结果和复核建议")
+                    det_summary = gr.HTML(detection_summary_cards(None))
+                    with gr.Row():
+                        det_output = gr.Image(type="pil", label="检测结果图")
+                        det_explain = gr.Markdown("等待检测。")
             det_table = gr.Dataframe(
-                headers=["序号", "类别", "置信度", "坐标", "面积占比", "风险等级", "复核建议"],
+                headers=["编号", "类别", "置信度", "坐标 x1", "坐标 y1", "坐标 x2", "坐标 y2", "风险等级", "复核建议"],
                 label="结构化检测结果",
                 wrap=True,
             )
+            det_knowledge = gr.HTML(class_knowledge_cards(None))
+            det_crop_notice = gr.Markdown("等待检测后展示疑似区域局部放大。")
+            det_crops = gr.Gallery(label="疑似区域局部放大", columns=3, height=360)
+            with gr.Accordion("原图—结果图联动放大镜", open=False):
+                gr.Markdown("选择一个结构化检测区域，左侧显示原图局部，右侧显示同一位置的模型标注，方便逐个复核。")
+                det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True)
+                with gr.Row():
+                    det_region_original = gr.Image(type="pil", label="原图局部放大")
+                    det_region_annotated = gr.Image(type="pil", label="结果图同位置放大")
+                det_region_note = gr.Markdown("运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。")
             det_steps = gr.Dataframe(headers=["步骤", "状态", "耗时(ms)", "说明"], label="检测过程可视化", wrap=True)
-            det_btn.click(
-                run_single_detection,
-                inputs=[det_image, det_model, det_conf, det_iou],
-                outputs=[
-                    det_output,
-                    det_table,
-                    det_explain,
-                    det_steps,
-                    current_detection,
-                    dashboard,
-                    kpi_chart,
-                    risk_chart,
-                    time_chart,
-                    conf_chart,
-                    model_status,
-                ],
-            )
-            det_image.clear(
-                reset_single_detection_outputs,
-                outputs=[
-                    det_output,
-                    det_table,
-                    det_explain,
-                    det_steps,
-                    current_detection,
-                    dashboard,
-                    kpi_chart,
-                    risk_chart,
-                    time_chart,
-                    conf_chart,
-                    model_status,
-                ],
-            )
+            with gr.Accordion("阈值敏感性分析", open=False):
+                gr.Markdown("使用同一模型、同一图片，在多个置信度阈值下运行真实推理，观察检测框数量变化。")
+                threshold_btn = gr.Button("运行阈值敏感性分析")
+                threshold_table = gr.Dataframe(
+                    headers=["置信度阈值", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "结果解释"],
+                    label="阈值敏感性分析表",
+                    wrap=True,
+                )
+                threshold_chart = gr.BarPlot(pd.DataFrame([{"置信度阈值": "等待分析", "检测框数量": 0}]), x="置信度阈值", y="检测框数量", title="不同置信度阈值下检测框数量变化", y_title="检测框数量", height=260)
+                threshold_explain = gr.Markdown("等待阈值敏感性分析。")
 
         with gr.Tab("多模型对比"):
+            gr.HTML("<div class='section-note'><b>多模型对比</b><br>多模型对比用于观察不同 YOLO 模型在同一影像上的检测差异，辅助判断疑似区域的稳定性。</div>")
             cmp_image = gr.Image(type="pil", label="上传同一张图像")
             with gr.Row():
                 cmp_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
                 cmp_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+            with gr.Accordion("检测框可视化选项", open=False):
+                with gr.Row():
+                    cmp_show_label = gr.Checkbox(value=True, label="显示类别名称")
+                    cmp_show_conf = gr.Checkbox(value=True, label="显示置信度")
+                    cmp_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
+                    cmp_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
             cmp_btn = gr.Button("一键运行三个模型", variant="primary")
             with gr.Row():
-                cmp_img1 = gr.Image(type="pil", label="均衡型基线模型")
-                cmp_img2 = gr.Image(type="pil", label="高精度牙齿病变定位模型")
-                cmp_img3 = gr.Image(type="pil", label="高召回牙齿病变检测模型")
+                with gr.Column():
+                    gr.HTML("<div class='model-tag'>均衡型基线模型：速度优先、默认基线</div>")
+                    cmp_img1 = gr.Image(type="pil", label="均衡型基线模型")
+                with gr.Column():
+                    gr.HTML("<div class='model-tag'>高精度牙齿病变定位模型：定位稳定性优先</div>")
+                    cmp_img2 = gr.Image(type="pil", label="高精度牙齿病变定位模型")
+                with gr.Column():
+                    gr.HTML("<div class='model-tag'>高召回牙齿病变检测模型：减少漏检优先</div>")
+                    cmp_img3 = gr.Image(type="pil", label="高召回牙齿病变检测模型")
             cmp_table = gr.Dataframe(
-                headers=[
-                    "模型名称",
-                    "模型类型",
-                    "推理状态",
-                    "检测框数量",
-                    "平均置信度",
-                    "最高置信度",
-                    "推理耗时(ms)",
-                    "复核建议数量",
-                    "模型特点说明",
-                    "失败原因",
-                ],
+                headers=["模型名称", "模型类型", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议数量", "推荐使用场景", "失败原因"],
                 label="多模型对比表",
                 wrap=True,
             )
-            cmp_summary = gr.Markdown("等待对比。")
-            cmp_btn.click(
-                run_model_comparison,
-                inputs=[cmp_image, cmp_conf, cmp_iou],
-                outputs=[
-                    cmp_img1,
-                    cmp_img2,
-                    cmp_img3,
-                    cmp_table,
-                    cmp_summary,
-                    current_comparison,
-                    dashboard,
-                    kpi_chart,
-                    risk_chart,
-                    time_chart,
-                    conf_chart,
-                    model_status,
-                ],
+            consistency_table = gr.Dataframe(
+                headers=["区域编号", "涉及模型", "最高置信度", "平均置信度", "一致性等级", "复核建议"],
+                label="多模型一致性分析",
+                wrap=True,
             )
-            cmp_image.clear(
-                reset_model_comparison_outputs,
-                outputs=[
-                    cmp_img1,
-                    cmp_img2,
-                    cmp_img3,
-                    cmp_table,
-                    cmp_summary,
-                    current_comparison,
-                    dashboard,
-                    kpi_chart,
-                    risk_chart,
-                    time_chart,
-                    conf_chart,
-                    model_status,
-                ],
+            cmp_summary = gr.Markdown("等待对比。")
+            with gr.Accordion("多模型融合视图", open=True):
+                gr.Markdown("绿色表示至少两个模型在相近位置检出同一类别；红色表示仅单模型检出。可用筛选器聚焦复核重点。")
+                fusion_filter = gr.Radio(["全部区域", "仅高一致性区域", "仅低一致性区域"], value="全部区域", label="融合区域筛选")
+                with gr.Row():
+                    fusion_image = gr.Image(type="pil", label="多模型融合叠加图")
+                    fusion_note = gr.HTML("等待多模型对比完成后生成融合视图。")
+                fusion_table = gr.Dataframe(
+                    headers=["融合区域", "类别", "涉及模型", "最高置信度", "一致性等级", "复核建议"],
+                    label="融合区域明细",
+                    wrap=True,
+                )
+
+        with gr.Tab("批量检测"):
+            gr.HTML("<div class='section-note'><b>批量检测</b><br>一次上传多张图片，系统逐张运行 YOLO CPU 推理，并生成批量汇总表和报告。</div>")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    batch_files = gr.File(label="上传多张图片", file_count="multiple", file_types=["image"])
+                    batch_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
+                    batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
+                    batch_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                    with gr.Accordion("检测框可视化选项", open=False):
+                        batch_show_label = gr.Checkbox(value=True, label="显示类别名称")
+                        batch_show_conf = gr.Checkbox(value=True, label="显示置信度")
+                        batch_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
+                        batch_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                    batch_btn = gr.Button("开始批量检测", variant="primary")
+                with gr.Column(scale=2):
+                    batch_preview = gr.Gallery(label="批量检测结果预览（最多前 6 张）", columns=3, height=360)
+                    batch_summary = gr.Markdown("尚未运行批量检测。")
+            batch_table = gr.Dataframe(
+                headers=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
+                label="批量检测汇总表",
+                wrap=True,
+            )
+            with gr.Row():
+                batch_md_file = gr.File(label="下载批量 Markdown 报告")
+                batch_csv_file = gr.File(label="下载批量 CSV 报告")
+
+        with gr.Tab("历史记录"):
+            gr.HTML("<div class='section-note'><b>历史记录</b><br>记录单模型检测、多模型对比和批量检测任务，Dashboard 统计优先基于这些历史记录计算。</div>")
+            with gr.Row():
+                refresh_history_btn = gr.Button("刷新历史记录", variant="primary")
+                clear_history_page_btn = gr.Button("清空历史记录")
+            history_table = gr.Dataframe(
+                value=history_rows(),
+                headers=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级"],
+                label="检测历史",
+                wrap=True,
             )
 
-        with gr.Tab("智能问答助手"):
-            gr.Markdown("可围绕当前检测结果或多模型对比结果提问。")
-            chatbot = gr.Chatbot(label="智能问答助手")
-            chat_input = gr.Textbox(label="问题", placeholder="例如：哪些目标需要人工复核？")
-            chat_btn = gr.Button("发送")
-            chat_btn.click(answer_question, inputs=[chat_input, chatbot, current_detection, current_comparison], outputs=[chatbot, chat_input])
-            chat_input.submit(answer_question, inputs=[chat_input, chatbot, current_detection, current_comparison], outputs=[chatbot, chat_input])
+        with gr.Tab("结果解释助手"):
+            gr.HTML("<div class='section-note'><b>结果解释助手</b><br>可围绕当前检测结果、多模型对比结果和报告内容进行提问。云端接口不可用时，系统会使用本地规则进行安全回答。</div>")
+            chatbot = gr.Chatbot(label="结果解释助手")
+            chat_input = gr.Textbox(label="问题", placeholder="例如：哪些区域需要人工复核？")
+            with gr.Row():
+                q1 = gr.Button("哪些区域需要人工复核？")
+                q2 = gr.Button("哪个模型结果更可信？")
+                q3 = gr.Button("为什么不同模型检测框数量不同？")
+            with gr.Row():
+                q4 = gr.Button("置信度低代表什么？")
+                q5 = gr.Button("检测结果能否作为临床诊断？")
+                q6 = gr.Button("如何生成检测报告？")
+            chat_btn = gr.Button("发送", variant="primary")
 
         with gr.Tab("报告中心"):
-            report_btn = gr.Button("生成报告", variant="primary")
+            gr.HTML("<div class='section-note'><b>报告中心</b><br>根据当前检测、对比或批量结果生成可下载 Markdown 报告。</div>")
+            report_type = gr.Dropdown(["单图检测报告", "多模型对比报告", "批量检测报告", "综合报告"], value="综合报告", label="报告类型")
+            report_btn = gr.Button("生成检测报告", variant="primary")
             report_preview = gr.Markdown("尚未生成报告。")
-            report_file = gr.File(label="下载 Markdown 报告")
-            report_btn.click(generate_report, inputs=[current_detection, current_comparison], outputs=[report_preview, report_file])
+            with gr.Row():
+                report_file = gr.File(label="下载 Markdown 报告")
+                report_pdf_file = gr.File(label="下载 PDF 报告")
+                report_docx_file = gr.File(label="下载 Word 报告")
 
         with gr.Tab("项目说明"):
             gr.Markdown(project_intro_markdown())
+
+        refresh_btn.click(lambda: (*dashboard_outputs(), registry_status_markdown()), outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status])
+        clear_outputs = [dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, current_detection, current_comparison, current_batch, history_table, history_notice]
+        clear_history_btn.click(clear_all_records, outputs=clear_outputs)
+        clear_history_page_btn.click(clear_all_records, outputs=clear_outputs)
+        refresh_history_btn.click(lambda: (history_rows(), "暂无检测历史，请先上传图片并运行检测。" if not history_rows() else "以下为最近检测历史。"), outputs=[history_table, history_notice])
+
+        det_btn.click(
+            run_single_detection,
+            inputs=[det_image, det_model, det_conf, det_iou, det_show_label, det_show_conf, det_line_width, det_color_mode],
+            outputs=[det_output, det_summary, det_table, det_explain, det_knowledge, det_crops, det_crop_notice, det_steps, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+        )
+        det_image.clear(
+            reset_single_detection_outputs,
+            outputs=[det_output, det_summary, det_table, det_explain, det_knowledge, det_crops, det_crop_notice, det_steps, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+        )
+        det_image.change(image_quality_precheck, inputs=det_image, outputs=det_quality)
+        det_preset.change(apply_threshold_preset, inputs=det_preset, outputs=[det_conf, det_iou, det_threshold_hint])
+        det_conf.change(threshold_hint, inputs=[det_conf, det_iou], outputs=det_threshold_hint)
+        det_iou.change(threshold_hint, inputs=[det_conf, det_iou], outputs=det_threshold_hint)
+        det_region_selector.change(
+            render_linked_region_view,
+            inputs=[det_image, current_detection, det_region_selector],
+            outputs=[det_region_original, det_region_annotated, det_region_note],
+        )
+        threshold_btn.click(run_threshold_sensitivity, inputs=[det_image, det_model, det_iou], outputs=[threshold_table, threshold_chart, threshold_explain])
+
+        cmp_btn.click(
+            run_model_comparison,
+            inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
+            outputs=[cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+        )
+        cmp_image.clear(
+            reset_model_comparison_outputs,
+            outputs=[cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+        )
+        fusion_filter.change(render_fusion_view, inputs=[cmp_image, current_comparison, fusion_filter], outputs=[fusion_image, fusion_table, fusion_note])
+
+        batch_btn.click(
+            run_batch_detection,
+            inputs=[batch_files, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
+            outputs=[batch_table, batch_preview, batch_summary, batch_md_file, batch_csv_file, current_batch, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+        )
+
+        chat_btn.click(answer_question, inputs=[chat_input, chatbot, current_detection, current_comparison], outputs=[chatbot, chat_input])
+        chat_input.submit(answer_question, inputs=[chat_input, chatbot, current_detection, current_comparison], outputs=[chatbot, chat_input])
+        for btn, question in [
+            (q1, "哪些区域需要人工复核？"),
+            (q2, "哪个模型结果更可信？"),
+            (q3, "为什么不同模型检测框数量不同？"),
+            (q4, "置信度低代表什么？"),
+            (q5, "检测结果能否作为临床诊断？"),
+            (q6, "如何生成检测报告？"),
+        ]:
+            btn.click(lambda h, d, c, q=question: answer_quick_question(q, h, d, c), inputs=[chatbot, current_detection, current_comparison], outputs=[chatbot, chat_input])
+
+        report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch], outputs=[report_preview, report_file, report_pdf_file, report_docx_file])
 
     return demo
 
@@ -1345,4 +2485,4 @@ def find_free_port(start_port: int = 7860, attempts: int = 20) -> int:
 if __name__ == "__main__":
     ensure_dirs()
     app = build_app()
-    app.launch(server_name="127.0.0.1", server_port=find_free_port())
+    app.launch(server_name="127.0.0.1", server_port=find_free_port(), css=APP_CSS)
