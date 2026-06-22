@@ -46,6 +46,15 @@ MODEL_INFERENCE_FAILED_MSG = "该模型推理失败，请检查模型格式、�
 MODEL_UNAVAILABLE_MSG = "当前模型不可用，未生成检测结果。"
 SAFE_TERMS = "请仅使用“疑似区域”“辅助识别结果”“建议人工复核”等非医疗结论表述。"
 CHAT_SCOPE_OPTIONS = ["当前单图", "当前多模型对比", "当前批量任务", "全部最新结果"]
+CHAT_ROLE_OPTIONS = ["患者易懂版", "医生复核版", "科研答辩版"]
+DEFAULT_FOLLOWUP_QUESTIONS = [
+    "哪些区域需要人工复核？",
+    "哪个模型结果更可信？",
+    "为什么不同模型检测框数量不同？",
+    "置信度低代表什么？",
+    "检测结果能否作为临床诊断？",
+    "如何生成检测报告？",
+]
 MODEL_USE_CASES = {
     "lightweight": "作为默认对照基线，兼顾速度和基础检测效果。",
     "high_precision": "强调定位精度和结果稳定性，适合精细辅助分析。",
@@ -1711,7 +1720,247 @@ def chat_auxiliary_context(image: Any, preset: str, comparison: list[dict[str, A
             "high_consistency_count": sum(1 for item in consistency if item["一致性等级"] == "高一致性疑似区域"),
             "low_consistency_count": sum(1 for item in consistency if item["一致性等级"] == "低一致性疑似区域"),
         },
+        "model_difference_attribution": model_difference_attribution(comparison or [])[:12],
     }
+
+
+def model_difference_attribution(results: list[dict[str, Any]], iou_threshold: float = 0.35) -> list[dict[str, Any]]:
+    """Explain where models agree, disagree by class, or detect a unique candidate."""
+    valid = successful_results(results)
+    rows: list[dict[str, Any]] = []
+    if len(valid) < 2:
+        return rows
+    for left_index, left in enumerate(valid):
+        for right in valid[left_index + 1:]:
+            for left_box_index, left_box in enumerate(left.get("boxes", []), 1):
+                overlaps = [
+                    (right_box_index, right_box, bbox_iou(left_box["bbox_xyxy"], right_box["bbox_xyxy"]))
+                    for right_box_index, right_box in enumerate(right.get("boxes", []), 1)
+                    if bbox_iou(left_box["bbox_xyxy"], right_box["bbox_xyxy"]) >= iou_threshold
+                ]
+                if not overlaps:
+                    continue
+                for right_box_index, right_box, overlap in overlaps:
+                    if left_box.get("class_name") != right_box.get("class_name"):
+                        rows.append(
+                            {
+                                "类型": "类别冲突",
+                                "模型/区域": f"{left['model_name']} 区域 {left_box_index} ↔ {right['model_name']} 区域 {right_box_index}",
+                                "IoU": round(overlap, 3),
+                                "说明": f"相近位置分别预测为 {left_box.get('class_name')} 与 {right_box.get('class_name')}。",
+                                "建议": "优先查看原图和局部放大图，人工判断类别。",
+                            }
+                        )
+    for result in valid:
+        other_boxes = [box for other in valid if other is not result for box in other.get("boxes", [])]
+        model_key = result.get("model_key", "")
+        for box_index, box in enumerate(result.get("boxes", []), 1):
+            same_class_match = any(
+                box.get("class_name") == other_box.get("class_name") and bbox_iou(box["bbox_xyxy"], other_box["bbox_xyxy"]) >= iou_threshold
+                for other_box in other_boxes
+            )
+            if same_class_match:
+                continue
+            if model_key == "high_recall":
+                kind = "仅高召回模型检出"
+                advice = "适合作为初筛提示，建议重点核对原图以排除误检。"
+            elif model_key == "high_precision":
+                kind = "仅高精度模型检出"
+                advice = "建议核对边界与局部结构，确认其定位稳定性。"
+            else:
+                kind = "仅单模型检出"
+                advice = "属于模型间差异区域，建议人工复核。"
+            rows.append(
+                {
+                    "类型": kind,
+                    "模型/区域": f"{result['model_name']} 区域 {box_index}",
+                    "IoU": "-",
+                    "说明": f"类别：{box.get('class_name')}，置信度：{float(box.get('confidence', 0)):.3f}。",
+                    "建议": advice,
+                }
+            )
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (str(row["类型"]), str(row["模型/区域"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
+
+
+def model_difference_markdown(results: list[dict[str, Any]]) -> str:
+    rows = model_difference_attribution(results)
+    if not rows:
+        return "当前没有足够的成功多模型结果可进行差异归因。"
+    lines = ["### 模型差异归因"]
+    for row in rows[:12]:
+        lines.append(f"- **{row['类型']}**｜{row['模型/区域']}｜IoU：{row['IoU']}。{row['说明']} {row['建议']}")
+    return "\n".join(lines)
+
+
+def role_instruction(role: str) -> str:
+    instructions = {
+        "患者易懂版": "使用非专业、易理解的语言，先解释重点，再提醒就医复核；避免堆砌坐标与模型术语。",
+        "医生复核版": "优先列出来源、模型、区域、置信度、类别冲突和人工复核重点，保持结构化与克制。",
+        "科研答辩版": "强调模型类型、阈值、置信度、IoU、一致性、差异归因与系统局限，不扩展为临床结论。",
+    }
+    return instructions.get(role, instructions["患者易懂版"])
+
+
+def apply_role_view(content: str, role: str, results: list[dict[str, Any]], comparison: list[dict[str, Any]] | None) -> str:
+    if role == "患者易懂版":
+        prefix = "### 患者易懂说明\n以下内容只用于帮助理解模型提示，不代表临床诊断。\n\n"
+    elif role == "医生复核版":
+        prefix = "### 医生复核视图\n" + evidence_markdown("当前所选范围", results) + "\n\n"
+    else:
+        summary = compare_summary(comparison or []) if comparison else "当前未选择多模型对比结果。"
+        prefix = "### 科研答辩视图\n" + summary + "\n\n"
+    return prefix + content
+
+
+def generate_followup_questions(
+    scope: str,
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    image: Any = None,
+    preset: str = "",
+) -> tuple[Any, ...]:
+    results = successful_results(selected_chat_results(scope, detection, comparison, batch_items))
+    questions: list[str] = []
+    for result in results:
+        for index, box in enumerate(result.get("boxes", []), 1):
+            if float(box.get("confidence", 0)) < 0.45:
+                questions.append(f"为什么区域 {index} 的置信度较低，应如何人工复核？")
+                break
+    if comparison:
+        consistency = analyze_model_consistency(comparison)
+        if any(item["一致性等级"] == "高一致性疑似区域" for item in consistency):
+            questions.append("哪些区域跨模型一致，为什么值得重点复核？")
+        if model_difference_attribution(comparison):
+            questions.append("不同模型有哪些具体差异、类别冲突或仅单模型检出区域？")
+    if batch_items:
+        questions.append("批量任务中哪些图片应优先人工复核，依据是什么？")
+    if image is not None:
+        questions.append("图片质量会如何影响当前检测结果？")
+    if preset:
+        questions.append("当前阈值预设会怎样影响漏检与误检？")
+    questions.extend(DEFAULT_FOLLOWUP_QUESTIONS)
+    unique: list[str] = []
+    for question in questions:
+        if question not in unique:
+            unique.append(question)
+        if len(unique) == 6:
+            break
+    while len(unique) < 6:
+        unique.append(DEFAULT_FOLLOWUP_QUESTIONS[len(unique)])
+    updates = tuple(gr.Button(value=question, visible=True) for question in unique)
+    return (*updates, unique)
+
+
+def answer_recommended_question(
+    index: int,
+    questions: list[str] | None,
+    history: list[Any],
+    scope: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+    chat_mode: str,
+    cloud_consent: bool,
+    image: Any,
+    preset: str,
+    role: str,
+):
+    question = (questions or DEFAULT_FOLLOWUP_QUESTIONS)[index] if index < len(questions or []) else DEFAULT_FOLLOWUP_QUESTIONS[index]
+    return answer_quick_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset, role)
+
+
+def region_jump_updates_from_chat(history: list[Any] | None, detection: dict[str, Any] | None) -> tuple[Any, ...]:
+    choices = region_choices(detection)
+    last_content = ""
+    for item in reversed(normalize_chat_history(history)):
+        if item.get("role") == "assistant":
+            last_content = item.get("content", "")
+            break
+    mentioned = []
+    for raw_index in re.findall(r"区域\s*(\d+)", last_content):
+        index = int(raw_index) - 1
+        if 0 <= index < len(choices) and choices[index] not in mentioned:
+            mentioned.append(choices[index])
+    mentioned = mentioned[:4]
+    updates = []
+    for index in range(4):
+        if index < len(mentioned):
+            updates.append(gr.Button(value=f"↗ 跳转至 {mentioned[index]}", visible=True))
+        else:
+            updates.append(gr.Button(value="无可定位区域", visible=False))
+    return (*updates, mentioned)
+
+
+def jump_to_chat_region(index: int, mentioned: list[str] | None, image: Any, detection: dict[str, Any] | None):
+    choices = mentioned or []
+    selected = choices[index] if 0 <= index < len(choices) else None
+    original, annotated, note = render_linked_region_view(image, detection, selected)
+    return gr.Dropdown(choices=region_choices(detection), value=selected), original, annotated, note
+
+
+def generate_consultation_card(
+    scope: str,
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    symptoms: str,
+    medical_history: str,
+) -> str:
+    results = successful_results(selected_chat_results(scope, detection, comparison, batch_items))
+    lines = ["就诊沟通卡（辅助识别结果）", f"分析范围：{scope}", "", "请医生重点协助复核："]
+    item_count = 0
+    for result in results:
+        source = result.get("_chat_source", "当前结果")
+        for index, box in enumerate(result.get("boxes", []), 1):
+            lines.append(f"- {source}｜{result.get('model_name', '-')}｜区域 {index}：疑似 {box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}，{box.get('risk_level', '建议人工复核')}。")
+            item_count += 1
+            if item_count >= 8:
+                lines.append("- 其余疑似区域请结合系统完整检测表查看。")
+                break
+        if item_count >= 8:
+            break
+    if not item_count:
+        lines.append("- 当前选择范围内没有成功推理得到的疑似区域，仍请医生结合原始影像判断。")
+    lines.extend(
+        [
+            "",
+            f"需向医生说明的症状：{symptoms.strip() or '待补充（如疼痛、肿胀、出血、冷热敏感、持续时间）'}",
+            f"既往口腔治疗/病史：{medical_history.strip() or '待补充（如补牙、根管治疗、拔牙、正畸、药物过敏）'}",
+            "希望医生协助判断：上述模型提示是否与原始影像及临床检查相符，以及是否需要进一步检查或复诊安排。",
+            "",
+            DISCLAIMER,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def make_chat_session_summary(history: list[Any] | None, scope: str, role: str, source_status: str) -> str:
+    items = normalize_chat_history(history, limit=12)
+    lines = ["# AI 助手会话摘要", "", f"- 生成时间：{now_iso()}", f"- 分析范围：{scope}", f"- 回答视图：{role}", f"- 最近回答状态：{source_status or '未记录'}", "", "## 问答记录"]
+    if not items:
+        lines.append("- 暂无问答记录。")
+    else:
+        for item in items:
+            label = "用户" if item["role"] == "user" else "助手"
+            lines.append(f"\n### {label}\n{item['content']}")
+    lines.extend(["", "## 使用说明", DISCLAIMER])
+    return "\n".join(lines)
+
+
+def export_chat_session_summary(history: list[Any] | None, scope: str, role: str, source_status: str) -> tuple[str, str | None]:
+    summary = make_chat_session_summary(history, scope, role, source_status)
+    ensure_dirs()
+    path = REPORT_DIR / f"chat_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    path.write_text(summary, encoding="utf-8")
+    return summary, str(path)
 
 
 def evidence_markdown(scope: str, results: list[dict[str, Any]]) -> str:
@@ -1838,8 +2087,9 @@ def local_rule_answer(
     elif "融合" in question or "一致" in question:
         fusion = chat_auxiliary_context(image, preset, comparison).get("fusion_summary", {})
         lines.append(f"当前多模型融合统计：高一致性区域 {fusion.get('high_consistency_count', 0)} 个，低一致性区域 {fusion.get('low_consistency_count', 0)} 个。高一致性仅表示多个模型在相近位置检出，不等同于确诊。")
-    elif "为什么不同模型" in question or "数量不同" in question:
-        lines.append("不同模型的结构、训练目标和权重不同，对同一影像的敏感程度也不同，因此检测框数量和位置可能存在差异。多模型一致区域更适合作为人工重点复核对象。")
+    elif "为什么不同模型" in question or "数量不同" in question or "模型差异" in question or "类别冲突" in question:
+        lines.append("不同模型的结构、训练目标和权重不同，对同一影像的敏感程度也不同。以下为当前结果的差异归因：")
+        lines.append(model_difference_markdown(comparison or []))
     elif not ok:
         lines.append("当前没有成功的真实模型推理结果可用于分析。")
     elif "哪些" in question or "检测" in question or "区域" in question:
@@ -1880,6 +2130,7 @@ def cloud_chat(
     allow_cloud: bool,
     image: Any = None,
     preset: str = "",
+    role: str = "患者易懂版",
 ) -> tuple[str, bool, str, float]:
     started = time.perf_counter()
     if not allow_cloud:
@@ -1901,7 +2152,8 @@ def cloud_chat(
                 "不得编造检测结果；不要把疑似区域说成明确疾病结论。"
                 "若问题涉及治疗、用药、手术或处置，可以给出就诊沟通、复核重点、通用护理和风险提示，"
                 "但不要给出处方、剂量、手术决策或替代医生的个体化治疗方案。"
-                "请用自然、简洁、适合患者阅读的中文回答，并严格使用四个小节：回答、模型依据、不确定性、建议复核动作。"
+                f"当前回答视图为“{role}”：{role_instruction(role)}"
+                "请严格使用四个小节：回答、模型依据、不确定性、建议复核动作。"
             ),
         },
     ]
@@ -1946,15 +2198,18 @@ def answer_question(
     cloud_consent: bool = False,
     image: Any = None,
     preset: str = "",
+    role: str = "患者易懂版",
 ):
     user_message = chat_content_to_text(message)
     scope = scope if scope in CHAT_SCOPE_OPTIONS else "全部最新结果"
     allow_cloud = chat_mode == "联网 AI" and bool(cloud_consent)
-    content, ok, source_note, elapsed_ms = cloud_chat(user_message, scope, detection, comparison, batch_items, history, allow_cloud, image, preset)
+    role = role if role in CHAT_ROLE_OPTIONS else "患者易懂版"
+    content, ok, source_note, elapsed_ms = cloud_chat(user_message, scope, detection, comparison, batch_items, history, allow_cloud, image, preset, role)
     if not ok:
         content = local_rule_answer(user_message, scope, detection, comparison, batch_items, image, preset)
     results = selected_chat_results(scope, detection, comparison, batch_items)
     content = format_structured_answer(scope, content, results)
+    content = apply_role_view(content, role, results, comparison)
     content = f"> 本次分析范围：{scope}\n\n{content}"
     normalized_history = normalize_chat_history(history)
     if user_message:
@@ -1975,8 +2230,9 @@ def answer_quick_question(
     cloud_consent: bool = False,
     image: Any = None,
     preset: str = "",
+    role: str = "患者易懂版",
 ):
-    return answer_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset)
+    return answer_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset, role)
 
 
 def stream_answer_question(*args: Any):
@@ -2639,22 +2895,43 @@ def build_app() -> gr.Blocks:
             with gr.Row():
                 chat_mode = gr.Radio(["仅本地规则", "联网 AI"], value="仅本地规则", label="回答模式")
                 cloud_consent = gr.Checkbox(value=False, label="我同意将所选范围的结构化检测数据发送至云端 AI")
+                chat_role = gr.Radio(CHAT_ROLE_OPTIONS, value="患者易懂版", label="回答视图")
             chatbot = gr.Chatbot(label="结果解释助手")
             chat_input = gr.Textbox(label="问题", placeholder="例如：哪些区域需要人工复核？")
             chat_status = gr.Markdown("**回答来源：** 等待提问。默认采用仅本地规则模式。")
             chat_last_message = gr.State("")
+            recommended_question_state = gr.State(DEFAULT_FOLLOWUP_QUESTIONS)
+            chat_region_jump_state = gr.State([])
+            gr.Markdown("### 推荐追问")
             with gr.Row():
-                q1 = gr.Button("哪些区域需要人工复核？")
-                q2 = gr.Button("哪个模型结果更可信？")
-                q3 = gr.Button("为什么不同模型检测框数量不同？")
+                q1 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[0])
+                q2 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[1])
+                q3 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[2])
             with gr.Row():
-                q4 = gr.Button("置信度低代表什么？")
-                q5 = gr.Button("检测结果能否作为临床诊断？")
-                q6 = gr.Button("如何生成检测报告？")
+                q4 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[3])
+                q5 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[4])
+                q6 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[5])
             with gr.Row():
                 chat_btn = gr.Button("发送", variant="primary")
                 retry_btn = gr.Button("重试上一问题")
                 focus_region_btn = gr.Button("定位助手提及的区域")
+            with gr.Row():
+                region_jump_1 = gr.Button("无可定位区域", visible=False)
+                region_jump_2 = gr.Button("无可定位区域", visible=False)
+                region_jump_3 = gr.Button("无可定位区域", visible=False)
+                region_jump_4 = gr.Button("无可定位区域", visible=False)
+            with gr.Accordion("一键生成就诊沟通卡", open=False):
+                gr.Markdown("填写症状和既往史后，生成可复制的沟通摘要；内容只描述模型辅助识别结果，不提供治疗决策。")
+                consult_symptoms = gr.Textbox(label="当前症状", placeholder="例如：右下后牙冷热敏感约两周，偶有咀嚼不适")
+                consult_history = gr.Textbox(label="既往口腔治疗/病史", placeholder="例如：曾补牙；无已知药物过敏")
+                consultation_btn = gr.Button("生成可复制沟通卡")
+                consultation_card = gr.Textbox(label="就诊沟通卡（可直接复制）", lines=12)
+            with gr.Accordion("会话总结与报告衔接", open=False):
+                with gr.Row():
+                    chat_summary_btn = gr.Button("生成会话摘要")
+                    chat_export_btn = gr.Button("将本次问答写入报告")
+                chat_summary_preview = gr.Markdown("尚未生成会话摘要。")
+                chat_summary_file = gr.File(label="下载 AI 助手会话报告")
             with gr.Accordion("本地临床安全评测", open=False):
                 safety_btn = gr.Button("运行安全评测")
                 safety_table = gr.Dataframe(headers=["场景", "测试问题", "结果", "免责声明", "剂量安全"], label="本地规则安全测试", wrap=True)
@@ -2679,7 +2956,7 @@ def build_app() -> gr.Blocks:
         clear_history_page_btn.click(clear_all_records, outputs=clear_outputs)
         refresh_history_btn.click(lambda: (history_rows(), "暂无检测历史，请先上传图片并运行检测。" if not history_rows() else "以下为最近检测历史。"), outputs=[history_table, history_notice])
 
-        det_btn.click(
+        det_event = det_btn.click(
             run_single_detection,
             inputs=[det_image, det_model, det_conf, det_iou, det_show_label, det_show_conf, det_line_width, det_color_mode],
             outputs=[det_output, det_summary, det_table, det_explain, det_knowledge, det_crops, det_crop_notice, det_steps, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
@@ -2699,7 +2976,7 @@ def build_app() -> gr.Blocks:
         )
         threshold_btn.click(run_threshold_sensitivity, inputs=[det_image, det_model, det_iou], outputs=[threshold_table, threshold_chart, threshold_explain])
 
-        cmp_btn.click(
+        cmp_event = cmp_btn.click(
             run_model_comparison,
             inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
             outputs=[cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
@@ -2710,40 +2987,55 @@ def build_app() -> gr.Blocks:
         )
         fusion_filter.change(render_fusion_view, inputs=[cmp_image, current_comparison, fusion_filter], outputs=[fusion_image, fusion_table, fusion_note])
 
-        batch_btn.click(
+        batch_event = batch_btn.click(
             run_batch_detection,
             inputs=[batch_files, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
             outputs=[batch_table, batch_preview, batch_summary, batch_md_file, batch_csv_file, current_batch, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
 
-        chat_inputs = [chat_input, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset]
+        followup_outputs = [q1, q2, q3, q4, q5, q6, recommended_question_state]
+        det_event.then(generate_followup_questions, inputs=[chat_scope, current_detection, current_comparison, current_batch, det_image, det_preset], outputs=followup_outputs)
+        cmp_event.then(generate_followup_questions, inputs=[chat_scope, current_detection, current_comparison, current_batch, det_image, det_preset], outputs=followup_outputs)
+        batch_event.then(generate_followup_questions, inputs=[chat_scope, current_detection, current_comparison, current_batch, det_image, det_preset], outputs=followup_outputs)
+        chat_scope.change(generate_followup_questions, inputs=[chat_scope, current_detection, current_comparison, current_batch, det_image, det_preset], outputs=followup_outputs)
+
+        chat_inputs = [chat_input, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role]
         chat_outputs = [chatbot, chat_input, chat_status, chat_last_message, det_region_selector]
-        chat_btn.click(stream_answer_question, inputs=chat_inputs, outputs=chat_outputs)
-        chat_input.submit(stream_answer_question, inputs=chat_inputs, outputs=chat_outputs)
-        retry_btn.click(
+        send_event = chat_btn.click(stream_answer_question, inputs=chat_inputs, outputs=chat_outputs)
+        submit_event = chat_input.submit(stream_answer_question, inputs=chat_inputs, outputs=chat_outputs)
+        retry_event = retry_btn.click(
             stream_answer_question,
-            inputs=[chat_last_message, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset],
+            inputs=[chat_last_message, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role],
             outputs=chat_outputs,
         )
+        region_jump_outputs = [region_jump_1, region_jump_2, region_jump_3, region_jump_4, chat_region_jump_state]
+        for event in (send_event, submit_event, retry_event):
+            event.then(region_jump_updates_from_chat, inputs=[chatbot, current_detection], outputs=region_jump_outputs)
         focus_region_btn.click(
             render_linked_region_view,
             inputs=[det_image, current_detection, det_region_selector],
             outputs=[det_region_original, det_region_annotated, det_region_note],
         )
-        safety_btn.click(run_chat_safety_evaluation, outputs=[safety_table, safety_summary])
-        for btn, question in [
-            (q1, "哪些区域需要人工复核？"),
-            (q2, "哪个模型结果更可信？"),
-            (q3, "为什么不同模型检测框数量不同？"),
-            (q4, "置信度低代表什么？"),
-            (q5, "检测结果能否作为临床诊断？"),
-            (q6, "如何生成检测报告？"),
-        ]:
-            btn.click(
-                lambda h, s, d, c, b, m, consent, image, preset, q=question: answer_quick_question(q, h, s, d, c, b, m, consent, image, preset),
-                inputs=[chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset],
-                outputs=chat_outputs,
+        for index, button in enumerate((region_jump_1, region_jump_2, region_jump_3, region_jump_4)):
+            button.click(
+                lambda choices, image, detection, i=index: jump_to_chat_region(i, choices, image, detection),
+                inputs=[chat_region_jump_state, det_image, current_detection],
+                outputs=[det_region_selector, det_region_original, det_region_annotated, det_region_note],
             )
+        consultation_btn.click(
+            generate_consultation_card,
+            inputs=[chat_scope, current_detection, current_comparison, current_batch, consult_symptoms, consult_history],
+            outputs=consultation_card,
+        )
+        chat_summary_btn.click(make_chat_session_summary, inputs=[chatbot, chat_scope, chat_role, chat_status], outputs=chat_summary_preview)
+        chat_export_btn.click(export_chat_session_summary, inputs=[chatbot, chat_scope, chat_role, chat_status], outputs=[chat_summary_preview, chat_summary_file])
+        safety_btn.click(run_chat_safety_evaluation, outputs=[safety_table, safety_summary])
+        for index, btn in enumerate((q1, q2, q3, q4, q5, q6)):
+            btn.click(
+                lambda h, questions, s, d, c, b, m, consent, image, preset, role, i=index: answer_recommended_question(i, questions, h, s, d, c, b, m, consent, image, preset, role),
+                inputs=[chatbot, recommended_question_state, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role],
+                outputs=chat_outputs,
+            ).then(region_jump_updates_from_chat, inputs=[chatbot, current_detection], outputs=region_jump_outputs)
 
         report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch], outputs=[report_preview, report_file, report_pdf_file, report_docx_file])
 
