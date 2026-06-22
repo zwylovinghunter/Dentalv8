@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import socket
@@ -31,6 +32,8 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
 REPORT_DIR = OUTPUT_DIR / "reports"
 HISTORY_PATH = OUTPUT_DIR / "history.json"
+CHAT_FEEDBACK_PATH = OUTPUT_DIR / "chat_feedback.json"
+APP_VERSION = "2026.06.23"
 DEVICE = "cpu"
 DISCLAIMER = "本系统仅用于牙齿病变疑似区域的辅助识别与科研展示，不作为临床诊断依据，最终结果应由专业人员复核。"
 FULL_DISCLAIMER = "本系统仅用于牙齿病变疑似区域的辅助识别与科研展示，不作为临床诊断依据，最终结果应由专业口腔医生结合原始影像和其他临床资料进行复核。"
@@ -297,6 +300,7 @@ MODEL_SPECS = [
 
 MODEL_CACHE: dict[str, Any] = {}
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {}
+WEIGHT_FINGERPRINT_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def ensure_dirs() -> None:
@@ -306,6 +310,96 @@ def ensure_dirs() -> None:
 
 def now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def image_fingerprint(image: Image.Image) -> str:
+    """Stable fingerprint of normalized pixel content for result/image consistency checks."""
+    normalized = image.convert("RGB")
+    digest = hashlib.sha256()
+    digest.update(f"{normalized.width}x{normalized.height}:RGB".encode("utf-8"))
+    digest.update(np.asarray(normalized, dtype=np.uint8).tobytes())
+    return digest.hexdigest()
+
+
+def weight_fingerprint(model_key: str) -> dict[str, Any]:
+    item = get_registry().get(model_key, {})
+    path = item.get("weight_path")
+    if not path or not Path(path).exists():
+        return {"weight_path": item.get("weight_rel") or "未匹配", "weight_sha256_12": "-", "weight_size_bytes": 0, "weight_modified_at": "-"}
+    resolved = Path(path).resolve()
+    stat = resolved.stat()
+    cache_key = str(resolved)
+    cached = WEIGHT_FINGERPRINT_CACHE.get(cache_key)
+    if cached and cached.get("size") == stat.st_size and cached.get("mtime_ns") == stat.st_mtime_ns:
+        return cached["value"]
+    digest = hashlib.sha256()
+    try:
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        sha = digest.hexdigest()[:12]
+    except Exception:
+        sha = "unavailable"
+    value = {
+        "weight_path": item.get("weight_rel") or str(resolved),
+        "weight_sha256_12": sha,
+        "weight_size_bytes": int(stat.st_size),
+        "weight_modified_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    WEIGHT_FINGERPRINT_CACHE[cache_key] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "value": value}
+    return value
+
+
+def result_traceability(result: dict[str, Any]) -> dict[str, Any]:
+    trace = dict(result.get("traceability") or {})
+    if not trace:
+        trace = {
+            "app_version": APP_VERSION,
+            "model_key": result.get("model_key", "-"),
+            "model_name": result.get("model_name", "-"),
+            "model_type": result.get("model_type", "-"),
+            **weight_fingerprint(str(result.get("model_key", ""))),
+            "thresholds": result.get("thresholds", {}),
+            "created_at": result.get("created_at", "-"),
+            "inference_time_ms": result.get("inference_time_ms", 0),
+            "image_sha256_12": str(result.get("image_sha256", "-"))[:12],
+        }
+    return trace
+
+
+def attach_result_traceability(result: dict[str, Any]) -> dict[str, Any]:
+    result["traceability"] = {
+        "app_version": APP_VERSION,
+        "model_key": result.get("model_key", "-"),
+        "model_name": result.get("model_name", "-"),
+        "model_type": result.get("model_type", "-"),
+        **weight_fingerprint(str(result.get("model_key", ""))),
+        "thresholds": dict(result.get("thresholds") or {}),
+        "created_at": result.get("created_at", "-"),
+        "inference_time_ms": result.get("inference_time_ms", 0),
+        "image_sha256_12": str(result.get("image_sha256", "-"))[:12],
+    }
+    return result
+
+
+def traceability_markdown(results: list[dict[str, Any]]) -> str:
+    lines = ["### 可追溯性信息", f"- 应用版本：{APP_VERSION}"]
+    seen: set[tuple[str, str]] = set()
+    for result in results:
+        trace = result_traceability(result)
+        key = (str(trace.get("model_key")), str(trace.get("weight_sha256_12")))
+        if key in seen:
+            continue
+        seen.add(key)
+        thresholds = trace.get("thresholds", {}) or result.get("thresholds", {})
+        lines.append(
+            f"- {trace.get('model_name', result.get('model_name', '-'))}｜模型版本：{trace.get('model_key', '-')} / {trace.get('model_type', '-')}｜权重：`{trace.get('weight_path', '-')}`｜SHA-256：`{trace.get('weight_sha256_12', '-')}`｜"
+            f"阈值：conf={thresholds.get('conf', '-')}、IoU={thresholds.get('iou', '-')}｜推理：{trace.get('inference_time_ms', result.get('inference_time_ms', 0))} ms｜"
+            f"结果时间：{trace.get('created_at', result.get('created_at', '-'))}｜影像指纹：`{trace.get('image_sha256_12', '-')}`"
+        )
+    if not seen:
+        lines.append("- 当前范围没有成功推理结果可记录。")
+    return "\n".join(lines)
 
 
 def safe_read_text(path: Path, limit: int = 6000) -> str:
@@ -899,6 +993,8 @@ def run_detection_core(
         finish_step(process_steps, "图片上传完成", step, "失败", "图像读取失败。")
         return empty_result(model_key, "inference_failed", None, process_steps, str(exc)), None
 
+    source_image_sha256 = image_fingerprint(pil_image)
+
     step = start_step(process_steps, "图像预处理")
     np_image = np.asarray(pil_image)
     finish_step(process_steps, "图像预处理", step, message="已转换为 RGB 输入。")
@@ -972,6 +1068,7 @@ def run_detection_core(
         "runtime_mode": "real_yolo_cpu",
         "device": DEVICE,
         "image_info": {"width": width, "height": height, "mode": pil_image.mode},
+        "image_sha256": source_image_sha256,
         "box_count": len(boxes),
         "avg_confidence": float(sum(confidences) / len(confidences)) if confidences else 0.0,
         "max_confidence": float(max(confidences)) if confidences else 0.0,
@@ -1006,6 +1103,7 @@ def run_single_detection(image: Any, model_name: str, conf: float, iou: float, s
         "line_width": int(line_width),
         "color_mode": color_mode,
     }
+    attach_result_traceability(result)
     record_detection_history(result, "single_detection")
     image_out = rendered if rendered is not None else None
     choices = region_choices(result)
@@ -1254,6 +1352,7 @@ def run_model_comparison(image: Any, conf: float, iou: float, show_label: bool, 
             "line_width": int(line_width),
             "color_mode": color_mode,
         }
+        attach_result_traceability(result)
         results.append(result)
         rendered_images.append(rendered)
     append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
@@ -1404,6 +1503,9 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
         "",
         batch_summary_markdown(items),
         "",
+        "## 模型与结果可追溯性",
+        traceability_markdown([item.get("result", {}) for item in items if isinstance(item, dict)]),
+        "",
         "## 批量检测汇总表",
         "\n".join(md_table),
         "",
@@ -1430,6 +1532,7 @@ def run_batch_detection(files: list[Any] | None, model_name: str, conf: float, i
             "line_width": int(line_width),
             "color_mode": color_mode,
         }
+        attach_result_traceability(result)
         result["image_name"] = image_name
         item = {"image_name": image_name, "result": result}
         items.append(item)
@@ -1661,6 +1764,10 @@ def chat_context_payload(
         "model_comparison": model_comparison,
         "batch_detection": batch_detection,
         "selected_result_count": len(sources),
+        "traceability": [
+            {"source": source, **result_traceability(result)}
+            for source, result in sources
+        ],
         "disclaimer": DISCLAIMER,
     }
 
@@ -1679,6 +1786,171 @@ def normalize_chat_history(history: list[Any] | None, limit: int = 6) -> list[di
                 if text:
                     normalized.append({"role": role, "content": text})
     return normalized[-limit:]
+
+
+def load_chat_feedback() -> list[dict[str, Any]]:
+    ensure_dirs()
+    if not CHAT_FEEDBACK_PATH.exists():
+        return []
+    try:
+        data = json.loads(CHAT_FEEDBACK_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_chat_feedback(items: list[dict[str, Any]]) -> None:
+    ensure_dirs()
+    CHAT_FEEDBACK_PATH.write_text(json.dumps(items[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def feedback_prompt_guidance(role: str) -> str:
+    recent = load_chat_feedback()[-30:]
+    if not recent:
+        return "尚无用户反馈偏好。"
+    reasons = [str(item.get("reason", "")) for item in recent if item.get("rating") in {"不准确", "太复杂"}]
+    guidance: list[str] = []
+    if any("区域" in reason or "依据" in reason for reason in reasons):
+        guidance.append("用户希望回答明确关联区域、模型和置信度。")
+    if any("太专业" in reason or "复杂" in reason for reason in reasons) or role == "患者易懂版":
+        guidance.append("使用更短、更通俗的句子，先给结论再解释。")
+    if any("不准确" in reason or "当前结果" in reason for reason in reasons):
+        guidance.append("只引用当前选择范围中的结构化结果，不推断未检出的内容。")
+    if any("太长" in reason for reason in reasons):
+        guidance.append("控制篇幅，避免重复免责声明和背景知识。")
+    return "；".join(guidance) if guidance else "近期反馈未显示特定表达偏好。"
+
+
+def last_assistant_message(history: list[Any] | None) -> str:
+    for item in reversed(normalize_chat_history(history, limit=30)):
+        if item.get("role") == "assistant":
+            return item.get("content", "")
+    return ""
+
+
+def record_chat_feedback(
+    rating: str,
+    reason: str,
+    comment: str,
+    history: list[Any] | None,
+    scope: str,
+    role: str,
+    source_status: str,
+    context_signature: str,
+) -> tuple[str, list[list[Any]], str]:
+    answer = last_assistant_message(history)
+    if not answer:
+        rows, summary = feedback_statistics()
+        return "请先获得一条助手回答后再提交反馈。", rows, summary
+    item = {
+        "created_at": now_iso(),
+        "rating": rating if rating in {"有帮助", "不准确", "太复杂"} else "未选择",
+        "reason": reason or "未说明",
+        "comment": (comment or "").strip()[:500],
+        "scope": scope,
+        "role": role,
+        "source_status": source_status,
+        "context_signature": context_signature[:12],
+        "answer_excerpt": answer[:500],
+    }
+    items = load_chat_feedback()
+    items.append(item)
+    save_chat_feedback(items)
+    rows, summary = feedback_statistics(items)
+    return "反馈已记录；下一次提问会参考近期的表达与准确性反馈。", rows, summary
+
+
+def feedback_statistics(items: list[dict[str, Any]] | None = None) -> tuple[list[list[Any]], str]:
+    data = items if items is not None else load_chat_feedback()
+    if not data:
+        return [], "暂无回答质量反馈。"
+    counts: dict[tuple[str, str, str], int] = {}
+    for item in data:
+        source = "云端 AI" if "云端 AI" in str(item.get("source_status", "")) else "本地规则"
+        key = (str(item.get("rating", "未选择")), str(item.get("reason", "未说明")), source)
+        counts[key] = counts.get(key, 0) + 1
+    rows = [[rating, reason, source, count] for (rating, reason, source), count in sorted(counts.items(), key=lambda item: -item[1])]
+    inaccurate = sum(1 for item in data if item.get("rating") == "不准确")
+    complex_count = sum(1 for item in data if item.get("rating") == "太复杂")
+    cloud_count = sum(1 for item in data if "云端 AI" in str(item.get("source_status", "")))
+    return rows, f"累计反馈 {len(data)} 条｜云端 AI {cloud_count} 条｜本地规则 {len(data) - cloud_count} 条｜不准确 {inaccurate} 条｜太复杂 {complex_count} 条。"
+
+
+def current_image_hash(image: Any) -> str:
+    if image is None:
+        return ""
+    try:
+        return image_fingerprint(normalize_image(image))
+    except Exception:
+        return ""
+
+
+def chat_context_signature(scope: str, detection: dict[str, Any] | None, comparison: list[dict[str, Any]] | None, batch_items: list[dict[str, Any]] | None) -> str:
+    items = []
+    for source, result in selected_chat_sources(scope, detection, comparison, batch_items):
+        trace = result_traceability(result)
+        items.append(
+            {
+                "source": source,
+                "image": result.get("image_sha256", ""),
+                "created_at": result.get("created_at", ""),
+                "model_key": result.get("model_key", ""),
+                "weight": trace.get("weight_sha256_12", ""),
+                "thresholds": result.get("thresholds", {}),
+                "boxes": [(box.get("class_name"), round(float(box.get("confidence", 0)), 4), box.get("bbox_xyxy")) for box in result.get("boxes", [])],
+            }
+        )
+    raw = json.dumps({"scope": scope, "items": items}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def chat_context_integrity(
+    scope: str,
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    single_image: Any = None,
+    comparison_image: Any = None,
+    batch_files: list[Any] | None = None,
+    previous_signature: str = "",
+) -> tuple[str, str, bool]:
+    warnings: list[str] = []
+    signature = chat_context_signature(scope, detection, comparison, batch_items)
+    if previous_signature and previous_signature != signature:
+        warnings.append("检测结果、分析范围或模型版本已更新；此前聊天结论不会继续作为本次回答上下文。")
+    if scope in {"当前单图", "全部最新结果"} and detection and single_image is not None:
+        active_hash = current_image_hash(single_image)
+        result_hash = str(detection.get("image_sha256", ""))
+        if active_hash and result_hash and active_hash != result_hash:
+            warnings.append("当前单图输入已更换，与保存的单图检测结果不一致；请重新运行单图检测。")
+    if scope in {"当前多模型对比", "全部最新结果"} and comparison and comparison_image is not None:
+        active_hash = current_image_hash(comparison_image)
+        result_hashes = {str(item.get("image_sha256", "")) for item in comparison if isinstance(item, dict) and item.get("image_sha256")}
+        if active_hash and result_hashes and active_hash not in result_hashes:
+            warnings.append("当前多模型对比图片已更换，与保存的对比结果不一致；请重新运行多模型对比。")
+    if scope in {"当前批量任务", "全部最新结果"} and batch_items and batch_files:
+        current_names = {image_display_name(file_obj, "") for file_obj in batch_files}
+        result_names = {str(item.get("image_name", "")) for item in batch_items if isinstance(item, dict)}
+        if current_names and result_names and current_names != result_names:
+            warnings.append("当前批量文件列表已变化，与保存的批量检测结果不一致；请重新运行批量检测。")
+    if warnings:
+        return signature, "### 结果上下文提醒\n\n" + "\n".join(f"- {warning}" for warning in warnings), True
+    return signature, "当前聊天上下文与已保存检测结果一致。", False
+
+
+def refresh_chat_context_notice(
+    scope: str,
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    single_image: Any = None,
+    comparison_image: Any = None,
+    batch_files: list[Any] | None = None,
+    previous_signature: str = "",
+) -> str:
+    return chat_context_integrity(
+        scope, detection, comparison, batch_items, single_image, comparison_image, batch_files, previous_signature
+    )[1]
 
 
 def retrieve_project_knowledge(question: str) -> list[dict[str, str]]:
@@ -1872,9 +2144,12 @@ def answer_recommended_question(
     image: Any,
     preset: str,
     role: str,
+    comparison_image: Any = None,
+    batch_files: list[Any] | None = None,
+    previous_signature: str = "",
 ):
     question = (questions or DEFAULT_FOLLOWUP_QUESTIONS)[index] if index < len(questions or []) else DEFAULT_FOLLOWUP_QUESTIONS[index]
-    return answer_quick_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset, role)
+    return answer_quick_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset, role, comparison_image, batch_files, previous_signature)
 
 
 def region_jump_updates_from_chat(history: list[Any] | None, detection: dict[str, Any] | None) -> tuple[Any, ...]:
@@ -2141,6 +2416,7 @@ def cloud_chat(
     context = chat_context_payload(scope, detection, comparison, batch_items)
     context["project_knowledge"] = retrieve_project_knowledge(question)
     context["auxiliary_context"] = chat_auxiliary_context(image, preset, comparison)
+    context["feedback_guidance"] = feedback_prompt_guidance(role)
     messages = [
         {
             "role": "system",
@@ -2153,6 +2429,7 @@ def cloud_chat(
                 "若问题涉及治疗、用药、手术或处置，可以给出就诊沟通、复核重点、通用护理和风险提示，"
                 "但不要给出处方、剂量、手术决策或替代医生的个体化治疗方案。"
                 f"当前回答视图为“{role}”：{role_instruction(role)}"
+                f"近期回答质量反馈对应的表达要求：{feedback_prompt_guidance(role)}"
                 "请严格使用四个小节：回答、模型依据、不确定性、建议复核动作。"
             ),
         },
@@ -2199,24 +2476,37 @@ def answer_question(
     image: Any = None,
     preset: str = "",
     role: str = "患者易懂版",
+    comparison_image: Any = None,
+    batch_files: list[Any] | None = None,
+    previous_signature: str = "",
 ):
     user_message = chat_content_to_text(message)
     scope = scope if scope in CHAT_SCOPE_OPTIONS else "全部最新结果"
     allow_cloud = chat_mode == "联网 AI" and bool(cloud_consent)
     role = role if role in CHAT_ROLE_OPTIONS else "患者易懂版"
-    content, ok, source_note, elapsed_ms = cloud_chat(user_message, scope, detection, comparison, batch_items, history, allow_cloud, image, preset, role)
-    if not ok:
-        content = local_rule_answer(user_message, scope, detection, comparison, batch_items, image, preset)
+    context_signature, integrity_notice, stale = chat_context_integrity(
+        scope, detection, comparison, batch_items, image, comparison_image, batch_files, previous_signature
+    )
+    mismatch = "不一致" in integrity_notice
+    model_history = [] if stale else history
+    if mismatch:
+        content = "### 回答\n当前页面影像或文件列表与已保存检测结果不一致。为避免将旧结果用于新影像，请重新运行对应检测后再提问。"
+        ok, source_note, elapsed_ms = False, "结果一致性校验未通过，未调用云端 AI。", 0.0
+    else:
+        content, ok, source_note, elapsed_ms = cloud_chat(user_message, scope, detection, comparison, batch_items, model_history, allow_cloud, image, preset, role)
+        if not ok:
+            content = local_rule_answer(user_message, scope, detection, comparison, batch_items, image, preset)
     results = selected_chat_results(scope, detection, comparison, batch_items)
     content = format_structured_answer(scope, content, results)
     content = apply_role_view(content, role, results, comparison)
+    content = content.rstrip() + "\n\n" + traceability_markdown(results)
     content = f"> 本次分析范围：{scope}\n\n{content}"
-    normalized_history = normalize_chat_history(history)
+    normalized_history = [] if stale else normalize_chat_history(history)
     if user_message:
         normalized_history.append({"role": "user", "content": user_message})
     normalized_history.append({"role": "assistant", "content": content})
     status = f"**回答来源：** {'云端 AI' if ok else '本地规则'}｜**调用耗时：** {elapsed_ms:.1f} ms｜{source_note}"
-    return normalized_history, "", status, user_message, chat_region_selector_update(content, detection)
+    return normalized_history, "", status, user_message, chat_region_selector_update(content, detection), context_signature, integrity_notice
 
 
 def answer_quick_question(
@@ -2231,14 +2521,17 @@ def answer_quick_question(
     image: Any = None,
     preset: str = "",
     role: str = "患者易懂版",
+    comparison_image: Any = None,
+    batch_files: list[Any] | None = None,
+    previous_signature: str = "",
 ):
-    return answer_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset, role)
+    return answer_question(question, history, scope, detection, comparison, batch_items, chat_mode, cloud_consent, image, preset, role, comparison_image, batch_files, previous_signature)
 
 
 def stream_answer_question(*args: Any):
     """Progressively render a completed answer so long explanations remain readable in Gradio."""
     final = answer_question(*args)
-    history, empty_input, status, last_message, selector_update = final
+    history, empty_input, status, last_message, selector_update, context_signature, integrity_notice = final
     if not history or not isinstance(history[-1], dict):
         yield final
         return
@@ -2250,7 +2543,7 @@ def stream_answer_question(*args: Any):
     for end in range(180, len(full_content), 180):
         partial_history = [dict(item) for item in base_history]
         partial_history[-1]["content"] = full_content[:end] + "\n\n_正在继续输出…_"
-        yield partial_history, empty_input, "**回答状态：** 正在流式呈现回答…", last_message, selector_update
+        yield partial_history, empty_input, "**回答状态：** 正在流式呈现回答…", last_message, selector_update, context_signature, integrity_notice
     yield final
 
 
@@ -2289,6 +2582,7 @@ def make_report_markdown(
         f"- 报告生成时间：{now_iso()}",
         "- 项目名称：牙齿病变目标区域识别与辅助分析平台",
         "- 运行设备：CPU",
+        f"- 应用版本：{APP_VERSION}",
         f"- 报告类型：{report_type}",
         "",
     ]
@@ -2349,8 +2643,18 @@ def make_report_markdown(
         for item in batch_items:
             lines.append("| " + " | ".join(str(v) for v in batch_result_row(item)) + " |")
         lines.append("")
+    trace_results: list[dict[str, Any]] = []
+    if include_detection and isinstance(detection, dict):
+        trace_results.append(detection)
+    if include_comparison:
+        trace_results.extend(item for item in comparison or [] if isinstance(item, dict))
+    if include_batch:
+        trace_results.extend(item.get("result", {}) for item in batch_items or [] if isinstance(item, dict))
     lines.extend(
         [
+            "## 模型与结果可追溯性",
+            traceability_markdown(trace_results),
+            "",
             "## 系统自动分析",
             "本报告根据模型输出的疑似区域、置信度和复核规则自动生成，仅用于科研展示和辅助识别。",
             "",
@@ -2899,7 +3203,9 @@ def build_app() -> gr.Blocks:
             chatbot = gr.Chatbot(label="结果解释助手")
             chat_input = gr.Textbox(label="问题", placeholder="例如：哪些区域需要人工复核？")
             chat_status = gr.Markdown("**回答来源：** 等待提问。默认采用仅本地规则模式。")
+            chat_stale_notice = gr.Markdown("当前聊天上下文与已保存检测结果一致。")
             chat_last_message = gr.State("")
+            chat_context_signature = gr.State("")
             recommended_question_state = gr.State(DEFAULT_FOLLOWUP_QUESTIONS)
             chat_region_jump_state = gr.State([])
             gr.Markdown("### 推荐追问")
@@ -2914,6 +3220,7 @@ def build_app() -> gr.Blocks:
             with gr.Row():
                 chat_btn = gr.Button("发送", variant="primary")
                 retry_btn = gr.Button("重试上一问题")
+                resummarize_btn = gr.Button("基于最新结果重新总结")
                 focus_region_btn = gr.Button("定位助手提及的区域")
             with gr.Row():
                 region_jump_1 = gr.Button("无可定位区域", visible=False)
@@ -2932,6 +3239,17 @@ def build_app() -> gr.Blocks:
                     chat_export_btn = gr.Button("将本次问答写入报告")
                 chat_summary_preview = gr.Markdown("尚未生成会话摘要。")
                 chat_summary_file = gr.File(label="下载 AI 助手会话报告")
+            with gr.Accordion("回答质量反馈", open=False):
+                gr.Markdown("反馈会保存为本地统计，并在下一次提问时提示助手调整表达清晰度、依据完整性和准确性。")
+                with gr.Row():
+                    feedback_rating = gr.Radio(["有帮助", "不准确", "太复杂"], value="有帮助", label="这条回答怎么样？")
+                    feedback_reason = gr.Dropdown(["已解决问题", "未结合当前结果", "缺少区域/模型依据", "语言太专业", "内容太长", "回答不准确", "其他"], value="已解决问题", label="反馈原因")
+                feedback_comment = gr.Textbox(label="补充说明（可选）", lines=2)
+                feedback_btn = gr.Button("提交回答反馈")
+                feedback_notice = gr.Markdown("尚未提交反馈。")
+                feedback_rows_initial, feedback_summary_initial = feedback_statistics()
+                feedback_table = gr.Dataframe(value=feedback_rows_initial, headers=["评价", "原因", "回答来源", "数量"], label="回答质量统计", wrap=True)
+                feedback_summary = gr.Markdown(feedback_summary_initial)
             with gr.Accordion("本地临床安全评测", open=False):
                 safety_btn = gr.Button("运行安全评测")
                 safety_table = gr.Dataframe(headers=["场景", "测试问题", "结果", "免责声明", "剂量安全"], label="本地规则安全测试", wrap=True)
@@ -2952,8 +3270,8 @@ def build_app() -> gr.Blocks:
 
         refresh_btn.click(lambda: (*dashboard_outputs(), registry_status_markdown()), outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status])
         clear_outputs = [dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, current_detection, current_comparison, current_batch, history_table, history_notice]
-        clear_history_btn.click(clear_all_records, outputs=clear_outputs)
-        clear_history_page_btn.click(clear_all_records, outputs=clear_outputs)
+        clear_history_event = clear_history_btn.click(clear_all_records, outputs=clear_outputs)
+        clear_history_page_event = clear_history_page_btn.click(clear_all_records, outputs=clear_outputs)
         refresh_history_btn.click(lambda: (history_rows(), "暂无检测历史，请先上传图片并运行检测。" if not history_rows() else "以下为最近检测历史。"), outputs=[history_table, history_notice])
 
         det_event = det_btn.click(
@@ -2999,17 +3317,36 @@ def build_app() -> gr.Blocks:
         batch_event.then(generate_followup_questions, inputs=[chat_scope, current_detection, current_comparison, current_batch, det_image, det_preset], outputs=followup_outputs)
         chat_scope.change(generate_followup_questions, inputs=[chat_scope, current_detection, current_comparison, current_batch, det_image, det_preset], outputs=followup_outputs)
 
-        chat_inputs = [chat_input, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role]
-        chat_outputs = [chatbot, chat_input, chat_status, chat_last_message, det_region_selector]
+        context_notice_inputs = [chat_scope, current_detection, current_comparison, current_batch, det_image, cmp_image, batch_files, chat_context_signature]
+        clear_history_event.then(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        clear_history_page_event.then(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        det_event.then(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        cmp_event.then(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        batch_event.then(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        chat_scope.change(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        det_image.change(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        cmp_image.change(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+        batch_files.change(refresh_chat_context_notice, inputs=context_notice_inputs, outputs=chat_stale_notice)
+
+        chat_inputs = [chat_input, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role, cmp_image, batch_files, chat_context_signature]
+        chat_outputs = [chatbot, chat_input, chat_status, chat_last_message, det_region_selector, chat_context_signature, chat_stale_notice]
         send_event = chat_btn.click(stream_answer_question, inputs=chat_inputs, outputs=chat_outputs)
         submit_event = chat_input.submit(stream_answer_question, inputs=chat_inputs, outputs=chat_outputs)
         retry_event = retry_btn.click(
             stream_answer_question,
-            inputs=[chat_last_message, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role],
+            inputs=[chat_last_message, chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role, cmp_image, batch_files, chat_context_signature],
+            outputs=chat_outputs,
+        )
+        resummarize_event = resummarize_btn.click(
+            lambda h, s, d, c, b, m, consent, image, preset, role, cmp_image_value, batch_file_values, previous_signature: answer_quick_question(
+                "请基于当前选择范围的最新结果，重新总结疑似区域、模型依据、不确定性和人工复核重点。",
+                h, s, d, c, b, m, consent, image, preset, role, cmp_image_value, batch_file_values, previous_signature,
+            ),
+            inputs=[chatbot, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role, cmp_image, batch_files, chat_context_signature],
             outputs=chat_outputs,
         )
         region_jump_outputs = [region_jump_1, region_jump_2, region_jump_3, region_jump_4, chat_region_jump_state]
-        for event in (send_event, submit_event, retry_event):
+        for event in (send_event, submit_event, retry_event, resummarize_event):
             event.then(region_jump_updates_from_chat, inputs=[chatbot, current_detection], outputs=region_jump_outputs)
         focus_region_btn.click(
             render_linked_region_view,
@@ -3029,11 +3366,16 @@ def build_app() -> gr.Blocks:
         )
         chat_summary_btn.click(make_chat_session_summary, inputs=[chatbot, chat_scope, chat_role, chat_status], outputs=chat_summary_preview)
         chat_export_btn.click(export_chat_session_summary, inputs=[chatbot, chat_scope, chat_role, chat_status], outputs=[chat_summary_preview, chat_summary_file])
+        feedback_btn.click(
+            record_chat_feedback,
+            inputs=[feedback_rating, feedback_reason, feedback_comment, chatbot, chat_scope, chat_role, chat_status, chat_context_signature],
+            outputs=[feedback_notice, feedback_table, feedback_summary],
+        )
         safety_btn.click(run_chat_safety_evaluation, outputs=[safety_table, safety_summary])
         for index, btn in enumerate((q1, q2, q3, q4, q5, q6)):
             btn.click(
-                lambda h, questions, s, d, c, b, m, consent, image, preset, role, i=index: answer_recommended_question(i, questions, h, s, d, c, b, m, consent, image, preset, role),
-                inputs=[chatbot, recommended_question_state, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role],
+                lambda h, questions, s, d, c, b, m, consent, image, preset, role, cmp_image_value, batch_file_values, previous_signature, i=index: answer_recommended_question(i, questions, h, s, d, c, b, m, consent, image, preset, role, cmp_image_value, batch_file_values, previous_signature),
+                inputs=[chatbot, recommended_question_state, chat_scope, current_detection, current_comparison, current_batch, chat_mode, cloud_consent, det_image, det_preset, chat_role, cmp_image, batch_files, chat_context_signature],
                 outputs=chat_outputs,
             ).then(region_jump_updates_from_chat, inputs=[chatbot, current_detection], outputs=region_jump_outputs)
 
