@@ -294,17 +294,269 @@ APP_CSS = """
   color: var(--ink);
 }
 .dashboard-detail-card .empty { color: var(--muted); }
+.gradio-container .tabs {
+  display: flex !important;
+  align-items: stretch !important;
+  gap: 14px !important;
+}
+.gradio-container .tabs > .tab-nav,
+.gradio-container .tabs .tab-nav {
+  flex: 0 0 220px !important;
+  align-self: flex-start !important;
+  position: sticky !important;
+  top: 8px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  padding: 10px !important;
+  border: 1px solid #fed7aa !important;
+  border-radius: 14px !important;
+  background: rgba(255,255,255,0.92) !important;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06) !important;
+}
+.gradio-container .tabs > .tab-nav button,
+.gradio-container .tabs .tab-nav button {
+  width: 100% !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+  border-radius: 10px !important;
+  white-space: normal !important;
+}
+.gradio-container .tabs > .tabitem,
+.gradio-container .tabs .tabitem {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+}
+.education-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.55fr);
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 14px;
+}
+.education-panel, .education-card, .education-tip {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.055);
+}
+.education-panel h2 { margin: 0 0 8px; font-size: 26px; color: var(--orange-dark); }
+.education-panel p { margin: 8px 0; line-height: 1.75; color: var(--ink); }
+.education-tip { background: #fff7ed; border-color: #fed7aa; }
+.education-tip b { display: block; margin-bottom: 8px; color: #9a3412; }
+.education-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+.education-card { display: flex; flex-direction: column; gap: 10px; min-height: 100%; }
+.education-card h3 { margin: 0; color: var(--ink); font-size: 20px; }
+.education-card .subtitle { color: var(--muted); font-size: 13px; margin-top: -4px; }
+.education-visual {
+  min-height: 150px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #fff7ed, #eff6ff);
+  border: 1px solid #fed7aa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.education-card dl { margin: 0; display: grid; gap: 8px; }
+.education-card dt { font-weight: 700; color: var(--orange-dark); }
+.education-card dd { margin: 2px 0 0; color: var(--ink); line-height: 1.6; }
+.education-footer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+#ask-ai-floating-button {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 9999;
+  width: 76px;
+  height: 76px;
+  border-radius: 999px;
+  border: 3px solid #fff;
+  background: radial-gradient(circle at 28% 24%, #fef3c7 0%, #f97316 45%, #7c2d12 100%);
+  color: #fff;
+  box-shadow: 0 18px 42px rgba(124, 45, 18, 0.36);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  font-weight: 900;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, outline 0.18s ease;
+}
+#ask-ai-floating-button span:nth-child(2) { font-size: 24px; line-height: 1; letter-spacing: 0.5px; }
+#ask-ai-floating-button small { font-size: 12px; line-height: 1; font-weight: 700; }
+#ask-ai-floating-button .ask-ai-stars { position: absolute; top: 8px; right: 14px; font-size: 14px; }
+#ask-ai-floating-button:hover, #ask-ai-floating-button.drag-over {
+  transform: translateY(-3px) scale(1.05);
+  box-shadow: 0 22px 52px rgba(124, 45, 18, 0.46);
+  outline: 4px solid rgba(249, 115, 22, 0.22);
+}
+#ask-ai-selection-popover {
+  position: absolute;
+  z-index: 10000;
+  display: none;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #9a3412;
+  padding: 8px 13px;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+  cursor: grab;
+}
+#ask-ai-selection-popover.visible { display: block; }
+#ask-ai-selection-popover:active { cursor: grabbing; }
 .gradio-container button.primary, .gradio-container button[variant="primary"] {
   background: var(--orange) !important;
   border-color: var(--orange) !important;
 }
 @media (max-width: 1100px) {
-  .metric-grid, .result-cards, .knowledge-grid, .quality-grid, .dashboard-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric-grid, .result-cards, .knowledge-grid, .quality-grid, .dashboard-detail-grid, .education-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .education-hero { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
-  .knowledge-grid, .dashboard-detail-grid { grid-template-columns: 1fr; }
+  .gradio-container .tabs { flex-direction: column !important; }
+  .gradio-container .tabs > .tab-nav, .gradio-container .tabs .tab-nav { position: static !important; flex: 1 1 auto !important; width: 100% !important; }
+  #ask-ai-floating-button { right: 14px; bottom: 14px; width: 66px; height: 66px; }
+  .knowledge-grid, .dashboard-detail-grid, .education-grid, .education-footer-grid { grid-template-columns: 1fr; }
   .det-explain { max-height: none; }
 }
+"""
+
+ASK_AI_HEAD = r"""
+<script>
+(function () {
+  if (window.__dentalAskAiInstalled) return;
+  window.__dentalAskAiInstalled = true;
+
+  function selectedText() {
+    const text = (window.getSelection && window.getSelection().toString() || "").trim();
+    return text.replace(/\s+/g, " ").slice(0, 1200);
+  }
+
+  function findAiTabButton() {
+    const candidates = Array.from(document.querySelectorAll('button, [role="tab"]'));
+    return candidates.find(el => (el.textContent || '').includes('结果解释助手')) || null;
+  }
+
+  function findInput() {
+    return document.querySelector('#ask-ai-input textarea, #ask-ai-input input, textarea[aria-label="问题"], input[aria-label="问题"]');
+  }
+
+  function findSendButton() {
+    return document.querySelector('#ask-ai-send button, #ask-ai-send');
+  }
+
+  function setNativeValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function jumpToAssistant() {
+    const tab = findAiTabButton();
+    if (tab) tab.click();
+    setTimeout(() => {
+      const input = findInput();
+      if (input) input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 350);
+  }
+
+  function askAi(text) {
+    const picked = (text || selectedText()).trim();
+    jumpToAssistant();
+    if (!picked) return;
+    const question = `请解释我在页面上选中的这段内容，并在需要时结合当前检测结果、多模型对比、批量检测和报告上下文回答：\n\n「${picked}」`;
+    setTimeout(() => {
+      const input = findInput();
+      const send = findSendButton();
+      if (!input || !send) return;
+      setNativeValue(input, question);
+      setTimeout(() => send.click(), 120);
+    }, 650);
+  }
+
+  function ensureUi() {
+    if (!document.getElementById('ask-ai-floating-button')) {
+      const btn = document.createElement('button');
+      btn.id = 'ask-ai-floating-button';
+      btn.type = 'button';
+      btn.title = 'AI助手：点击跳转，拖入选中文字可提问';
+      btn.innerHTML = '<span class="ask-ai-stars">✦</span><span>AI</span><small>助手</small>';
+      btn.addEventListener('click', () => askAi(selectedText()));
+      btn.addEventListener('dragover', e => { e.preventDefault(); btn.classList.add('drag-over'); });
+      btn.addEventListener('dragleave', () => btn.classList.remove('drag-over'));
+      btn.addEventListener('drop', e => {
+        e.preventDefault();
+        btn.classList.remove('drag-over');
+        askAi(e.dataTransfer.getData('text/plain') || selectedText());
+      });
+      document.body.appendChild(btn);
+    }
+    if (!document.getElementById('ask-ai-selection-popover')) {
+      const pop = document.createElement('button');
+      pop.id = 'ask-ai-selection-popover';
+      pop.type = 'button';
+      pop.draggable = true;
+      pop.textContent = '问问AI助手';
+      pop.addEventListener('click', () => askAi(pop.dataset.text || selectedText()));
+      pop.addEventListener('dragstart', e => {
+        const text = pop.dataset.text || selectedText();
+        e.dataTransfer.setData('text/plain', text);
+      });
+      document.body.appendChild(pop);
+    }
+  }
+
+  function showSelectionPopover() {
+    ensureUi();
+    const text = selectedText();
+    const pop = document.getElementById('ask-ai-selection-popover');
+    if (!text || text.length < 3) {
+      pop.classList.remove('visible');
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) return;
+    pop.dataset.text = text;
+    pop.style.left = `${Math.min(window.innerWidth - 150, Math.max(12, rect.right + window.scrollX + 8))}px`;
+    pop.style.top = `${Math.max(12, rect.top + window.scrollY - 8)}px`;
+    pop.classList.add('visible');
+  }
+
+  function install() {
+    ensureUi();
+    document.addEventListener('mouseup', () => setTimeout(showSelectionPopover, 60));
+    document.addEventListener('touchend', () => setTimeout(showSelectionPopover, 180));
+    document.addEventListener('selectionchange', () => setTimeout(showSelectionPopover, 80));
+    document.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        askAi(selectedText());
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install);
+  else install();
+})();
+</script>
 """
 
 
@@ -3337,6 +3589,110 @@ python app.py
 """
 
 
+def disease_education_html() -> str:
+    tooth_svg = {
+        "caries": """
+        <svg viewBox='0 0 220 150' width='100%' height='150' role='img' aria-label='龋坏示意图'>
+          <rect width='220' height='150' fill='transparent'/>
+          <path d='M76 20 C50 28 42 55 52 88 C60 116 72 133 91 122 C100 117 104 96 111 96 C118 96 122 117 132 122 C151 133 163 116 170 88 C181 55 170 28 144 20 C130 15 119 25 110 25 C101 25 90 15 76 20Z' fill='#fff' stroke='#334155' stroke-width='5'/>
+          <circle cx='79' cy='58' r='17' fill='#92400e'/><circle cx='89' cy='53' r='6' fill='#451a03'/>
+          <path d='M69 93 C78 87 86 87 96 94' fill='none' stroke='#f97316' stroke-width='5' stroke-linecap='round'/>
+          <text x='112' y='62' font-size='18' fill='#9a3412' font-weight='700'>Caries</text>
+          <text x='112' y='87' font-size='13' fill='#475569'>牙体硬组织被酸蚀破坏</text>
+        </svg>""",
+        "periapical": """
+        <svg viewBox='0 0 220 150' width='100%' height='150' role='img' aria-label='根尖周异常示意图'>
+          <rect width='220' height='150' fill='transparent'/>
+          <path d='M86 16 C62 23 55 48 63 78 C69 101 80 115 94 108 C103 104 104 91 110 91 C116 91 117 104 126 108 C140 115 151 101 157 78 C165 48 158 23 134 16 C123 12 116 20 110 20 C104 20 97 12 86 16Z' fill='#fff' stroke='#334155' stroke-width='5'/>
+          <path d='M99 91 C98 105 95 119 91 134' stroke='#94a3b8' stroke-width='8' stroke-linecap='round'/>
+          <path d='M121 91 C122 105 125 119 129 134' stroke='#94a3b8' stroke-width='8' stroke-linecap='round'/>
+          <ellipse cx='110' cy='130' rx='35' ry='14' fill='#bfdbfe' stroke='#2563eb' stroke-width='4'/>
+          <text x='13' y='38' font-size='18' fill='#1d4ed8' font-weight='700'>Periapical</text>
+          <text x='13' y='61' font-size='13' fill='#475569'>根尖周围透射影/异常</text>
+        </svg>""",
+        "impacted": """
+        <svg viewBox='0 0 220 150' width='100%' height='150' role='img' aria-label='阻生牙示意图'>
+          <rect width='220' height='150' fill='transparent'/>
+          <path d='M20 118 C55 95 86 91 119 98 C151 105 177 97 202 76' fill='none' stroke='#cbd5e1' stroke-width='18' stroke-linecap='round'/>
+          <g transform='translate(110 72) rotate(-28)'>
+            <path d='M-24 -41 C-44 -35 -48 -12 -39 13 C-32 34 -20 44 -8 35 C-1 29 -1 13 5 13 C11 13 11 29 18 35 C30 44 42 34 49 13 C58 -12 54 -35 34 -41 C22 -45 13 -35 5 -35 C-3 -35 -12 -45 -24 -41Z' fill='#fff' stroke='#334155' stroke-width='5'/>
+          </g>
+          <path d='M73 105 C99 83 134 72 171 74' fill='none' stroke='#f97316' stroke-width='5' stroke-dasharray='7 7'/>
+          <text x='20' y='34' font-size='18' fill='#9a3412' font-weight='700'>Impacted</text>
+          <text x='20' y='57' font-size='13' fill='#475569'>牙齿萌出方向或空间受阻</text>
+        </svg>""",
+    }
+    cards = [
+        {
+            "title": "龋坏 / Caries",
+            "subtitle": "常被称为“蛀牙”，模型会提示疑似牙体硬组织破坏区域。",
+            "svg": tooth_svg["caries"],
+            "cause": "牙菌斑细菌利用糖产生酸，长期作用会让牙釉质和牙本质脱矿；清洁盲区、频繁含糖饮食、口干、修复体边缘也会增加风险。",
+            "symptom": "早期可能没有感觉；进展后可出现冷热敏感、咬合痛、食物嵌塞、牙面黑褐色改变或洞形缺损。",
+            "action": "减少含糖频率，使用含氟牙膏，认真清洁牙缝；不要自行抠挖或用偏方处理。",
+            "visit": "若出现持续敏感、疼痛、明显洞形或模型多次提示相近区域，建议尽快带原始影像找口腔医生复核。",
+        },
+        {
+            "title": "根尖周异常 / Periapical Lesion",
+            "subtitle": "模型关注牙根尖周围可能需要复核的局部影像异常。",
+            "svg": tooth_svg["periapical"],
+            "cause": "常与深龋、牙髓感染、牙外伤、既往根管治疗问题或慢性炎症有关，但影像表现需要结合临床检查判断。",
+            "symptom": "可能出现咬合痛、牙龈肿胀、脓包、持续隐痛，也可能没有明显症状，只在影像上被发现。",
+            "action": "记录疼痛位置和持续时间，避免自行服用或停用抗生素；若肿胀、发热、流脓或张口受限，应及时就诊。",
+            "visit": "建议由医生结合牙髓活力测试、叩诊、根尖片/CBCT 等进一步确认，模型结果不能替代诊断。",
+        },
+        {
+            "title": "阻生/埋伏牙 / Impacted",
+            "subtitle": "模型提示牙齿萌出方向、位置或空间可能异常的区域。",
+            "svg": tooth_svg["impacted"],
+            "cause": "常见于智齿，也可能与牙弓空间不足、萌出方向异常、邻牙阻挡或发育位置异常有关。",
+            "symptom": "可能反复牙龈肿痛、食物嵌塞、张口不适、邻牙龋坏风险增加；也可能长期无症状。",
+            "action": "保持后牙区清洁，避免反复刺激肿痛部位；如果反复发炎，不要只靠止痛药拖延。",
+            "visit": "建议口腔医生评估阻生方向、邻牙关系和神经管风险，必要时结合 CBCT 制定处理方案。",
+        },
+    ]
+    card_html = []
+    for card in cards:
+        card_html.append(
+            "<article class='education-card'>"
+            f"<div class='education-visual'>{card['svg']}</div>"
+            f"<h3>{card['title']}</h3>"
+            f"<div class='subtitle'>{card['subtitle']}</div>"
+            "<dl>"
+            f"<div><dt>常见成因</dt><dd>{card['cause']}</dd></div>"
+            f"<div><dt>可能症状</dt><dd>{card['symptom']}</dd></div>"
+            f"<div><dt>日常应对</dt><dd>{card['action']}</dd></div>"
+            f"<div><dt>就医建议</dt><dd>{card['visit']}</dd></div>"
+            "</dl>"
+            "</article>"
+        )
+    return """
+    <section class='education-hero'>
+      <div class='education-panel'>
+        <h2>牙齿病变学习中心</h2>
+        <p>这里用普通用户更容易理解的方式介绍本系统可辅助识别的三类疑似区域：龋坏、根尖周异常、阻生/埋伏牙。你可以先了解常见成因、症状和就医建议，再去“图像检测”页面上传影像。</p>
+        <p>页面中的图示是科普示意图，不代表真实影像表现；模型检测结果也只提示“疑似区域”，最终仍需专业口腔医生结合原始影像和临床检查复核。</p>
+      </div>
+      <aside class='education-tip'>
+        <b>如何使用本平台？</b>
+        <ol>
+          <li>先阅读三类病变的基础知识。</li>
+          <li>在“图像检测”上传牙片或口腔影像。</li>
+          <li>查看检测框、局部放大和复核建议。</li>
+          <li>带着原始影像和报告咨询口腔医生。</li>
+        </ol>
+      </aside>
+    </section>
+    <section class='education-grid'>
+    """ + "\n".join(card_html) + f"""
+    </section>
+    <section class='education-footer-grid'>
+      <div class='education-tip'><b>什么时候应尽快就医？</b>出现持续疼痛、面部或牙龈肿胀、发热、流脓、张口受限、外伤后牙齿变色或咬合痛时，不建议仅依赖线上工具，应尽快到正规口腔医疗机构就诊。</div>
+      <div class='education-tip'><b>重要声明</b>{FULL_DISCLAIMER}</div>
+    </section>
+    """
+
+
 def build_app() -> gr.Blocks:
     refresh_model_registry()
     with gr.Blocks(title="牙齿病变目标区域识别与辅助分析平台") as demo:
@@ -3354,6 +3710,9 @@ def build_app() -> gr.Blocks:
         )
 
         dashboard_initial, kpi_initial, risk_initial, time_initial, conf_initial = dashboard_outputs()
+        with gr.Tab("牙齿病变学习"):
+            gr.HTML(disease_education_html())
+
         with gr.Tab("首页 Dashboard"):
             dashboard = gr.Markdown(dashboard_initial)
             with gr.Row():
@@ -3527,7 +3886,7 @@ def build_app() -> gr.Blocks:
                 wrap=True,
             )
 
-        with gr.Tab("结果解释助手"):
+        with gr.Tab("结果解释助手", elem_id="ai-assistant-tab"):
             gr.HTML("<div class='section-note'><b>结果解释助手</b><br>先选择分析范围，再围绕该范围内的检测结果提问。联网模式仅发送结构化检测结果、模型对比和影像质量统计，不发送原始影像；未勾选同意或云端不可用时，系统将只使用本地规则。</div>")
             chat_scope = gr.Radio(CHAT_SCOPE_OPTIONS, value="全部最新结果", label="分析范围")
             with gr.Row():
@@ -3535,7 +3894,7 @@ def build_app() -> gr.Blocks:
                 cloud_consent = gr.Checkbox(value=False, label="我同意将所选范围的结构化检测数据发送至云端 AI")
                 chat_role = gr.Radio(CHAT_ROLE_OPTIONS, value="患者易懂版", label="回答视图")
             chatbot = gr.Chatbot(label="结果解释助手")
-            chat_input = gr.Textbox(label="问题", placeholder="例如：哪些区域需要人工复核？")
+            chat_input = gr.Textbox(label="问题", placeholder="例如：哪些区域需要人工复核？", elem_id="ask-ai-input")
             chat_status = gr.Markdown("**回答来源：** 等待提问。默认采用仅本地规则模式。")
             chat_stale_notice = gr.Markdown("当前聊天上下文与已保存检测结果一致。")
             chat_last_message = gr.State("")
@@ -3552,7 +3911,7 @@ def build_app() -> gr.Blocks:
                 q5 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[4])
                 q6 = gr.Button(DEFAULT_FOLLOWUP_QUESTIONS[5])
             with gr.Row():
-                chat_btn = gr.Button("发送", variant="primary")
+                chat_btn = gr.Button("发送", variant="primary", elem_id="ask-ai-send")
                 retry_btn = gr.Button("重试上一问题")
                 resummarize_btn = gr.Button("基于最新结果重新总结")
                 focus_region_btn = gr.Button("定位助手提及的区域")
@@ -3762,4 +4121,4 @@ def find_free_port(start_port: int = 7860, attempts: int = 20) -> int:
 if __name__ == "__main__":
     ensure_dirs()
     app = build_app()
-    app.launch(server_name="127.0.0.1", server_port=find_free_port(), css=APP_CSS)
+    app.launch(server_name="127.0.0.1", server_port=find_free_port(), css=APP_CSS, head=ASK_AI_HEAD)
