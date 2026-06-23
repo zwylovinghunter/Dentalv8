@@ -5,11 +5,13 @@ import hashlib
 import os
 import re
 import socket
+import threading
 import time
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
@@ -248,15 +250,60 @@ APP_CSS = """
 .legend-high, .legend-low { border-radius: 8px; padding: 9px 11px; font-size: 13px; }
 .legend-high { background: #ecfdf5; border: 1px solid #86efac; color: #166534; }
 .legend-low { background: #fff1f2; border: 1px solid #fda4af; color: #9f1239; }
+.det-input-row, .det-result-row {
+  align-items: flex-start !important;
+}
+.det-explain {
+  max-height: 390px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+.det-upload .image-container, .det-output .image-container {
+  min-height: 0 !important;
+}
+.task-status {
+  margin: 4px 0 10px;
+}
+.dashboard-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+.dashboard-detail-card {
+  min-height: 170px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 4px solid #fed7aa;
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+}
+.dashboard-detail-card h3 {
+  margin: 0 0 9px;
+  font-size: 16px;
+  color: var(--ink);
+}
+.dashboard-detail-card ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.dashboard-detail-card li {
+  margin: 6px 0;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.dashboard-detail-card .empty { color: var(--muted); }
 .gradio-container button.primary, .gradio-container button[variant="primary"] {
   background: var(--orange) !important;
   border-color: var(--orange) !important;
 }
 @media (max-width: 1100px) {
-  .metric-grid, .result-cards, .knowledge-grid, .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric-grid, .result-cards, .knowledge-grid, .quality-grid, .dashboard-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .knowledge-grid { grid-template-columns: 1fr; }
+  .knowledge-grid, .dashboard-detail-grid { grid-template-columns: 1fr; }
+  .det-explain { max-height: none; }
 }
 """
 
@@ -290,10 +337,10 @@ MODEL_SPECS = [
     ModelSpec(
         key="high_recall",
         name="高召回牙齿病变检测模型",
-        model_type="YOLOv8m + P2-highRecall",
-        description="强调尽量减少漏检，适合初筛和复核优先的展示场景。",
-        preferred_terms=("yolov8m+p2-highrecall_mosaic05_e200_p30", "p2-highrecall"),
-        fallback_terms=("yolov8m", "p2", "highrecall", "mosaic05"),
+        model_type="YOLOv8n + Gated-SPDConv-neck-P4",
+        description="使用 yolov8n+Gated-SPDConv-neck-P4 权重，强调召回率和减少漏检，适合初筛和复核优先的展示场景。",
+        preferred_terms=("yolov8n+gated-spdconv-neck-p4", "gated-spdconv-neck-p4"),
+        fallback_terms=("gated", "spdconv-neck-p4"),
     ),
 ]
 
@@ -301,6 +348,16 @@ MODEL_SPECS = [
 MODEL_CACHE: dict[str, Any] = {}
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {}
 WEIGHT_FINGERPRINT_CACHE: dict[str, dict[str, Any]] = {}
+INFERENCE_JOB_LOCK = threading.RLock()
+
+
+def serialized_inference_job(func):
+    """Keep CPU YOLO jobs exclusive even when functions are invoked outside Gradio's queue."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with INFERENCE_JOB_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 def ensure_dirs() -> None:
@@ -1093,9 +1150,22 @@ def record_detection_history(result: dict[str, Any], task_kind: str) -> dict[str
     return append_history(event)
 
 
-def run_single_detection(image: Any, model_name: str, conf: float, iou: float, show_label: bool, show_confidence: bool, line_width: int, color_mode: str):
+@serialized_inference_job
+def run_single_detection(
+    image: Any,
+    model_name: str,
+    conf: float,
+    iou: float,
+    show_label: bool,
+    show_confidence: bool,
+    line_width: int,
+    color_mode: str,
+    progress=gr.Progress(track_tqdm=False),
+):
+    progress(0.05, desc="正在准备单图检测任务…")
     model_key = model_name_to_key(model_name)
     result, rendered = run_detection_core(image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+    progress(0.9, desc="正在整理单图检测结果…")
     result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
     result["visual_options"] = {
         "show_label": bool(show_label),
@@ -1107,6 +1177,7 @@ def run_single_detection(image: Any, model_name: str, conf: float, iou: float, s
     record_detection_history(result, "single_detection")
     image_out = rendered if rendered is not None else None
     choices = region_choices(result)
+    progress(1.0, desc="单图检测完成")
     return (
         image_out,
         detection_summary_cards(result),
@@ -1340,10 +1411,21 @@ def system_recommendation(results: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def run_model_comparison(image: Any, conf: float, iou: float, show_label: bool, show_confidence: bool, line_width: int, color_mode: str):
+@serialized_inference_job
+def run_model_comparison(
+    image: Any,
+    conf: float,
+    iou: float,
+    show_label: bool,
+    show_confidence: bool,
+    line_width: int,
+    color_mode: str,
+    progress=gr.Progress(track_tqdm=False),
+):
     results = []
     rendered_images = []
-    for spec in MODEL_SPECS:
+    for index, spec in enumerate(MODEL_SPECS, 1):
+        progress((index - 1) / max(1, len(MODEL_SPECS)), desc=f"正在运行模型对比：{spec.name}（{index}/{len(MODEL_SPECS)}）")
         result, rendered = run_detection_core(image, spec.key, conf, iou, show_label, show_confidence, line_width, color_mode)
         result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
         result["visual_options"] = {
@@ -1355,9 +1437,11 @@ def run_model_comparison(image: Any, conf: float, iou: float, show_label: bool, 
         attach_result_traceability(result)
         results.append(result)
         rendered_images.append(rendered)
+    progress(0.9, desc="正在生成模型一致性与融合视图…")
     append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
     summary = compare_summary(results) + "\n\n" + system_recommendation(results)
     fusion_image, fusion_rows, fusion_note = render_fusion_view(image, results)
+    progress(1.0, desc="多模型对比完成")
     return (
         rendered_images[0],
         rendered_images[1],
@@ -1400,12 +1484,15 @@ def threshold_sensitivity_explanation() -> str:
     )
 
 
-def run_threshold_sensitivity(image: Any, model_name: str, iou: float):
+@serialized_inference_job
+def run_threshold_sensitivity(image: Any, model_name: str, iou: float, progress=gr.Progress(track_tqdm=False)):
     if image is None:
         return [], pd.DataFrame([{"置信度阈值": "请先上传图片", "检测框数量": 0}]), "请先上传图片后再运行阈值敏感性分析。"
     model_key = model_name_to_key(model_name)
     rows = []
-    for conf in [0.15, 0.25, 0.35, 0.50]:
+    thresholds = [0.15, 0.25, 0.35, 0.50]
+    for index, conf in enumerate(thresholds, 1):
+        progress((index - 1) / len(thresholds), desc=f"正在分析阈值 {conf:.2f}（{index}/{len(thresholds)}）")
         result, _ = run_detection_core(image, model_key, conf, iou)
         success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
         if success:
@@ -1426,6 +1513,7 @@ def run_threshold_sensitivity(image: Any, model_name: str, iou: float):
             ]
         )
     chart_df = pd.DataFrame([{"置信度阈值": row[0], "检测框数量": row[1]} for row in rows])
+    progress(1.0, desc="阈值敏感性分析完成")
     return rows, chart_df, threshold_sensitivity_explanation()
 
 
@@ -1477,6 +1565,118 @@ def batch_summary_markdown(items: list[dict[str, Any]]) -> str:
     )
 
 
+def report_result_pairs(
+    detection: dict[str, Any] | None = None,
+    comparison: list[dict[str, Any]] | None = None,
+    batch_items: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(detection, dict) and detection:
+        pairs.append(("单图检测", detection))
+    for idx, result in enumerate(comparison or [], 1):
+        if isinstance(result, dict):
+            pairs.append((f"多模型对比·模型{idx}", result))
+    for idx, item in enumerate(batch_items or [], 1):
+        if isinstance(item, dict) and isinstance(item.get("result"), dict):
+            name = item.get("image_name") or item["result"].get("image_name") or f"图片{idx}"
+            pairs.append((f"批量检测·{name}", item["result"]))
+    return pairs
+
+
+def report_scene_markdown(report_type: str, pairs: list[tuple[str, dict[str, Any]]]) -> str:
+    success = [r for _, r in pairs if r.get("status") == "success" and r.get("runtime_mode") == "real_yolo_cpu"]
+    boxes = [box for result in success for box in result.get("boxes", [])]
+    classes = sorted({normalize_class_name(box.get("class_name", "")) for box in boxes if box.get("class_name")})
+    high_review = sum(1 for box in boxes if box.get("risk_level") in {"建议人工复核", "强烈建议人工复核"})
+    lines = [
+        "## 报告场景摘要",
+        f"- 报告用途：{report_type}，用于展示 YOLO 模型对牙齿病变疑似区域的辅助识别结果。",
+        f"- 有效推理结果：{len(success)} 组；疑似区域总数：{len(boxes)} 个；建议重点复核区域：{high_review} 个。",
+        f"- 涉及疑似类别：{'、'.join(classes) if classes else '当前阈值下未检出明确类别'}。",
+    ]
+    if "批量" in report_type:
+        lines.append("- 场景重点：优先筛出需要人工复核的影像，并保留失败/低置信/高风险样本便于后续复查。")
+    elif "多模型" in report_type:
+        lines.append("- 场景重点：比较不同模型在同一影像上的一致性与分歧，辅助判断疑似区域稳定性。")
+    elif "单图" in report_type:
+        lines.append("- 场景重点：围绕单张影像输出区域级复核清单、类别解释和报告材料。")
+    else:
+        lines.append("- 场景重点：整合单图、多模型与批量任务，形成统一的科研展示和复核材料。")
+    return "\n".join(lines)
+
+
+def class_summary_markdown(pairs: list[tuple[str, dict[str, Any]]]) -> str:
+    records: dict[str, list[float]] = {}
+    for _, result in pairs:
+        if result.get("status") != "success":
+            continue
+        for box in result.get("boxes", []):
+            class_name = normalize_class_name(box.get("class_name", "")) or "未命名类别"
+            records.setdefault(class_name, []).append(float(box.get("confidence", 0.0)))
+    lines = ["## 类别级解释与复核重点"]
+    if not records:
+        lines.append("当前选择范围内未检出可归纳的疑似类别。")
+        return "\n".join(lines)
+    lines.extend(["| 类别 | 疑似区域数 | 平均置信度 | 最高置信度 | 模型含义 | 复核重点 | 常见注意点 |", "|---|---:|---:|---:|---|---|---|"])
+    for class_name, confs in sorted(records.items()):
+        info = CLASS_KNOWLEDGE.get(
+            class_name,
+            {"meaning": "自定义模型类别，请结合训练集定义解释。", "review": "建议结合原始影像与专业经验复核。", "note": "暂无内置类别说明。"},
+        )
+        lines.append(
+            f"| {class_name} | {len(confs)} | {sum(confs) / len(confs):.3f} | {max(confs):.3f} | {info['meaning']} | {info['review']} | {info['note']} |"
+        )
+    return "\n".join(lines)
+
+
+def review_worklist_markdown(pairs: list[tuple[str, dict[str, Any]]], limit: int = 30) -> str:
+    severity = {"强烈建议人工复核": 3, "建议人工复核": 2, "可信度较高": 1}
+    rows: list[dict[str, Any]] = []
+    for source, result in pairs:
+        for idx, box in enumerate(result.get("boxes", []), 1):
+            rows.append(
+                {
+                    "source": source,
+                    "region": idx,
+                    "class": box.get("class_name", "-"),
+                    "confidence": float(box.get("confidence", 0.0)),
+                    "risk": box.get("risk_level", "常规人工复核"),
+                    "bbox": box.get("bbox_xyxy", []),
+                    "suggestion": box.get("review_suggestion", "建议结合原始影像人工复核。"),
+                }
+            )
+    lines = ["## 人工复核任务清单"]
+    if not rows:
+        lines.append("当前阈值下未形成区域级复核任务；仍建议结合原始影像常规复核。")
+        return "\n".join(lines)
+    rows.sort(key=lambda x: (severity.get(str(x["risk"]), 1), x["confidence"]), reverse=True)
+    lines.extend(["| 优先级 | 来源 | 区域 | 类别 | 置信度 | 坐标 | 复核建议 |", "|---:|---|---:|---|---:|---|---|"])
+    for rank, row in enumerate(rows[:limit], 1):
+        bbox = ", ".join(str(v) for v in row["bbox"])
+        lines.append(f"| {rank} | {row['source']} | {row['region']} | {row['class']} | {row['confidence']:.3f} | {bbox} | {row['suggestion']} |")
+    if len(rows) > limit:
+        lines.append(f"\n> 仅展示前 {limit} 个优先复核区域，其余 {len(rows) - limit} 个区域请在结构化表格中查看。")
+    return "\n".join(lines)
+
+
+def batch_priority_markdown(items: list[dict[str, Any]] | None, limit: int = 12) -> str:
+    if not items:
+        return "## 批量复核优先级\n当前无批量检测结果。"
+    severity = {"强烈建议人工复核": 3, "建议人工复核": 2, "常规人工复核": 1, "当前阈值下无疑似区域": 0, "无法评估": -1}
+    ranked = []
+    for item in items:
+        result = item.get("result", {}) if isinstance(item, dict) else {}
+        level = overall_review_level(result)
+        ranked.append((severity.get(level, 0), int(result.get("box_count", 0)), float(result.get("max_confidence", 0.0)), item.get("image_name", "-"), result, level))
+    ranked.sort(reverse=True)
+    lines = ["## 批量复核优先级", "| 排名 | 图片 | 复核等级 | 疑似区域数 | 最高置信度 | 主要类别 | 建议 |", "|---:|---|---|---:|---:|---|---|"]
+    for rank, (_, _, _, image_name, result, level) in enumerate(ranked[:limit], 1):
+        classes = sorted({box.get("class_name", "-") for box in result.get("boxes", [])})
+        advice = "优先打开原图与检测图人工复核。" if severity.get(level, 0) >= 2 else "常规复核或归档。"
+        lines.append(f"| {rank} | {image_name} | {level} | {result.get('box_count', 0)} | {float(result.get('max_confidence', 0.0)):.3f} | {'、'.join(classes) if classes else '-'} | {advice} |")
+    return "\n".join(lines)
+
+
 def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | None]:
     if not items:
         return None, None
@@ -1485,13 +1685,20 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     csv_path = REPORT_DIR / f"batch_detection_{ts}.csv"
     md_path = REPORT_DIR / f"batch_detection_{ts}.md"
     df = pd.DataFrame(
-        [batch_result_row(item) for item in items],
-        columns=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
+        [
+            batch_result_row(item)
+            + [
+                "、".join(sorted({box.get("class_name", "-") for box in item.get("result", {}).get("boxes", [])})) or "-",
+                "; ".join(f"区域{i + 1}:{box.get('risk_level', '-')}" for i, box in enumerate(item.get("result", {}).get("boxes", [])[:5])) or "-",
+            ]
+            for item in items
+        ],
+        columns=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因", "检出类别摘要", "前5个区域复核等级"],
     )
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     md_table = [
-        "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 |",
-        "|---|---|---:|---:|---:|---:|---|---|",
+        "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 | 检出类别摘要 | 前5个区域复核等级 |",
+        "|---|---|---:|---:|---:|---:|---|---|---|---|",
     ]
     for row in df.astype(str).values.tolist():
         md_table.append("| " + " | ".join(row) + " |")
@@ -1501,7 +1708,15 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
         f"- 报告生成时间：{now_iso()}",
         "- 运行设备：CPU",
         "",
+        report_scene_markdown("批量检测报告", report_result_pairs(batch_items=items)),
+        "",
         batch_summary_markdown(items),
+        "",
+        batch_priority_markdown(items),
+        "",
+        class_summary_markdown(report_result_pairs(batch_items=items)),
+        "",
+        review_worklist_markdown(report_result_pairs(batch_items=items)),
         "",
         "## 模型与结果可追溯性",
         traceability_markdown([item.get("result", {}) for item in items if isinstance(item, dict)]),
@@ -1516,13 +1731,26 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     return str(md_path), str(csv_path)
 
 
-def run_batch_detection(files: list[Any] | None, model_name: str, conf: float, iou: float, show_label: bool, show_confidence: bool, line_width: int, color_mode: str):
+@serialized_inference_job
+def run_batch_detection(
+    files: list[Any] | None,
+    model_name: str,
+    conf: float,
+    iou: float,
+    show_label: bool,
+    show_confidence: bool,
+    line_width: int,
+    color_mode: str,
+    progress=gr.Progress(track_tqdm=False),
+):
     if not files:
         return [], [], "请先上传一张或多张图片。", None, None, [], *dashboard_outputs(), registry_status_markdown(), history_rows()
     model_key = model_name_to_key(model_name)
     items: list[dict[str, Any]] = []
     preview: list[tuple[Image.Image, str]] = []
+    total_files = len(files)
     for idx, file_obj in enumerate(files, 1):
+        progress((idx - 1) / max(1, total_files), desc=f"正在处理批量图片 {idx}/{total_files}")
         image_name = image_display_name(file_obj, f"图片{idx}")
         result, rendered = run_detection_core(file_obj, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
         result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
@@ -1541,6 +1769,7 @@ def run_batch_detection(files: list[Any] | None, model_name: str, conf: float, i
     append_history({"type": "batch_detection", "created_at": now_iso(), "items": items})
     md_path, csv_path = export_batch_report(items)
     rows = [batch_result_row(item) for item in items]
+    progress(1.0, desc="批量检测完成")
     return rows, preview, batch_summary_markdown(items), md_path, csv_path, items, *dashboard_outputs(), registry_status_markdown(), history_rows()
 
 
@@ -2219,14 +2448,40 @@ def generate_consultation_card(
 
 def make_chat_session_summary(history: list[Any] | None, scope: str, role: str, source_status: str) -> str:
     items = normalize_chat_history(history, limit=12)
-    lines = ["# AI 助手会话摘要", "", f"- 生成时间：{now_iso()}", f"- 分析范围：{scope}", f"- 回答视图：{role}", f"- 最近回答状态：{source_status or '未记录'}", "", "## 问答记录"]
+    lines = [
+        "# AI 助手会话摘要",
+        "",
+        f"- 生成时间：{now_iso()}",
+        f"- 分析范围：{scope}",
+        f"- 回答视图：{role}",
+        f"- 最近回答状态：{source_status or '未记录'}",
+        "- 摘要用途：记录用户围绕检测结果、模型依据、不确定性和复核建议的交互问答，便于后续人工复查和答辩整理。",
+        "",
+        "## 会话场景说明",
+        "- 患者易懂版：强调通俗解释和就诊复核提醒。",
+        "- 医生复核版：强调区域、模型、置信度、类别冲突和人工复核清单。",
+        "- 科研答辩版：强调模型差异、阈值、实验局限和可追溯性。",
+        "",
+        "## 问答记录",
+    ]
     if not items:
         lines.append("- 暂无问答记录。")
     else:
         for item in items:
             label = "用户" if item["role"] == "user" else "助手"
             lines.append(f"\n### {label}\n{item['content']}")
-    lines.extend(["", "## 使用说明", DISCLAIMER])
+    lines.extend(
+        [
+            "",
+            "## 后续建议",
+            "- 若会话涉及具体区域，请同步查看单图报告或多模型对比报告中的区域级复核清单。",
+            "- 若会话涉及批量任务，请优先查看批量报告中的复核优先级表。",
+            "- 若会话涉及治疗、用药或手术决策，应将本摘要仅作为就诊沟通材料，由专业口腔医生判断。",
+            "",
+            "## 使用说明",
+            DISCLAIMER,
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -2446,8 +2701,15 @@ def cloud_chat(
             json={"model": DEEPSEEK_MODEL, "messages": messages, "stream": False},
             timeout=DEEPSEEK_TIMEOUT_SECONDS,
         )
+        if response.status_code == 402:
+            return "", False, "云端账户余额不足（HTTP 402）。请为当前 DeepSeek 账户充值，或更换有余额的 DEEPSEEK_API_KEY；系统已切换为本地规则模式。", round((time.perf_counter() - started) * 1000, 1)
         if response.status_code in {401, 403, 404} or response.status_code >= 500:
-            return "", False, f"云端服务返回 HTTP {response.status_code}，已自动使用本地规则模式。", round((time.perf_counter() - started) * 1000, 1)
+            try:
+                error_message = str(response.json().get("error", {}).get("message", "")).strip()
+            except Exception:
+                error_message = ""
+            detail = f"：{error_message}" if error_message else ""
+            return "", False, f"云端服务返回 HTTP {response.status_code}{detail}，已自动使用本地规则模式。", round((time.perf_counter() - started) * 1000, 1)
         response.raise_for_status()
         data = response.json()
         choices = data.get("choices")
@@ -2589,6 +2851,21 @@ def make_report_markdown(
     include_detection = report_type in {"单图检测报告", "综合报告"} and detection
     include_comparison = report_type in {"多模型对比报告", "综合报告"} and comparison
     include_batch = report_type in {"批量检测报告", "综合报告"} and batch_items
+    active_pairs = report_result_pairs(
+        detection if include_detection else None,
+        comparison if include_comparison else None,
+        batch_items if include_batch else None,
+    )
+    lines.extend(
+        [
+            report_scene_markdown(report_type, active_pairs),
+            "",
+            class_summary_markdown(active_pairs),
+            "",
+            review_worklist_markdown(active_pairs),
+            "",
+        ]
+    )
     if include_detection:
         lines.extend(
             [
@@ -2614,6 +2891,20 @@ def make_report_markdown(
         if not detection.get("boxes"):
             lines.append("| - | - | - | - | - | - | - | - | 当前阈值下未检测到疑似区域 |")
         lines.append("")
+        lines.extend(
+            [
+                "### 推理流程与复核优先级",
+                f"- 总体复核等级：{overall_review_level(detection)}",
+                f"- 可视化设置：{detection.get('visual_options', {})}",
+                "| 处理步骤 | 状态 | 耗时(ms) | 说明 |",
+                "|---|---|---:|---|",
+            ]
+        )
+        for step in detection.get("process_steps", []):
+            lines.append(f"| {step.get('步骤', '-')} | {step.get('状态', '-')} | {step.get('耗时(ms)', '-')} | {step.get('说明', '')} |")
+        if not detection.get("process_steps"):
+            lines.append("| - | - | - | 暂无可用流程记录 |")
+        lines.append("")
     if include_comparison:
         lines.extend(
             [
@@ -2631,9 +2922,16 @@ def make_report_markdown(
                 lines.append("| " + " | ".join(str(v) for v in row) + " |")
         else:
             lines.append("| - | - | - | - | - | 当前没有可分析的一致性区域 |")
+        lines.extend(["", "### 模型差异归因", "| 差异类型 | 涉及模型/区域 | IoU | 说明 | 人工复核建议 |", "|---|---|---:|---|---|"])
+        difference_rows = model_difference_attribution(comparison)
+        if difference_rows:
+            for row in difference_rows:
+                lines.append(f"| {row['类型']} | {row['模型/区域']} | {row['IoU']} | {row['说明']} | {row['建议']} |")
+        else:
+            lines.append("| - | - | - | 当前没有可归因的模型差异 | - |")
         lines.extend(["", compare_summary(comparison), system_recommendation(comparison), ""])
     if include_batch:
-        lines.extend(["## 批量检测摘要", batch_summary_markdown(batch_items), "", "### 批量检测表格"])
+        lines.extend(["## 批量检测摘要", batch_summary_markdown(batch_items), "", batch_priority_markdown(batch_items), "", "### 批量检测表格"])
         lines.extend(
             [
                 "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 |",
@@ -2812,6 +3110,16 @@ def generate_report(report_type: str, detection: dict[str, Any], comparison: lis
     return markdown, str(md_path), str(pdf_path), str(docx_path)
 
 
+def generate_single_detection_tab_report(detection: dict[str, Any]):
+    """Generate the rich, single-image report directly from the detection tab."""
+    return generate_report("单图检测报告", detection, [], [])
+
+
+def generate_model_comparison_tab_report(comparison: list[dict[str, Any]]):
+    """Generate the rich, comparison-specific report directly from the comparison tab."""
+    return generate_report("多模型对比报告", {}, comparison, [])
+
+
 def dashboard_stats() -> dict[str, Any]:
     history = load_history()
     events = history.get("events", [])
@@ -2875,6 +3183,32 @@ def dashboard_stats() -> dict[str, Any]:
 def dashboard_markdown() -> str:
     stats = dashboard_stats()
     avg_conf = f"{stats['avg_confidence']:.3f}" if stats["avg_confidence"] else "-"
+    def detail_card(title: str, items: list[str]) -> str:
+        if not items:
+            body = "<p class='empty'>暂无可用记录</p>"
+        else:
+            body = "<ul>" + "".join(f"<li>{xml_escape(item)}</li>" for item in items) + "</ul>"
+        return f"<section class='dashboard-detail-card'><h3>{xml_escape(title)}</h3>{body}</section>"
+
+    time_items = [f"{name}：{value:.2f} ms" for name, value in stats["times_by_model"].items()]
+    conf_items = [f"{name}：{value:.3f}" for name, value in stats["conf_by_model"].items()]
+    risk_items = [f"{name}：{value}" for name, value in stats["risk_counts"].items()]
+    latest_items = []
+    if stats["last_detection"]:
+        result = stats["last_detection"]
+        latest_items.append(f"{result['model_name']}：{result['box_count']} 个疑似区域，状态 {STATUS_LABELS.get(result['status'], result['status'])}")
+        latest_items.append(f"推理耗时：{result.get('inference_time_ms', 0):.2f} ms；平均置信度：{result.get('avg_confidence', 0):.3f}")
+    comparison_items = []
+    if stats["last_comparison"]:
+        ok = successful_results(stats["last_comparison"])
+        if ok:
+            fastest = min(ok, key=lambda item: item.get("inference_time_ms", float("inf")))
+            most_boxes = max(ok, key=lambda item: item.get("box_count", 0))
+            comparison_items.extend([
+                f"速度最快：{fastest['model_name']}，{fastest['inference_time_ms']:.2f} ms",
+                f"检出最多：{most_boxes['model_name']}，{most_boxes['box_count']} 个疑似区域",
+                f"成功模型数：{len(ok)}/{len(stats['last_comparison'])}",
+            ])
     lines = [
         "<div class='section-note'><b>首页 Dashboard</b><br>集中展示检测任务统计、风险等级分布、模型权重状态和最近一次辅助识别结果。</div>",
         "<div class='metric-grid'>",
@@ -2885,34 +3219,16 @@ def dashboard_markdown() -> str:
         f"<div class='metric-card'><div class='metric-label'>建议重点复核数量</div><div class='metric-value'>{stats['high_review_count']}</div><div class='metric-sub'>建议人工复核及以上</div></div>",
         f"<div class='metric-card'><div class='metric-label'>当前运行设备</div><div class='metric-value'>{DEVICE.upper()}</div><div class='metric-sub'>默认 CPU 推理</div></div>",
         "</div>",
-        "",
-        "### 三个模型平均推理耗时",
     ]
-    if stats["times_by_model"]:
-        for name, value in stats["times_by_model"].items():
-            lines.append(f"- {name}：{value:.2f} ms")
-    else:
-        lines.append("- 暂无成功推理记录")
-    lines.extend(["", "### 三个模型平均置信度"])
-    if stats["conf_by_model"]:
-        for name, value in stats["conf_by_model"].items():
-            lines.append(f"- {name}：{value:.3f}")
-    else:
-        lines.append("- 暂无成功推理记录")
-    lines.extend(["", "### 风险等级统计"])
-    for key, value in stats["risk_counts"].items():
-        lines.append(f"- {key}：{value}")
-    lines.extend(["", "### 最近一次检测摘要"])
-    if stats["last_detection"]:
-        r = stats["last_detection"]
-        lines.append(f"- {r['model_name']}：{r['box_count']} 个疑似区域，状态 {STATUS_LABELS.get(r['status'], r['status'])}")
-    else:
-        lines.append("- 暂无成功检测摘要")
-    lines.extend(["", "### 最近一次多模型对比摘要"])
-    if stats["last_comparison"]:
-        lines.append(compare_summary(stats["last_comparison"]).replace("### 多模型对比总结\n", ""))
-    else:
-        lines.append("- 暂无多模型对比记录")
+    detail_cards = [
+        detail_card("三个模型平均推理耗时", time_items),
+        detail_card("三个模型平均置信度", conf_items),
+        detail_card("风险等级统计", risk_items),
+        detail_card("最近一次检测摘要", latest_items),
+        detail_card("最近一次多模型对比摘要", comparison_items),
+        detail_card("运行与复核提示", [f"当前运行设备：{DEVICE.upper()}", f"建议重点复核数量：{stats['high_review_count']}", "所有输出均为辅助识别结果，需人工复核。"]),
+    ]
+    lines.extend(["<div class='dashboard-detail-grid'>", *detail_cards, "</div>"])
     return "\n".join(lines)
 
 
@@ -3054,12 +3370,13 @@ def build_app() -> gr.Blocks:
 
         with gr.Tab("图像检测"):
             gr.HTML("<div class='section-note'><b>图像检测</b><br>按步骤完成单张口腔影像上传、模型选择、阈值设置、真实 YOLO 推理和人工复核建议查看。</div>")
-            with gr.Row():
+            with gr.Row(equal_height=False, elem_classes="det-input-row"):
                 with gr.Column(scale=1):
                     gr.Markdown("### 第 1 步：上传口腔或牙齿影像")
-                    det_image = gr.Image(type="pil", label="上传牙齿或口腔图像")
+                    det_image = gr.Image(type="pil", label="上传牙齿或口腔图像", height=260, elem_classes="det-upload")
                     gr.Markdown("建议上传清晰的口腔全景片或牙齿相关影像。本系统仅用于科研演示和辅助识别。")
                     det_quality = gr.HTML(image_quality_precheck(None), label="影像质量预检")
+                with gr.Column(scale=1):
                     gr.Markdown("### 第 2 步：选择模型和阈值")
                     det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
                     det_preset = gr.Radio(
@@ -3076,12 +3393,13 @@ def build_app() -> gr.Blocks:
                         det_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
                         det_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
                     det_btn = gr.Button("运行单模型检测", variant="primary")
-                with gr.Column(scale=2):
-                    gr.Markdown("### 第 3 步：查看检测结果和复核建议")
-                    det_summary = gr.HTML(detection_summary_cards(None))
-                    with gr.Row():
-                        det_output = gr.Image(type="pil", label="检测结果图")
-                        det_explain = gr.Markdown("等待检测。")
+            gr.Markdown("### 第 3 步：查看检测结果和复核建议")
+            det_summary = gr.HTML(detection_summary_cards(None))
+            with gr.Row(equal_height=False, elem_classes="det-result-row"):
+                with gr.Column(scale=1):
+                    det_output = gr.Image(type="pil", label="检测结果图", height=360, elem_classes="det-output")
+                with gr.Column(scale=1):
+                    det_explain = gr.Markdown("等待检测。", elem_classes="det-explain")
             det_table = gr.Dataframe(
                 headers=["编号", "类别", "置信度", "坐标 x1", "坐标 y1", "坐标 x2", "坐标 y2", "风险等级", "复核建议"],
                 label="结构化检测结果",
@@ -3108,6 +3426,14 @@ def build_app() -> gr.Blocks:
                 )
                 threshold_chart = gr.BarPlot(pd.DataFrame([{"置信度阈值": "等待分析", "检测框数量": 0}]), x="置信度阈值", y="检测框数量", title="不同置信度阈值下检测框数量变化", y_title="检测框数量", height=260)
                 threshold_explain = gr.Markdown("等待阈值敏感性分析。")
+            with gr.Accordion("单图检测报告", open=False):
+                gr.Markdown("报告包含影像信息、模型与权重版本、阈值、逐区域明细、推理流程、复核优先级和可追溯性信息。")
+                single_report_btn = gr.Button("生成单图检测报告", variant="primary")
+                single_report_preview = gr.Markdown("尚未生成单图检测报告。")
+                with gr.Row():
+                    single_report_md = gr.File(label="下载单图 Markdown 报告")
+                    single_report_pdf = gr.File(label="下载单图 PDF 报告")
+                    single_report_docx = gr.File(label="下载单图 Word 报告")
 
         with gr.Tab("多模型对比"):
             gr.HTML("<div class='section-note'><b>多模型对比</b><br>多模型对比用于观察不同 YOLO 模型在同一影像上的检测差异，辅助判断疑似区域的稳定性。</div>")
@@ -3154,6 +3480,14 @@ def build_app() -> gr.Blocks:
                     label="融合区域明细",
                     wrap=True,
                 )
+            with gr.Accordion("多模型对比报告", open=False):
+                gr.Markdown("报告包含三模型结果表、一致性区域、类别冲突/仅单模型检出等差异归因、推荐场景和完整可追溯性信息。")
+                comparison_report_btn = gr.Button("生成多模型对比报告", variant="primary")
+                comparison_report_preview = gr.Markdown("尚未生成多模型对比报告。")
+                with gr.Row():
+                    comparison_report_md = gr.File(label="下载对比 Markdown 报告")
+                    comparison_report_pdf = gr.File(label="下载对比 PDF 报告")
+                    comparison_report_docx = gr.File(label="下载对比 Word 报告")
 
         with gr.Tab("批量检测"):
             gr.HTML("<div class='section-note'><b>批量检测</b><br>一次上传多张图片，系统逐张运行 YOLO CPU 推理，并生成批量汇总表和报告。</div>")
@@ -3278,6 +3612,10 @@ def build_app() -> gr.Blocks:
             run_single_detection,
             inputs=[det_image, det_model, det_conf, det_iou, det_show_label, det_show_conf, det_line_width, det_color_mode],
             outputs=[det_output, det_summary, det_table, det_explain, det_knowledge, det_crops, det_crop_notice, det_steps, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            concurrency_id="yolo_inference",
+            concurrency_limit=1,
+            trigger_mode="once",
+            show_progress="full",
         )
         det_image.clear(
             reset_single_detection_outputs,
@@ -3292,12 +3630,24 @@ def build_app() -> gr.Blocks:
             inputs=[det_image, current_detection, det_region_selector],
             outputs=[det_region_original, det_region_annotated, det_region_note],
         )
-        threshold_btn.click(run_threshold_sensitivity, inputs=[det_image, det_model, det_iou], outputs=[threshold_table, threshold_chart, threshold_explain])
+        threshold_btn.click(
+            run_threshold_sensitivity,
+            inputs=[det_image, det_model, det_iou],
+            outputs=[threshold_table, threshold_chart, threshold_explain],
+            concurrency_id="yolo_inference",
+            concurrency_limit=1,
+            trigger_mode="once",
+            show_progress="full",
+        )
 
         cmp_event = cmp_btn.click(
             run_model_comparison,
             inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
             outputs=[cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            concurrency_id="yolo_inference",
+            concurrency_limit=1,
+            trigger_mode="once",
+            show_progress="full",
         )
         cmp_image.clear(
             reset_model_comparison_outputs,
@@ -3309,6 +3659,21 @@ def build_app() -> gr.Blocks:
             run_batch_detection,
             inputs=[batch_files, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
             outputs=[batch_table, batch_preview, batch_summary, batch_md_file, batch_csv_file, current_batch, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            concurrency_id="yolo_inference",
+            concurrency_limit=1,
+            trigger_mode="once",
+            show_progress="full",
+        )
+
+        single_report_btn.click(
+            generate_single_detection_tab_report,
+            inputs=current_detection,
+            outputs=[single_report_preview, single_report_md, single_report_pdf, single_report_docx],
+        )
+        comparison_report_btn.click(
+            generate_model_comparison_tab_report,
+            inputs=current_comparison,
+            outputs=[comparison_report_preview, comparison_report_md, comparison_report_pdf, comparison_report_docx],
         )
 
         followup_outputs = [q1, q2, q3, q4, q5, q6, recommended_question_state]
@@ -3381,6 +3746,7 @@ def build_app() -> gr.Blocks:
 
         report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch], outputs=[report_preview, report_file, report_pdf_file, report_docx_file])
 
+    demo.queue(default_concurrency_limit=2, max_size=20)
     return demo
 
 

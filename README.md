@@ -26,7 +26,7 @@ python app.py
 
 - 均衡型基线模型：匹配 `results/yolov8n+baseline_e50/weights/best.pt`。
 - 高精度牙齿病变定位模型：匹配 `yolov8m+PIoU`。
-- 高召回轻量化牙齿病变检测模型：匹配 `yolov8n+SPDConv-neck-P4_cosLR`。
+- 高召回轻量化牙齿病变检测模型：匹配 `results/yolov8n+Gated-SPDConv-neck-P4/weights/best.pt`。
 
 如果某个模型未匹配到权重、权重加载失败或推理失败，系统会显示明确失败原因，不生成伪造检测框，也不会让单个模型失败影响其他模型。
 
