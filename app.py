@@ -89,6 +89,144 @@ NO_DETECTION_FOLLOWUP_QUESTIONS = [
     "检测结果能否作为临床诊断？",
     "完成检测后可以生成哪些报告？",
 ]
+DIALOGUE_TOPIC_FOLLOWUPS: list[dict[str, Any]] = [
+    {
+        "name": "pain_urgent",
+        "terms": ("牙疼", "牙痛", "疼痛", "疼", "肿", "脸肿", "流脓", "脓", "发热", "发烧", "急诊", "张口受限", "咬合痛"),
+        "questions": (
+            "牙疼或肿胀时哪些情况需要尽快就医？",
+            "当前症状可能和哪些疑似区域有关？",
+            "在人工复核前，哪些表现需要重点记录给医生？",
+            "如果疼痛加重，检测结果还能怎样辅助复核？",
+        ),
+    },
+    {
+        "name": "treatment_medicine",
+        "terms": ("治疗", "用药", "吃药", "消炎药", "止痛药", "抗生素", "拔牙", "补牙", "根管", "手术", "洗牙", "上药"),
+        "questions": (
+            "当前结果能否直接决定治疗方案？",
+            "哪些内容必须由口腔医生面诊后判断？",
+            "如果考虑补牙、根管或拔牙，应先复核哪些影像信息？",
+            "用药或止痛前需要注意哪些风险提示？",
+        ),
+    },
+    {
+        "name": "oral_hygiene",
+        "terms": ("刷牙", "牙线", "牙缝刷", "漱口", "漱口水", "含氟", "氟", "牙膏", "口腔清洁", "清洁", "牙菌斑", "菌斑"),
+        "questions": (
+            "结合当前情况，日常清洁应优先改进哪几步？",
+            "刷牙、牙线和漱口应怎样配合更合适？",
+            "哪些疑似区域更需要加强局部清洁和复查？",
+            "含氟牙膏或漱口水适合在什么情况下使用？",
+        ),
+    },
+    {
+        "name": "diet_sugar",
+        "terms": ("甜", "甜食", "糖", "含糖", "饮料", "奶茶", "零食", "饮食", "忌口", "碳酸", "酸性饮料", "吃甜", "喝饮料"),
+        "questions": (
+            "如果想吃甜食，频率和时间上应注意什么？",
+            "吃甜食后多久刷牙或漱口更合适？",
+            "哪些甜食或饮料更容易增加龋坏风险？",
+            "有没有相对更适合牙齿的零食选择？",
+            "如果已经牙疼或有疑似龋坏，还能吃甜食吗？",
+            "吃甜食前后需要注意哪些口腔清洁习惯？",
+        ),
+    },
+    {
+        "name": "caries",
+        "terms": ("龋", "龋齿", "蛀牙", "caries", "黑点", "黑线", "牙洞", "脱矿", "釉质"),
+        "questions": (
+            "这些表现更像龋坏风险还是需要人工排除的误检？",
+            "疑似龋坏区域应怎样按优先级复核？",
+            "哪些影像细节有助于判断是否需要补牙评估？",
+            "如果只是黑点或脱矿，下一步应怎样确认？",
+        ),
+    },
+    {
+        "name": "periodontal_gum",
+        "terms": ("牙龈", "出血", "牙周", "牙结石", "牙石", "松动", "牙槽骨", "牙龈退缩", "牙周袋"),
+        "questions": (
+            "牙龈出血或牙周问题应结合哪些检查判断？",
+            "当前影像结果能否提示需要重点复核的牙周风险？",
+            "牙结石、松动或牙槽骨变化需要怎样进一步确认？",
+            "日常清洁和复诊上应优先注意什么？",
+        ),
+    },
+    {
+        "name": "sensitivity",
+        "terms": ("敏感", "冷热", "冷水", "热水", "酸痛", "酸软", "牙本质", "咬东西酸", "咬合不适"),
+        "questions": (
+            "冷热敏感可能和哪些牙体或牙周问题有关？",
+            "当前结果里哪些区域更值得结合敏感症状复核？",
+            "敏感和龋坏、牙龈退缩应怎样区分线索？",
+            "出现咬合痛时应优先让医生检查哪些位置？",
+        ),
+    },
+    {
+        "name": "halitosis_dry_mouth",
+        "terms": ("口臭", "口干", "异味", "口苦", "唾液", "干燥", "嘴干"),
+        "questions": (
+            "口臭或口干通常需要从哪些方面排查？",
+            "当前结果能否提示可能需要清洁或复核的区域？",
+            "口干会不会增加龋坏或牙周风险？",
+            "如果伴随出血、疼痛或肿胀，应怎样描述给医生？",
+        ),
+    },
+    {
+        "name": "wisdom_tooth",
+        "terms": ("智齿", "阻生", "impacted", "冠周炎", "第三磨牙"),
+        "questions": (
+            "智齿或阻生区域应重点看哪些影像特征？",
+            "当前结果能否帮助判断是否需要人工重点复核智齿？",
+            "智齿疼痛、肿胀或反复发炎时应注意什么？",
+            "如果考虑拔智齿，还需要补充哪些检查信息？",
+        ),
+    },
+    {
+        "name": "children_pregnancy_elderly",
+        "terms": ("儿童", "孩子", "小孩", "乳牙", "换牙", "青少年", "孕妇", "怀孕", "哺乳", "老人", "老年"),
+        "questions": (
+            "儿童、孕期或老年人查看这类结果时有什么不同重点？",
+            "当前影像结果有哪些内容需要更谨慎解释？",
+            "哪些情况更应该尽快让口腔医生人工复核？",
+            "日常护理建议应如何根据人群做调整？",
+        ),
+    },
+    {
+        "name": "orthodontic_restoration",
+        "terms": ("正畸", "矫正", "牙套", "保持器", "种植", "种植牙", "牙冠", "烤瓷", "全瓷", "贴面", "修复体", "假牙", "嵌体"),
+        "questions": (
+            "牙套、种植或修复体会怎样影响影像复核？",
+            "当前结果里哪些区域可能受金属或修复体影响？",
+            "正畸或修复期间更应重点关注哪些清洁风险？",
+            "如果模型结果不一致，应怎样结合修复情况判断？",
+        ),
+    },
+    {
+        "name": "visit_review",
+        "terms": ("就医", "复诊", "挂号", "医生", "医院", "口腔科", "面诊", "拍片", "片子", "ct", "x光", "x线"),
+        "questions": (
+            "带着当前结果去就医时应重点问医生什么？",
+            "哪些检测信息最适合整理给医生人工复核？",
+            "还需要补拍片或做其他检查吗？",
+            "复诊前可以先记录哪些症状和时间变化？",
+        ),
+    },
+]
+DIALOGUE_TOPIC_PRIORITY = {
+    "pain_urgent": 10,
+    "treatment_medicine": 20,
+    "children_pregnancy_elderly": 30,
+    "wisdom_tooth": 40,
+    "orthodontic_restoration": 50,
+    "periodontal_gum": 60,
+    "sensitivity": 70,
+    "halitosis_dry_mouth": 80,
+    "oral_hygiene": 90,
+    "diet_sugar": 100,
+    "caries": 110,
+    "visit_review": 120,
+}
 CLOUD_FEEDBACK_REASONS = [
     "回复不准确",
     "回复不完整",
@@ -125,6 +263,7 @@ LATEST_AI_CONTEXT: dict[str, Any] = {
     "detection": {},
     "comparison": [],
     "batch_items": [],
+    "last_scope": "",
     "updated_at": "",
 }
 LATEST_AI_CONTEXT_LOCK = threading.RLock()
@@ -245,6 +384,14 @@ def build_detection_progress_state(percent: float, title: str, detail: str) -> s
             "</div>",
         ]
     )
+
+
+def detection_progress_update(percent: float, title: str, detail: str) -> Any:
+    return gr.update(value=build_detection_progress_state(percent, title, detail), visible=True)
+
+
+def detection_progress_hide() -> Any:
+    return gr.update(value="", visible=False)
 
 
 def detection_empty_state_update(kind: str, visible: bool) -> Any:
@@ -557,6 +704,9 @@ body[data-dental-page="report"] #page-report {
   border-color: rgba(196, 181, 253, 0.72);
 }
 .detection-progress-state {
+  position: sticky;
+  top: 10px;
+  z-index: 20;
   margin: 8px 0 12px;
   padding: 14px 16px;
   border: 1px solid rgba(191, 219, 254, 0.92);
@@ -1516,6 +1666,7 @@ ASK_AI_HEAD = r"""
         setTimeout(() => nav.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
       }
     }
+    document.dispatchEvent(new CustomEvent("dental-page-change", { detail: { page: nextPage } }));
   }
 
   window.dentalActivatePage = activateDentalPage;
@@ -1744,16 +1895,71 @@ MODEL_CACHE: dict[str, Any] = {}
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {}
 WEIGHT_FINGERPRINT_CACHE: dict[str, dict[str, Any]] = {}
 INFERENCE_JOB_LOCK = threading.RLock()
+INFERENCE_STATE_LOCK = threading.Lock()
+INFERENCE_ACTIVE_JOB: dict[str, Any] | None = None
+INFERENCE_JOB_STALE_SECONDS = 2 * 60 * 60
 
 
-def serialized_inference_job(func):
-    """Keep CPU YOLO jobs exclusive even when functions are invoked outside Gradio's queue."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        with INFERENCE_JOB_LOCK:
-            return func(*args, **kwargs)
-    return wrapper
+def begin_inference_job(kind: str, title: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Register one visible detection job; callers must clear it in finally."""
+    global INFERENCE_ACTIVE_JOB
+    now = time.perf_counter()
+    with INFERENCE_STATE_LOCK:
+        if INFERENCE_ACTIVE_JOB:
+            elapsed = now - float(INFERENCE_ACTIVE_JOB.get("started_at", now))
+            if elapsed < INFERENCE_JOB_STALE_SECONDS:
+                return None, copy.deepcopy(INFERENCE_ACTIVE_JOB)
+            INFERENCE_ACTIVE_JOB = None
+        job = {
+            "id": uuid.uuid4().hex,
+            "kind": kind,
+            "title": title,
+            "started_at": now,
+            "created_at": now_iso(),
+        }
+        INFERENCE_ACTIVE_JOB = job
+        return copy.deepcopy(job), None
 
+
+def finish_inference_job(job: dict[str, Any] | None) -> None:
+    global INFERENCE_ACTIVE_JOB
+    if not job:
+        return
+    with INFERENCE_STATE_LOCK:
+        if INFERENCE_ACTIVE_JOB and INFERENCE_ACTIVE_JOB.get("id") == job.get("id"):
+            INFERENCE_ACTIVE_JOB = None
+
+
+def inference_busy_detail(active_job: dict[str, Any] | None) -> str:
+    if not active_job:
+        return "已有检测任务正在运行，请等待当前任务结束后再启动新的检测。"
+    elapsed = max(0, int(time.perf_counter() - float(active_job.get("started_at", time.perf_counter()))))
+    title = str(active_job.get("title") or "检测任务")
+    return f"{title} 已运行约 {elapsed}s。为避免 YOLO CPU 推理互相抢占，当前仅允许一个检测任务运行。"
+
+
+def detection_busy_outputs(output_count: int, active_job: dict[str, Any] | None) -> tuple[Any, ...]:
+    return (
+        detection_progress_update(0, "已有检测任务运行中", inference_busy_detail(active_job)),
+        *[gr.skip() for _ in range(output_count - 1)],
+    )
+
+
+def gated_inference_job(output_count: int, kind: str, title: str):
+    """Gate streaming detection callbacks without turning them into plain returns."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            job, active_job = begin_inference_job(kind, title)
+            if active_job:
+                yield detection_busy_outputs(output_count, active_job)
+                return
+            try:
+                yield from func(*args, **kwargs)
+            finally:
+                finish_inference_job(job)
+        return wrapper
+    return decorator
 
 def ensure_dirs() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -2656,7 +2862,7 @@ def record_detection_history(result: dict[str, Any], task_kind: str) -> dict[str
     return append_history(event)
 
 
-@serialized_inference_job
+@gated_inference_job(16, "single", "单图精检")
 def run_single_detection(
     image: Any,
     model_name: str,
@@ -2668,10 +2874,83 @@ def run_single_detection(
     color_mode: str,
     progress=gr.Progress(track_tqdm=False),
 ):
+    if image is None:
+        update_latest_ai_context(detection={})
+        yield (
+            detection_progress_hide(),
+            detection_empty_state_update("single", True),
+            gr.update(value=None, visible=False),
+            gr.update(value=detection_summary_cards(None), visible=False),
+            gr.update(value=[], visible=False),
+            gr.update(value="请先上传一张图片。", visible=False),
+            gr.update(value=class_knowledge_cards(None), visible=False),
+            {},
+            gr.Dropdown(choices=[], value=None),
+            *dashboard_outputs(),
+            registry_status_markdown(),
+            history_rows(),
+        )
+        return
+
+    yield (
+        detection_progress_update(6, "单图精检准备中", "正在读取上传影像并初始化检测任务。"),
+        detection_empty_state_update("single", False),
+        gr.update(value=None, visible=False),
+        gr.update(value=detection_summary_cards(None), visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(value="检测进行中，请稍候。", visible=False),
+        gr.update(value=class_knowledge_cards(None), visible=False),
+        {},
+        gr.Dropdown(choices=[], value=None),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+    )
     progress(0.05, desc="正在准备单图检测任务…")
     model_key = model_name_to_key(model_name)
-    result, rendered = run_detection_core(image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+    yield (
+        detection_progress_update(34, "模型推理中", "正在运行 YOLO CPU 推理，影像较大时可能需要几十秒，请勿重复点击。"),
+        detection_empty_state_update("single", False),
+        gr.update(value=None, visible=False),
+        gr.update(value=detection_summary_cards(None), visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(value="模型正在推理。", visible=False),
+        gr.update(value=class_knowledge_cards(None), visible=False),
+        {},
+        gr.Dropdown(choices=[], value=None),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+    )
+    with INFERENCE_JOB_LOCK:
+        result, rendered = run_detection_core(image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
     progress(0.9, desc="正在整理单图检测结果…")
+    yield (
+        detection_progress_update(88, "正在整理检测结果", "正在生成检测框、结构化表格、类别解释和复核建议。"),
+        detection_empty_state_update("single", False),
+        gr.update(value=rendered if rendered is not None else None, visible=rendered is not None),
+        gr.update(value=detection_summary_cards(None), visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(value="正在整理结果。", visible=False),
+        gr.update(value=class_knowledge_cards(None), visible=False),
+        {},
+        gr.Dropdown(choices=[], value=None),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+    )
     result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
     result["visual_options"] = {
         "show_label": bool(show_label),
@@ -2686,7 +2965,8 @@ def run_single_detection(
     image_out = rendered if rendered is not None else None
     choices = region_choices(result)
     progress(1.0, desc="单图检测完成")
-    return (
+    yield (
+        detection_progress_hide(),
         detection_empty_state_update("single", False),
         gr.update(value=image_out, visible=True),
         gr.update(value=detection_summary_cards(result), visible=True),
@@ -2704,6 +2984,7 @@ def run_single_detection(
 def reset_single_detection_outputs():
     update_latest_ai_context(detection={})
     return (
+        detection_progress_hide(),
         detection_empty_state_update("single", True),
         gr.update(value=None, visible=False),
         gr.update(value=detection_summary_cards(None), visible=False),
@@ -2944,6 +3225,7 @@ def model_comparison_progress_outputs(percent: float, title: str, detail: str, r
     )
 
 
+@gated_inference_job(20, "compare", "多模型会诊")
 def run_model_comparison(
     image: Any,
     conf: float,
@@ -3335,7 +3617,7 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     return str(md_path), str(csv_path)
 
 
-@serialized_inference_job
+@gated_inference_job(20, "batch", "批量筛查")
 def run_batch_detection(
     files: list[Any] | None,
     model_name: str,
@@ -3349,7 +3631,8 @@ def run_batch_detection(
 ):
     if not files:
         update_latest_ai_context(batch_items=[])
-        return (
+        yield (
+            detection_progress_hide(),
             detection_empty_state_update("batch", True),
             gr.update(value=[], visible=False),
             gr.update(value=[], visible=False),
@@ -3366,14 +3649,65 @@ def run_batch_detection(
             registry_status_markdown(),
             history_rows(),
         )
+        return
     model_key = model_name_to_key(model_name)
     items: list[dict[str, Any]] = []
     preview: list[tuple[Image.Image, str]] = []
     total_files = len(files)
+    yield (
+        detection_progress_update(4, "批量筛查准备中", f"已接收 {total_files} 张影像，正在准备批量检测队列。"),
+        detection_empty_state_update("batch", False),
+        gr.update(value=[], visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, visible=False),
+        gr.update(value="批量检测进行中，请稍候。", visible=False),
+        gr.update(value="<div class='section-note'>批量检测进行中，完成后会显示当前图片检出的牙病类别说明。</div>", visible=False),
+        "尚未生成批量报告预览。",
+        [],
+        None,
+        None,
+        [],
+        gr.Dropdown(choices=[], value=None),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+    )
     for idx, file_obj in enumerate(files, 1):
-        progress((idx - 1) / max(1, total_files), desc=f"正在处理批量图片 {idx}/{total_files}")
         image_name = image_display_name(file_obj, f"图片{idx}")
-        result, rendered = run_detection_core(file_obj, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        start_percent = 8 + int(((idx - 1) / max(1, total_files)) * 76)
+        progress((idx - 1) / max(1, total_files), desc=f"正在处理批量图片 {idx}/{total_files}")
+        yield (
+            detection_progress_update(
+                start_percent,
+                f"正在处理第 {idx}/{total_files} 张",
+                f"{image_name} 正在执行 YOLO CPU 推理，单张影像较大时可能需要几十秒。",
+            ),
+            detection_empty_state_update("batch", False),
+            gr.update(value=[batch_result_row(item) for item in items], visible=bool(items)),
+            gr.update(value=preview, visible=bool(preview)),
+            gr.update(choices=[], value=None, visible=False),
+            gr.update(value="批量检测进行中，请稍候。", visible=False),
+            gr.update(value="<div class='section-note'>批量检测进行中，完成后会显示当前图片检出的牙病类别说明。</div>", visible=False),
+            "尚未生成批量报告预览。",
+            [],
+            None,
+            None,
+            items,
+            gr.Dropdown(choices=[], value=None),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+        )
+        with INFERENCE_JOB_LOCK:
+            result, rendered = run_detection_core(file_obj, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
         result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
         result["visual_options"] = {
             "show_label": bool(show_label),
@@ -3388,6 +3722,55 @@ def run_batch_detection(
         items.append(item)
         if rendered is not None and len(preview) < 6:
             preview.append((rendered, f"{image_name}｜{status_text(result)}｜疑似区域 {result.get('box_count', 0)} 个"))
+        done_percent = 8 + int((idx / max(1, total_files)) * 76)
+        yield (
+            detection_progress_update(
+                done_percent,
+                f"第 {idx}/{total_files} 张已完成",
+                f"{image_name} 已完成检测，正在继续处理剩余影像。",
+            ),
+            detection_empty_state_update("batch", False),
+            gr.update(value=[batch_result_row(item) for item in items], visible=True),
+            gr.update(value=preview, visible=bool(preview)),
+            gr.update(choices=[], value=None, visible=False),
+            gr.update(value="批量检测进行中，请稍候。", visible=False),
+            gr.update(value="<div class='section-note'>批量检测进行中，完成后会显示当前图片检出的牙病类别说明。</div>", visible=False),
+            "尚未生成批量报告预览。",
+            [],
+            None,
+            None,
+            items,
+            gr.Dropdown(choices=[], value=None),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+        )
+    yield (
+        detection_progress_update(92, "正在生成批量报告", "正在汇总表格、图片预览、报告文件和联动放大区域。"),
+        detection_empty_state_update("batch", False),
+        gr.update(value=[batch_result_row(item) for item in items], visible=True),
+        gr.update(value=preview, visible=bool(preview)),
+        gr.update(choices=[], value=None, visible=False),
+        gr.update(value="正在生成批量汇总。", visible=False),
+        gr.update(value="<div class='section-note'>正在生成批量类别说明。</div>", visible=False),
+        "正在生成批量报告预览。",
+        [],
+        None,
+        None,
+        items,
+        gr.Dropdown(choices=[], value=None),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+    )
     append_history({"type": "batch_detection", "created_at": now_iso(), "items": items})
     update_latest_ai_context(batch_items=items)
     md_path, csv_path = export_batch_report(items)
@@ -3399,7 +3782,8 @@ def run_batch_detection(
     report_preview = markdown_for_gradio_preview(report_preview_raw)
     report_gallery = report_visual_gallery("批量检测报告", {}, [], items)
     progress(1.0, desc="批量检测完成")
-    return (
+    yield (
+        detection_progress_hide(),
         detection_empty_state_update("batch", False),
         gr.update(value=rows, visible=True),
         gr.update(value=preview, visible=True),
@@ -3421,6 +3805,7 @@ def run_batch_detection(
 def reset_batch_detection_outputs():
     update_latest_ai_context(batch_items=[])
     return (
+        detection_progress_hide(),
         detection_empty_state_update("batch", True),
         gr.update(value=[], visible=False),
         gr.update(value=[], visible=False),
@@ -3951,13 +4336,28 @@ def update_latest_ai_context(
 ) -> dict[str, Any]:
     with LATEST_AI_CONTEXT_LOCK:
         if reset:
-            LATEST_AI_CONTEXT.update({"detection": {}, "comparison": [], "batch_items": [], "updated_at": now_iso()})
+            LATEST_AI_CONTEXT.update({"detection": {}, "comparison": [], "batch_items": [], "last_scope": "", "updated_at": now_iso()})
         if detection is not None:
             LATEST_AI_CONTEXT["detection"] = copy.deepcopy(detection)
+            if detection:
+                LATEST_AI_CONTEXT["last_scope"] = "当前单图"
         if comparison is not None:
             LATEST_AI_CONTEXT["comparison"] = copy.deepcopy(comparison)
+            if comparison:
+                LATEST_AI_CONTEXT["last_scope"] = "当前多模型对比"
         if batch_items is not None:
             LATEST_AI_CONTEXT["batch_items"] = copy.deepcopy(batch_items)
+            if batch_items:
+                LATEST_AI_CONTEXT["last_scope"] = "当前批量任务"
+        if not selected_chat_sources(str(LATEST_AI_CONTEXT.get("last_scope") or ""), LATEST_AI_CONTEXT["detection"], LATEST_AI_CONTEXT["comparison"], LATEST_AI_CONTEXT["batch_items"]):
+            if LATEST_AI_CONTEXT["batch_items"]:
+                LATEST_AI_CONTEXT["last_scope"] = "当前批量任务"
+            elif LATEST_AI_CONTEXT["comparison"]:
+                LATEST_AI_CONTEXT["last_scope"] = "当前多模型对比"
+            elif LATEST_AI_CONTEXT["detection"]:
+                LATEST_AI_CONTEXT["last_scope"] = "当前单图"
+            else:
+                LATEST_AI_CONTEXT["last_scope"] = ""
         LATEST_AI_CONTEXT["updated_at"] = now_iso()
         return copy.deepcopy(LATEST_AI_CONTEXT)
 
@@ -5279,14 +5679,168 @@ class CloudChatRequest(BaseModel):
     allow_cloud: bool = True
 
 
-def assistant_suggested_questions(scope: str, detection: dict[str, Any], comparison: list[dict[str, Any]], batch_items: list[dict[str, Any]]) -> list[str]:
+class AssistantSuggestionRequest(BaseModel):
+    scope: str = Field(default="全部最新结果")
+    last_user_message: str = Field(default="")
+    last_assistant_answer: str = Field(default="")
+
+
+def compact_unique_questions(candidates: list[str], fallback: list[str] | None = None, limit: int = 6) -> list[str]:
+    unique: list[str] = []
+    for question in [*(candidates or []), *((fallback or DEFAULT_FOLLOWUP_QUESTIONS) or [])]:
+        text = str(question or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+        if len(unique) >= limit:
+            break
+    while len(unique) < limit:
+        backup = DEFAULT_FOLLOWUP_QUESTIONS[len(unique) % len(DEFAULT_FOLLOWUP_QUESTIONS)]
+        if backup not in unique:
+            unique.append(backup)
+        else:
+            unique.append(NO_DETECTION_FOLLOWUP_QUESTIONS[len(unique) % len(NO_DETECTION_FOLLOWUP_QUESTIONS)])
+    return unique[:limit]
+
+
+def text_has_any(text: str, terms: tuple[str, ...]) -> bool:
+    normalized = str(text or "").lower()
+    return any(term.lower() in normalized for term in terms)
+
+
+def dialogue_topic_followup_questions(topic_text: str) -> list[str]:
+    normalized = chat_content_to_text(topic_text).lower()
+    if not normalized:
+        return []
+    matched_topics: list[dict[str, Any]] = []
+    for topic in DIALOGUE_TOPIC_FOLLOWUPS:
+        terms = tuple(topic.get("terms", ()))
+        if terms and text_has_any(normalized, terms):
+            matched_topics.append(topic)
+    matched_topics.sort(key=lambda topic: DIALOGUE_TOPIC_PRIORITY.get(str(topic.get("name", "")), 999))
+    questions: list[str] = []
+    for topic in matched_topics:
+        for question in topic.get("questions", ()):
+            text = str(question or "").strip()
+            if text and text not in questions:
+                questions.append(text)
+    return questions
+
+
+def turn_followup_questions(
+    user_message: str,
+    assistant_answer: str,
+    scope: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+) -> list[str]:
+    user_text = chat_content_to_text(user_message).lower()
+    answer_text = chat_content_to_text(assistant_answer).lower()
+    results = successful_results(selected_chat_results(scope, detection, comparison, batch_items))
+    questions: list[str] = []
+    has_boxes = has_detected_targets(results)
+
+    def has_any(text: str, terms: tuple[str, ...]) -> bool:
+        return text_has_any(text, terms)
+
+    def add(*items: str) -> None:
+        for item in items:
+            if item not in questions:
+                questions.append(item)
+
+    region_match = re.search(r"(?:区域|框|编号)\s*([0-9一二三四五六七八九十]+)", user_text)
+    region_label = region_match.group(1) if region_match else ""
+    user_is_generic = not user_text or has_any(user_text, ("这个", "这些", "什么意思", "怎么看", "为什么", "还有吗", "下一步", "继续", "详细说"))
+
+    if not results:
+        topic_text = f"{user_text} {answer_text}".strip() if user_is_generic else (user_text or answer_text)
+        add(*dialogue_topic_followup_questions(topic_text))
+        if has_any(topic_text, ("上传", "格式", "清晰", "图片", "影像", "模糊")):
+            add("上传图片前怎样判断清晰度是否足够？", "应该先选择单图检测、多模型对比还是批量检测？")
+        if has_any(topic_text, ("阈值", "iou", "置信度", "漏检", "误检")):
+            add("没有检测结果时阈值应该先用哪个预设？", "置信度阈值和 IoU 阈值分别影响什么？")
+        if has_any(topic_text, ("模型", "对比", "一致", "差异", "冲突", "哪个模型")):
+            add("没有检测结果时怎样选择单图检测还是多模型对比？", "多模型对比完成后应该重点看哪些差异？")
+        if has_any(topic_text, ("批量", "多张", "汇总", "列表", "哪张", "第几张")):
+            add("批量检测前应怎样整理图片列表？", "批量检测完成后优先看哪些汇总指标？")
+        if has_any(topic_text, ("报告", "导出", "生成", "pdf", "word", "markdown")):
+            add("还没有检测结果时可以先生成报告吗？", "完成检测后报告会包含哪些内容？")
+        return compact_unique_questions(questions, NO_DETECTION_FOLLOWUP_QUESTIONS)
+
+    if region_label:
+        add(
+            f"区域 {region_label} 的原图局部应该重点看什么？",
+            f"区域 {region_label} 与其他疑似区域相比风险更高吗？",
+            f"区域 {region_label} 的类别和置信度依据是什么？",
+        )
+    topic_text = f"{user_text} {answer_text}".strip() if user_is_generic else user_text
+    add(*dialogue_topic_followup_questions(topic_text))
+    if has_any(user_text, ("质量", "清晰", "模糊", "曝光", "上传", "影像", "重拍")):
+        add("图片质量会如何影响当前检测结果？", "需要重新上传更清晰影像再检测吗？", "模糊影像下哪些检测框最容易误判？")
+    if has_any(user_text, ("批量", "多张", "汇总", "列表", "哪张", "第几张")):
+        add("批量任务中哪些图片应优先复核，依据是什么？", "批量结果里是否存在需要单独查看的异常图片？", "批量汇总表里哪些指标最适合排序筛查？")
+    if has_any(user_text, ("模型", "对比", "一致", "差异", "冲突", "哪个模型")):
+        add("哪些区域跨模型一致，为什么值得重点查看？", "不同模型结果差异最大的地方在哪里？", "哪个模型更适合当前这张影像的复核？")
+    if has_any(user_text, ("报告", "导出", "生成", "pdf", "word", "markdown")):
+        add("基于当前结果生成报告时应重点写哪些内容？", "报告里的复核建议如何写得更清楚？", "报告中哪些图片或区域需要附图说明？")
+    if has_any(user_text, ("阈值", "iou", "漏检", "误检", "调参", "参数")):
+        add("当前阈值设置会如何影响漏检与误检？", "如果降低置信度阈值，会新增哪些疑似区域？", "IoU 阈值调整后检测框会有哪些变化？")
+    if has_any(user_text, ("诊断", "临床", "治疗", "用药", "拔牙", "怎么办")):
+        add("这些检测结果能否支持临床诊断？", "拿这份结果去人工复核时应重点说明什么？", "哪些内容必须交给口腔医生结合原片判断？")
+    if has_any(user_text, ("类别", "病变", "龋", "caries", "根尖", "阻生", "impacted")):
+        add("当前检出的类别分别代表什么影像表现？", "这些类别中哪些更需要结合原片人工确认？", "同一类别的不同区域应如何排序复核？")
+    if has_any(user_text, ("置信度", "可信", "低", "高", "不确定", "概率")):
+        add("当前哪些区域置信度偏低，应该如何人工复核？", "如果提高置信度阈值，当前结果会怎样变化？", "高置信度区域是否仍需要人工确认？")
+    if has_any(user_text, ("复核", "人工", "优先", "风险", "重点", "先看")):
+        add("当前最应该优先人工复核的是哪些区域？", "这些复核建议分别依据哪些检测结果？", "复核时应先看原图还是先看标注结果？")
+
+    if not questions and user_is_generic:
+        if has_any(answer_text, ("多模型", "一致", "差异", "冲突")):
+            add("哪些模型结论一致，哪些地方还需要复核？", "模型差异会不会影响最终判断？")
+        elif has_any(answer_text, ("批量", "多张", "汇总")):
+            add("批量结果中最需要先看的图片是哪几张？", "批量汇总表应该如何解读？")
+        elif has_any(answer_text, ("阈值", "iou", "漏检", "误检")):
+            add("当前阈值是否偏保守，应该怎么调整？", "阈值调整后需要重新检测吗？")
+        elif has_any(answer_text, ("报告", "导出", "pdf", "word")):
+            add("生成报告前还需要补充哪些信息？", "报告中的复核建议应该怎么写？")
+        elif has_any(answer_text, ("低置信度", "置信度偏低", "不确定")):
+            add("低置信度区域应该怎样逐个复核？", "哪些低置信度框可能是误检？")
+    if has_boxes and not questions:
+        add("当前检测结果中哪些发现最值得关注？", "这些疑似区域的复核顺序应该如何安排？")
+    return questions
+
+
+def assistant_suggested_questions(
+    scope: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+    user_message: str = "",
+    assistant_answer: str = "",
+) -> list[str]:
     try:
         questions = generate_followup_questions(scope, detection, comparison, batch_items)[-1]
-        if isinstance(questions, list):
-            return [str(q) for q in questions[:6]]
+        context_questions = [str(q) for q in questions[:6]] if isinstance(questions, list) else DEFAULT_FOLLOWUP_QUESTIONS
+        turn_questions = turn_followup_questions(user_message, assistant_answer, scope, detection, comparison, batch_items) if user_message or assistant_answer else []
+        return compact_unique_questions(turn_questions, context_questions)
     except Exception:
         pass
     return NO_DETECTION_FOLLOWUP_QUESTIONS[:6]
+
+
+def effective_suggestion_scope(scope: str, latest: dict[str, Any]) -> str:
+    requested = scope if scope in CHAT_SCOPE_OPTIONS else "全部最新结果"
+    detection = latest.get("detection") if isinstance(latest.get("detection"), dict) else {}
+    comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
+    batch_items = latest.get("batch_items") if isinstance(latest.get("batch_items"), list) else []
+    if selected_chat_sources(requested, detection, comparison, batch_items):
+        return requested
+    last_scope = latest.get("last_scope")
+    if last_scope in CHAT_SCOPE_OPTIONS and selected_chat_sources(str(last_scope), detection, comparison, batch_items):
+        return str(last_scope)
+    if selected_chat_sources("全部最新结果", detection, comparison, batch_items):
+        return "全部最新结果"
+    return requested
 
 
 def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
@@ -5351,7 +5905,7 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
         "answer": content,
         "elapsed_seconds": elapsed_seconds,
         "message_id": f"assistant-{uuid.uuid4().hex}",
-        "suggested_questions": assistant_suggested_questions(scope, detection, comparison, batch_items),
+        "suggested_questions": assistant_suggested_questions(scope, detection, comparison, batch_items, user_message, content),
         "source": source_note,
         "pending_for_next_answer": bool(feedback_after.get("pending_for_next_answer")),
         "consumed_count": int(feedback_after.get("consumed_count", 0) or 0),
@@ -5382,6 +5936,40 @@ async def api_cloud_feedback(payload: CloudFeedbackRequest) -> dict[str, Any]:
         "pending_for_next_answer": bool(saved.get("pending_for_next_answer")),
         "message_id": saved.get("message_id"),
     }
+
+
+@api_app.post("/api/assistant_suggestions")
+async def api_assistant_suggestions(payload: AssistantSuggestionRequest) -> dict[str, Any]:
+    try:
+        latest = get_latest_ai_context()
+        scope = effective_suggestion_scope(payload.scope, latest)
+        detection = latest.get("detection") if isinstance(latest.get("detection"), dict) else {}
+        comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
+        batch_items = latest.get("batch_items") if isinstance(latest.get("batch_items"), list) else []
+        questions = assistant_suggested_questions(
+            scope,
+            detection,
+            comparison,
+            batch_items,
+            chat_content_to_text(payload.last_user_message),
+            chat_content_to_text(payload.last_assistant_answer),
+        )
+        return {
+            "ok": True,
+            "suggested_questions": questions,
+            "context_updated_at": latest.get("updated_at", ""),
+            "effective_scope": scope,
+            "has_context": bool(detection or comparison or batch_items),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": type(exc).__name__,
+            "suggested_questions": NO_DETECTION_FOLLOWUP_QUESTIONS[:6],
+            "context_updated_at": "",
+            "effective_scope": payload.scope,
+            "has_context": False,
+        }
 
 
 @api_app.post("/api/cloud_chat")
@@ -6326,14 +6914,15 @@ def native_ai_assistant_html() -> str:
         }}
         .native-ai-workbench {{
           display: grid;
-          grid-template-columns: minmax(0, 1fr) minmax(380px, 420px);
+          grid-template-columns: minmax(0, 1fr) minmax(360px, 400px);
           gap: 14px;
-          align-items: stretch;
-          min-height: 510px;
+          align-items: start;
+          min-height: 0;
         }}
         .native-ai-messages {{
           overflow-y: auto;
-          min-height: 510px;
+          height: clamp(500px, 62vh, 680px);
+          min-height: 0;
           padding: 20px;
           border-radius: 24px;
           border: 1px solid rgba(226, 232, 240, 0.86);
@@ -6341,6 +6930,7 @@ def native_ai_assistant_html() -> str:
             radial-gradient(circle at 12% 0%, rgba(37, 99, 235, 0.045), transparent 30%),
             linear-gradient(180deg, rgba(255,255,255,0.92), rgba(248,250,252,0.94));
           scroll-behavior: smooth;
+          overscroll-behavior: contain;
           box-shadow: inset 0 1px 0 rgba(255,255,255,0.9);
         }}
         .native-ai-empty {{
@@ -6566,9 +7156,12 @@ def native_ai_assistant_html() -> str:
           font-size: 12px;
         }}
         .native-ai-composer {{
-          align-self: stretch;
+          align-self: start;
+          position: sticky;
+          top: 12px;
           display: flex;
           flex-direction: column;
+          gap: 10px;
           border-radius: 24px;
           border: 1px solid rgba(226,232,240,0.92);
           background:
@@ -6581,7 +7174,7 @@ def native_ai_assistant_html() -> str:
           align-items: center;
           justify-content: space-between;
           gap: 12px;
-          margin-bottom: 10px;
+          margin-bottom: 0;
         }}
         .native-ai-suggestion-title {{
           display: inline-flex;
@@ -6615,22 +7208,26 @@ def native_ai_assistant_html() -> str:
           counter-reset: native-ai-suggestion;
           display: grid;
           grid-template-columns: 1fr;
-          gap: 10px;
-          margin-bottom: 14px;
+          gap: 8px;
+          max-height: 304px;
+          overflow-y: auto;
+          padding: 1px 2px 2px 1px;
+          margin-bottom: 0;
+          scrollbar-width: thin;
         }}
         .native-ai-assistant button.native-ai-suggestion {{
           counter-increment: native-ai-suggestion;
           position: relative;
           display: block !important;
           width: 100% !important;
-          min-height: 48px;
+          min-height: 44px;
           border: 1px solid rgba(226,232,240,0.92) !important;
           border-radius: 16px !important;
           background:
             linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94)) !important;
           color: #1e293b !important;
           cursor: pointer;
-          padding: 9px 38px 9px 48px !important;
+          padding: 8px 36px 8px 46px !important;
           text-align: left !important;
           white-space: normal !important;
           font-size: 13px !important;
@@ -6645,9 +7242,9 @@ def native_ai_assistant_html() -> str:
           left: 13px;
           top: 50%;
           transform: translateY(-50%);
-          width: 27px;
-          height: 27px;
-          border-radius: 10px;
+          width: 25px;
+          height: 25px;
+          border-radius: 9px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -6696,23 +7293,32 @@ def native_ai_assistant_html() -> str:
           grid-template-columns: minmax(0, 1fr) auto;
           gap: 10px;
           align-items: end;
-          margin-top: auto;
+          margin-top: 2px;
+        }}
+        #ask-ai-input {{
+          min-width: 0;
         }}
         #ask-ai-input textarea {{
           width: 100%;
-          min-height: 54px;
-          max-height: 160px;
-          resize: vertical;
+          height: 58px;
+          min-height: 58px;
+          max-height: 58px;
+          resize: none !important;
+          overflow-y: auto;
           border: 1px solid rgba(203,213,225,0.86);
           border-radius: 18px;
-          padding: 14px 15px;
+          padding: 12px 15px;
           outline: none;
           color: #0f172a;
           background: rgba(255,255,255,0.96);
           font-size: 15px;
-          line-height: 1.55;
+          line-height: 1.45;
           box-sizing: border-box;
           box-shadow: inset 0 1px 0 rgba(255,255,255,0.86);
+          scrollbar-width: thin;
+        }}
+        #ask-ai-input textarea::-webkit-resizer {{
+          display: none;
         }}
         #ask-ai-input textarea:focus {{
           border-color: rgba(37,99,235,0.55);
@@ -6720,7 +7326,7 @@ def native_ai_assistant_html() -> str:
         }}
         #ask-ai-send {{
           width: auto;
-          min-height: 54px;
+          min-height: 58px;
           border: 0;
           border-radius: 18px;
           padding: 0 24px;
@@ -6774,10 +7380,14 @@ def native_ai_assistant_html() -> str:
             min-height: 0;
           }}
           .native-ai-messages {{
-            min-height: 360px;
+            height: 430px;
+          }}
+          .native-ai-composer {{
+            position: static;
           }}
           .native-ai-suggestions {{
             grid-template-columns: repeat(2, minmax(0, 1fr));
+            max-height: none;
           }}
           .native-ai-input-row {{
             grid-template-columns: minmax(0, 1fr) auto;
@@ -6810,6 +7420,7 @@ def native_ai_assistant_html() -> str:
           }}
           .native-ai-messages {{
             padding: 14px;
+            height: 420px;
           }}
           .native-ai-empty-card {{
             padding: 22px 20px 22px 72px;
@@ -6918,6 +7529,9 @@ def native_ai_assistant_js() -> str:
   let chatHistory = [];
   let sending = false;
   let pendingFeedbackSave = Promise.resolve();
+  let lastSuggestionContextAt = "";
+  let lastSuggestionSignature = "";
+  let refreshingSuggestions = false;
 
   function makeSessionId() {
     try {
@@ -7195,6 +7809,48 @@ def native_ai_assistant_js() -> str:
     });
   }
 
+  function latestTurnPayload() {
+    const lastAssistant = [...chatHistory].reverse().find(item => item && item.role === "assistant");
+    const lastUser = [...chatHistory].reverse().find(item => item && item.role === "user");
+    return {
+      last_user_message: lastUser ? lastUser.content || "" : "",
+      last_assistant_answer: lastAssistant ? lastAssistant.content || "" : ""
+    };
+  }
+
+  async function refreshSuggestions(reason = "manual", options = {}) {
+    if (refreshingSuggestions) return;
+    if (sending && !options.force) return;
+    refreshingSuggestions = true;
+    try {
+      const turn = latestTurnPayload();
+      const data = await postJson("/api/assistant_suggestions", {
+        scope: scopeSelect.value,
+        last_user_message: turn.last_user_message,
+        last_assistant_answer: turn.last_assistant_answer
+      });
+      if (data.context_updated_at && data.context_updated_at !== lastSuggestionContextAt) {
+        lastSuggestionContextAt = data.context_updated_at;
+      }
+      if (data.effective_scope && scopeSelect.value !== data.effective_scope) {
+        scopeSelect.value = data.effective_scope;
+      }
+      const nextSignature = JSON.stringify((data.suggested_questions || []).slice(0, 6));
+      const changed = nextSignature && nextSignature !== lastSuggestionSignature;
+      if (changed || options.force) {
+        lastSuggestionSignature = nextSignature;
+        renderSuggestions(data.suggested_questions);
+      }
+      if (changed && reason !== "initial" && data.has_context) {
+        setStatus("推荐追问已根据最新检测结果更新。");
+      }
+    } catch (_) {
+      if (options.force) renderSuggestions(defaultSuggestions);
+    } finally {
+      refreshingSuggestions = false;
+    }
+  }
+
   async function waitForFeedbackSave() {
     const timeout = new Promise(resolve => setTimeout(resolve, 1200));
     try {
@@ -7228,6 +7884,8 @@ def native_ai_assistant_js() -> str:
         messageId: data.message_id
       });
       chatHistory.push({role: "assistant", content: data.answer || ""});
+      if (data.context_updated_at) lastSuggestionContextAt = data.context_updated_at;
+      lastSuggestionSignature = JSON.stringify((data.suggested_questions || []).slice(0, 6));
       renderSuggestions(data.suggested_questions);
       setStatus(data.ok ? "回答已生成，你可以继续追问。" : "已切换为基础分析，你可以继续提问。");
     } catch (error) {
@@ -7292,7 +7950,24 @@ def native_ai_assistant_js() -> str:
       sendMessage();
     }
   });
+  scopeSelect.addEventListener("change", () => refreshSuggestions("scope", {force: true}));
+  document.addEventListener("dental-page-change", event => {
+    if (event.detail && event.detail.page === "assistant") {
+      refreshSuggestions("page", {force: true});
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && document.body.dataset.dentalPage === "assistant") {
+      refreshSuggestions("visible");
+    }
+  });
+  setInterval(() => {
+    if (!document.hidden && document.body.dataset.dentalPage === "assistant" && !sending) {
+      refreshSuggestions("poll");
+    }
+  }, 8000);
   renderSuggestions(defaultSuggestions);
+  refreshSuggestions("initial", {force: true});
 })();
 """
         .replace("__DEFAULT_SUGGESTIONS__", json.dumps(NO_DETECTION_FOLLOWUP_QUESTIONS[:6], ensure_ascii=False))
@@ -7373,6 +8048,7 @@ def build_app() -> gr.Blocks:
                         det_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
                     det_btn = gr.Button("运行单模型检测", variant="primary", elem_classes="solid-primary-action")
             gr.Markdown("### 第 3 步：查看检测结果和复核建议")
+            det_progress = gr.HTML("", visible=False)
             det_empty_state = gr.HTML(build_detection_empty_state("single"))
             det_summary = gr.HTML(detection_summary_cards(None), visible=False)
             with gr.Row(equal_height=False, elem_classes="det-result-row"):
@@ -7491,6 +8167,7 @@ def build_app() -> gr.Blocks:
                         visible=False,
                     )
                 with gr.Column(scale=2):
+                    batch_progress = gr.HTML("", visible=False)
                     batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
                     batch_preview = gr.Gallery(label="批量检测结果预览（最多前 6 张）", columns=3, height=360, visible=False)
                     batch_image_selector = gr.Dropdown(choices=[], label="选择图片编号查看解释", interactive=True, visible=False)
@@ -7569,15 +8246,15 @@ def build_app() -> gr.Blocks:
         det_event = det_btn.click(
             run_single_detection,
             inputs=[det_image, det_model, det_conf, det_iou, det_show_label, det_show_conf, det_line_width, det_color_mode],
-            outputs=[det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            outputs=[det_progress, det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
             concurrency_id="yolo_inference",
-            concurrency_limit=1,
+            concurrency_limit=3,
             trigger_mode="once",
-            show_progress="full",
+            show_progress="hidden",
         )
         det_image.clear(
             reset_single_detection_outputs,
-            outputs=[det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            outputs=[det_progress, det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
         det_image.change(image_quality_precheck, inputs=det_image, outputs=det_quality)
         det_image.change(single_empty_state_for_upload, inputs=det_image, outputs=det_empty_state)
@@ -7594,9 +8271,9 @@ def build_app() -> gr.Blocks:
             inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
             outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
             concurrency_id="yolo_inference",
-            concurrency_limit=1,
+            concurrency_limit=3,
             trigger_mode="once",
-            show_progress="full",
+            show_progress="hidden",
         )
         cmp_image.clear(
             reset_model_comparison_outputs,
@@ -7613,15 +8290,15 @@ def build_app() -> gr.Blocks:
         batch_event = batch_btn.click(
             run_batch_detection,
             inputs=[batch_files, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
-            outputs=[batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            outputs=[batch_progress, batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
             concurrency_id="yolo_inference",
-            concurrency_limit=1,
+            concurrency_limit=3,
             trigger_mode="once",
-            show_progress="full",
+            show_progress="hidden",
         )
         batch_files.clear(
             reset_batch_detection_outputs,
-            outputs=[batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            outputs=[batch_progress, batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
         batch_files.change(batch_empty_state_for_upload, inputs=batch_files, outputs=batch_empty_state)
         det_event.then(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
