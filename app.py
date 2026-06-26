@@ -1096,6 +1096,9 @@ button.solid-primary-action {
   box-shadow: 0 22px 52px rgba(37, 99, 235, 0.48);
   outline: 5px solid rgba(56, 189, 248, 0.25);
 }
+body[data-dental-page="assistant"] #ask-ai-floating-button {
+  display: none !important;
+}
 #ask-ai-selection-popover {
   position: absolute;
   z-index: 10000;
@@ -1501,7 +1504,6 @@ ASK_AI_HEAD = r"""
   function activateDentalPage(page, shouldScroll = true) {
     const nextPage = DENTAL_PAGES.has(page) ? page : "learn";
     document.body.dataset.dentalPage = nextPage;
-    try { window.localStorage.setItem("dental-active-page", nextPage); } catch (_) {}
     document.querySelectorAll(".dental-page-nav-item[data-page]").forEach(btn => {
       const active = btn.dataset.page === nextPage;
       btn.classList.toggle("active", active);
@@ -1525,8 +1527,6 @@ ASK_AI_HEAD = r"""
       if (DENTAL_PAGES.has(fromQuery)) return fromQuery;
       const fromHash = (window.location.hash || "").replace(/^#\/?/, "");
       if (DENTAL_PAGES.has(fromHash)) return fromHash;
-      const remembered = window.localStorage.getItem("dental-active-page");
-      if (DENTAL_PAGES.has(remembered)) return remembered;
     } catch (_) {}
     return "learn";
   }
@@ -6178,17 +6178,23 @@ def disease_education_html() -> str:
 
 
 def native_ai_assistant_html() -> str:
+    def html_attr(text: str) -> str:
+        return xml_escape(text, {"'": "&#x27;", '"': "&quot;"})
+
     reasons = "".join(f"<button type='button' class='native-ai-reason' data-reason='{xml_escape(reason)}'>{xml_escape(reason)}</button>" for reason in CLOUD_FEEDBACK_REASONS)
     options_scope = "".join(f"<option value='{xml_escape(option)}'>{xml_escape(option)}</option>" for option in CHAT_SCOPE_OPTIONS)
     options_role = "".join(f"<option value='{xml_escape(option)}'>{xml_escape(option)}</option>" for option in CHAT_ROLE_OPTIONS)
-    starters = "".join(f"<button type='button' class='native-ai-suggestion'>{xml_escape(question)}</button>" for question in NO_DETECTION_FOLLOWUP_QUESTIONS[:6])
+    starters = "".join(
+        f"<button type='button' class='native-ai-suggestion' title='{html_attr(question)}' aria-label='推荐追问：{html_attr(question)}'>{xml_escape(question)}</button>"
+        for question in NO_DETECTION_FOLLOWUP_QUESTIONS[:6]
+    )
     return f"""
     <section id="native-ai-assistant" class="native-ai-assistant">
       <style>
         .native-ai-assistant {{
           --ai-bg: #f8fafc;
-          --ai-card: rgba(255, 255, 255, 0.94);
-          --ai-border: rgba(203, 213, 225, 0.72);
+          --ai-card: rgba(255, 255, 255, 0.92);
+          --ai-border: rgba(203, 213, 225, 0.78);
           --ai-text: #0f172a;
           --ai-muted: #64748b;
           --ai-blue: #2563eb;
@@ -6196,17 +6202,17 @@ def native_ai_assistant_html() -> str:
           --ai-teal: #0f766e;
           --ai-soft: #eff6ff;
           display: grid;
-          grid-template-rows: auto minmax(430px, 58vh) auto;
-          gap: 16px;
-          min-height: 720px;
-          border-radius: 32px;
-          padding: 22px;
+          grid-template-rows: auto minmax(0, 1fr);
+          gap: 14px;
+          min-height: 690px;
+          border-radius: 28px;
+          padding: 20px;
           background:
-            radial-gradient(circle at 10% 0%, rgba(249, 115, 22, 0.13), transparent 34%),
-            radial-gradient(circle at 92% 2%, rgba(37, 99, 235, 0.13), transparent 36%),
-            linear-gradient(180deg, #ffffff 0%, #f8fafc 58%, #f5f7fb 100%);
+            radial-gradient(circle at 12% 0%, rgba(20, 184, 166, 0.08), transparent 32%),
+            radial-gradient(circle at 92% 4%, rgba(249, 115, 22, 0.075), transparent 34%),
+            linear-gradient(180deg, #ffffff 0%, #f8fafc 62%, #f6f8fb 100%);
           border: 1px solid rgba(226, 232, 240, 0.92);
-          box-shadow: 0 26px 70px rgba(15, 23, 42, 0.085);
+          box-shadow: 0 22px 58px rgba(15, 23, 42, 0.075);
           color: var(--ai-text);
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }}
@@ -6214,8 +6220,14 @@ def native_ai_assistant_html() -> str:
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
           align-items: stretch;
-          gap: 18px;
-          padding: 4px 2px 6px;
+          gap: 16px;
+          padding: 18px;
+          border: 1px solid rgba(226, 232, 240, 0.82);
+          border-radius: 24px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.94), rgba(248,250,252,0.86)),
+            linear-gradient(90deg, rgba(239,246,255,0.62), rgba(240,253,250,0.48));
+          box-shadow: 0 16px 34px rgba(15, 23, 42, 0.048);
         }}
         .native-ai-hero-copy {{
           min-width: 0;
@@ -6224,7 +6236,7 @@ def native_ai_assistant_html() -> str:
           display: inline-flex;
           align-items: center;
           gap: 8px;
-          padding: 6px 11px;
+          padding: 6px 10px;
           border-radius: 999px;
           color: #0f766e;
           background: rgba(240, 253, 250, 0.86);
@@ -6234,9 +6246,9 @@ def native_ai_assistant_html() -> str:
           letter-spacing: 0;
         }}
         .native-ai-title {{
-          margin: 12px 0 8px;
-          font-size: 38px;
-          line-height: 1.02;
+          margin: 11px 0 8px;
+          font-size: 34px;
+          line-height: 1.08;
           letter-spacing: 0;
         }}
         .native-ai-subtitle {{
@@ -6244,16 +6256,16 @@ def native_ai_assistant_html() -> str:
           max-width: 720px;
           color: #475569;
           font-size: 15px;
-          line-height: 1.75;
+          line-height: 1.68;
         }}
         .native-ai-disclaimer {{
           display: inline-flex;
           align-items: center;
           gap: 6px;
-          margin-top: 12px;
+          margin-top: 11px;
           padding: 6px 10px;
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.68);
+          background: rgba(255, 255, 255, 0.72);
           border: 1px solid rgba(226, 232, 240, 0.78);
           color: #94a3b8;
           font-size: 12px;
@@ -6262,7 +6274,7 @@ def native_ai_assistant_html() -> str:
         .native-ai-controls {{
           display: grid;
           grid-template-columns: repeat(3, minmax(128px, 1fr));
-          gap: 10px;
+          gap: 11px;
           align-content: start;
           min-width: min(520px, 48vw);
         }}
@@ -6270,10 +6282,10 @@ def native_ai_assistant_html() -> str:
           display: grid;
           gap: 7px;
           padding: 11px 12px;
-          border-radius: 18px;
+          border-radius: 16px;
           border: 1px solid rgba(226, 232, 240, 0.82);
-          background: rgba(255, 255, 255, 0.74);
-          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.045);
+          background: rgba(255, 255, 255, 0.82);
+          box-shadow: 0 10px 22px rgba(15, 23, 42, 0.038);
           color: #64748b;
           font-size: 12px;
           font-weight: 850;
@@ -6312,14 +6324,22 @@ def native_ai_assistant_html() -> str:
           font-size: 11px;
           font-weight: 760;
         }}
+        .native-ai-workbench {{
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(380px, 420px);
+          gap: 14px;
+          align-items: stretch;
+          min-height: 510px;
+        }}
         .native-ai-messages {{
           overflow-y: auto;
-          padding: 22px;
-          border-radius: 28px;
+          min-height: 510px;
+          padding: 20px;
+          border-radius: 24px;
           border: 1px solid rgba(226, 232, 240, 0.86);
           background:
-            radial-gradient(circle at 12% 0%, rgba(37, 99, 235, 0.055), transparent 30%),
-            linear-gradient(180deg, rgba(255,255,255,0.88), rgba(248,250,252,0.92));
+            radial-gradient(circle at 12% 0%, rgba(37, 99, 235, 0.045), transparent 30%),
+            linear-gradient(180deg, rgba(255,255,255,0.92), rgba(248,250,252,0.94));
           scroll-behavior: smooth;
           box-shadow: inset 0 1px 0 rgba(255,255,255,0.9);
         }}
@@ -6331,22 +6351,38 @@ def native_ai_assistant_html() -> str:
           color: #475569;
         }}
         .native-ai-empty-card {{
-          max-width: 720px;
-          padding: 28px;
-          border-radius: 28px;
-          background: rgba(255,255,255,0.88);
+          position: relative;
+          max-width: 660px;
+          padding: 26px 28px 26px 86px;
+          border-radius: 24px;
+          background: rgba(255,255,255,0.9);
           border: 1px solid rgba(226,232,240,0.84);
-          box-shadow: 0 18px 46px rgba(15,23,42,0.06);
+          box-shadow: 0 16px 38px rgba(15,23,42,0.055);
+          text-align: left;
+        }}
+        .native-ai-empty-card::before {{
+          content: "";
+          position: absolute;
+          left: 28px;
+          top: 28px;
+          width: 38px;
+          height: 38px;
+          border-radius: 15px;
+          background:
+            linear-gradient(135deg, rgba(240,253,250,0.96), rgba(239,246,255,0.96));
+          border: 1px solid rgba(191, 219, 254, 0.72);
+          box-shadow: inset 0 0 0 5px rgba(255,255,255,0.62);
         }}
         .native-ai-empty-card h3 {{
           margin: 0 0 10px;
-          font-size: 22px;
+          font-size: 21px;
           letter-spacing: 0;
           color: #0f172a;
         }}
         .native-ai-empty-card p {{
           margin: 0;
-          line-height: 1.7;
+          color: #475569;
+          line-height: 1.66;
         }}
         .native-ai-msg {{
           display: flex;
@@ -6357,7 +6393,7 @@ def native_ai_assistant_html() -> str:
         }}
         .native-ai-bubble {{
           max-width: min(850px, 86%);
-          border-radius: 24px;
+          border-radius: 22px;
           padding: 16px 18px;
           line-height: 1.78;
           font-size: 15px;
@@ -6529,49 +6565,138 @@ def native_ai_assistant_html() -> str:
           color: #64748b;
           font-size: 12px;
         }}
+        .native-ai-composer {{
+          align-self: stretch;
+          display: flex;
+          flex-direction: column;
+          border-radius: 24px;
+          border: 1px solid rgba(226,232,240,0.92);
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.94), rgba(248,250,252,0.9));
+          padding: 16px;
+          box-shadow: 0 16px 34px rgba(15,23,42,0.065);
+        }}
+        .native-ai-composer-head {{
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 10px;
+        }}
         .native-ai-suggestion-title {{
-          margin: 0 0 9px;
-          color: #475569;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          margin: 0;
+          color: #334155;
           font-size: 13px;
-          font-weight: 900;
+          font-weight: 920;
           letter-spacing: 0;
         }}
-        .native-ai-suggestions {{
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 9px;
-          margin-bottom: 12px;
-        }}
-        .native-ai-suggestion {{
-          min-height: 40px;
-          border: 1px solid rgba(226,232,240,0.88);
+        .native-ai-suggestion-title::before {{
+          content: "";
+          width: 8px;
+          height: 8px;
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.82);
-          color: #0f172a;
-          cursor: pointer;
-          padding: 8px 13px;
-          font-size: 13px;
+          background: #14b8a6;
+          box-shadow: 0 0 0 4px rgba(20,184,166,0.12);
+        }}
+        .native-ai-suggestion-count {{
+          flex: none;
+          padding: 4px 9px;
+          border-radius: 999px;
+          border: 1px solid rgba(226,232,240,0.82);
+          background: rgba(255,255,255,0.72);
+          color: #94a3b8;
+          font-size: 12px;
           font-weight: 820;
-          line-height: 1.35;
-          transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
         }}
-        .native-ai-suggestion:hover {{
+        .native-ai-suggestions {{
+          counter-reset: native-ai-suggestion;
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 10px;
+          margin-bottom: 14px;
+        }}
+        .native-ai-assistant button.native-ai-suggestion {{
+          counter-increment: native-ai-suggestion;
+          position: relative;
+          display: block !important;
+          width: 100% !important;
+          min-height: 48px;
+          border: 1px solid rgba(226,232,240,0.92) !important;
+          border-radius: 16px !important;
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94)) !important;
+          color: #1e293b !important;
+          cursor: pointer;
+          padding: 9px 38px 9px 48px !important;
+          text-align: left !important;
+          white-space: normal !important;
+          font-size: 13px !important;
+          font-weight: 780 !important;
+          line-height: 1.42;
+          box-shadow: 0 7px 16px rgba(15, 23, 42, 0.035) !important;
+          transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+        }}
+        .native-ai-assistant button.native-ai-suggestion::before {{
+          content: counter(native-ai-suggestion, decimal-leading-zero);
+          position: absolute;
+          left: 13px;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 27px;
+          height: 27px;
+          border-radius: 10px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(226,232,240,0.9);
+          background: rgba(248,250,252,0.92);
+          color: #64748b;
+          font-size: 10px;
+          font-weight: 930;
+        }}
+        .native-ai-assistant button.native-ai-suggestion::after {{
+          content: "";
+          position: absolute;
+          right: 16px;
+          top: 50%;
+          width: 7px;
+          height: 7px;
+          border-top: 2px solid #94a3b8;
+          border-right: 2px solid #94a3b8;
+          transform: translateY(-50%) rotate(45deg);
+          opacity: 0.8;
+          transition: transform 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+        }}
+        .native-ai-assistant button.native-ai-suggestion:hover {{
           transform: translateY(-1px);
-          border-color: rgba(37,99,235,0.32);
-          box-shadow: 0 10px 22px rgba(37,99,235,0.085);
+          border-color: rgba(37,99,235,0.28) !important;
+          background:
+            linear-gradient(180deg, rgba(255,255,255,1), rgba(248,251,255,0.98)) !important;
+          box-shadow: 0 12px 22px rgba(15,23,42,0.07) !important;
         }}
-        .native-ai-composer {{
-          border-radius: 26px;
-          border: 1px solid rgba(226,232,240,0.92);
-          background: rgba(255,255,255,0.9);
-          padding: 14px;
-          box-shadow: 0 18px 38px rgba(15,23,42,0.075);
+        .native-ai-assistant button.native-ai-suggestion:hover::before {{
+          border-color: rgba(37,99,235,0.24);
+          background: #eff6ff;
+          color: #1d4ed8;
+        }}
+        .native-ai-assistant button.native-ai-suggestion:hover::after {{
+          border-color: #2563eb;
+          opacity: 1;
+          transform: translate(2px, -50%) rotate(45deg);
+        }}
+        .native-ai-assistant button.native-ai-suggestion:focus-visible {{
+          outline: 3px solid rgba(37,99,235,0.16);
+          outline-offset: 2px;
         }}
         .native-ai-input-row {{
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
           gap: 10px;
           align-items: end;
+          margin-top: auto;
         }}
         #ask-ai-input textarea {{
           width: 100%;
@@ -6579,33 +6704,43 @@ def native_ai_assistant_html() -> str:
           max-height: 160px;
           resize: vertical;
           border: 1px solid rgba(203,213,225,0.86);
-          border-radius: 20px;
+          border-radius: 18px;
           padding: 14px 15px;
           outline: none;
           color: #0f172a;
-          background: #fff;
+          background: rgba(255,255,255,0.96);
           font-size: 15px;
           line-height: 1.55;
           box-sizing: border-box;
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.86);
         }}
         #ask-ai-input textarea:focus {{
           border-color: rgba(37,99,235,0.55);
           box-shadow: 0 0 0 4px rgba(37,99,235,0.09);
         }}
         #ask-ai-send {{
+          width: auto;
           min-height: 54px;
           border: 0;
-          border-radius: 20px;
+          border-radius: 18px;
           padding: 0 24px;
           color: #fff;
-          background: linear-gradient(135deg, var(--ai-orange), var(--ai-blue));
+          background: linear-gradient(135deg, #f97316, #2563eb);
           font-weight: 900;
           cursor: pointer;
           box-shadow: 0 12px 24px rgba(37,99,235,0.16);
+          transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
+        }}
+        #ask-ai-send:hover {{
+          transform: translateY(-1px);
+          box-shadow: 0 15px 28px rgba(37,99,235,0.19);
+          filter: saturate(1.04);
         }}
         #ask-ai-send:disabled {{
           cursor: not-allowed;
           opacity: 0.62;
+          transform: none;
+          box-shadow: 0 10px 20px rgba(37,99,235,0.12);
         }}
         .native-ai-status {{
           margin-top: 8px;
@@ -6633,6 +6768,25 @@ def native_ai_assistant_html() -> str:
           0%, 80%, 100% {{ opacity: .35; transform: translateY(0); }}
           40% {{ opacity: 1; transform: translateY(-3px); }}
         }}
+        @media (max-width: 1120px) {{
+          .native-ai-workbench {{
+            grid-template-columns: 1fr;
+            min-height: 0;
+          }}
+          .native-ai-messages {{
+            min-height: 360px;
+          }}
+          .native-ai-suggestions {{
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }}
+          .native-ai-input-row {{
+            grid-template-columns: minmax(0, 1fr) auto;
+            margin-top: 0;
+          }}
+          #ask-ai-send {{
+            width: auto;
+          }}
+        }}
         @media (max-width: 860px) {{
           .native-ai-assistant {{
             min-height: 680px;
@@ -6640,6 +6794,8 @@ def native_ai_assistant_html() -> str:
           }}
           .native-ai-top {{
             display: grid;
+            grid-template-columns: 1fr;
+            padding: 14px;
           }}
           .native-ai-title {{
             font-size: 30px;
@@ -6652,8 +6808,26 @@ def native_ai_assistant_html() -> str:
           .native-ai-control {{
             min-width: 0;
           }}
+          .native-ai-messages {{
+            padding: 14px;
+          }}
+          .native-ai-empty-card {{
+            padding: 22px 20px 22px 72px;
+          }}
+          .native-ai-empty-card::before {{
+            left: 20px;
+            top: 22px;
+          }}
+          .native-ai-composer {{
+            padding: 12px;
+          }}
           .native-ai-suggestions {{
             grid-template-columns: 1fr;
+            gap: 8px;
+          }}
+          .native-ai-assistant button.native-ai-suggestion {{
+            min-height: 54px;
+            padding: 10px 36px 10px 48px;
           }}
           .native-ai-input-row {{
             grid-template-columns: 1fr;
@@ -6691,28 +6865,33 @@ def native_ai_assistant_html() -> str:
           </label>
         </div>
       </header>
-      <main id="native-ai-messages" class="native-ai-messages" aria-live="polite">
-        <div class="native-ai-empty">
-          <div class="native-ai-empty-card">
-            <h3>可以直接问我当前检测结果</h3>
-            <p>例如“哪些区域需要人工复核？”、“为什么某个区域置信度较低？”、“不同模型结果为什么不一致？”。如果还没有检测结果，我会先解释上传、阈值和报告流程。</p>
+      <div class="native-ai-workbench">
+        <main id="native-ai-messages" class="native-ai-messages" aria-live="polite">
+          <div class="native-ai-empty">
+            <div class="native-ai-empty-card">
+              <h3>可以直接问我当前检测结果</h3>
+              <p>例如“哪些区域需要人工复核？”、“为什么某个区域置信度较低？”、“不同模型结果为什么不一致？”。如果还没有检测结果，我会先解释上传、阈值和报告流程。</p>
+            </div>
           </div>
-        </div>
-      </main>
-      <footer class="native-ai-composer">
-        <div class="native-ai-suggestion-title">你可以继续追问</div>
-        <div id="native-ai-suggestions" class="native-ai-suggestions">{starters}</div>
-        <div class="native-ai-input-row">
-          <div id="ask-ai-input">
-            <textarea aria-label="问题" placeholder="{xml_escape(CHAT_INPUT_PLACEHOLDER)}"></textarea>
+        </main>
+        <footer class="native-ai-composer">
+          <div class="native-ai-composer-head">
+            <div class="native-ai-suggestion-title">推荐追问</div>
+            <div class="native-ai-suggestion-count">6 条</div>
           </div>
-          <button id="ask-ai-send" type="button">发送</button>
-        </div>
-        <div id="native-ai-status" class="native-ai-status">等待提问。点“不喜欢”并选择原因后，下一次回答会自动参考该反馈。</div>
-        <template id="native-ai-reason-template">
-          <div class="native-ai-reasons" aria-label="不喜欢原因">{reasons}</div>
-        </template>
-      </footer>
+          <div id="native-ai-suggestions" class="native-ai-suggestions">{starters}</div>
+          <div class="native-ai-input-row">
+            <div id="ask-ai-input">
+              <textarea aria-label="问题" placeholder="{xml_escape(CHAT_INPUT_PLACEHOLDER)}"></textarea>
+            </div>
+            <button id="ask-ai-send" type="button">发送</button>
+          </div>
+          <div id="native-ai-status" class="native-ai-status">等待提问。点“不喜欢”并选择原因后，下一次回答会自动参考该反馈。</div>
+          <template id="native-ai-reason-template">
+            <div class="native-ai-reasons" aria-label="不喜欢原因">{reasons}</div>
+          </template>
+        </footer>
+      </div>
     </section>
     """
 
@@ -7009,6 +7188,8 @@ def native_ai_assistant_js() -> str:
       btn.type = "button";
       btn.className = "native-ai-suggestion";
       btn.textContent = question;
+      btn.title = question;
+      btn.setAttribute("aria-label", "推荐追问：" + question);
       btn.addEventListener("click", () => sendMessage(question));
       suggestionsEl.appendChild(btn);
     });
@@ -7136,7 +7317,7 @@ def build_app() -> gr.Blocks:
         gr.HTML(
             f"""
             <nav class="dental-page-nav" aria-label="平台导航">
-              <button type="button" class="dental-page-nav-item" data-page="learn">牙齿病变学习</button>
+              <button type="button" class="dental-page-nav-item" data-page="learn">牙病学习</button>
               <button type="button" class="dental-page-nav-item" data-page="dashboard">首页 Dashboard</button>
               <button type="button" class="dental-page-nav-item" data-page="image">图像检测</button>
               <button type="button" class="dental-page-nav-item" data-page="compare">多模型对比</button>
