@@ -61,7 +61,7 @@ MODEL_UNAVAILABLE_MSG = "当前模型不可用，未生成检测结果。"
 SAFE_TERMS = "请仅使用“疑似区域”“辅助识别结果”“建议人工复核”等非医疗结论表述。"
 CHAT_SCOPE_OPTIONS = ["当前单图", "当前多模型对比", "当前批量任务", "全部最新结果"]
 CHAT_ROLE_OPTIONS = ["患者易懂版", "医生复核版", "科研答辩版"]
-CHAT_INPUT_PLACEHOLDER = "例如：哪些区域需要人工复核？也可以问：为什么不同模型结果不同？"
+CHAT_INPUT_PLACEHOLDER = "例如：哪些区域需要重点关注？为什么不同模型结果不一致？"
 AI_ASSISTANT_DISPLAY_NAME = "智诊管家"
 AI_CHAT_HISTORY_LIMIT = 4
 AI_CHAT_HISTORY_MAX_CHARS = 900
@@ -456,6 +456,43 @@ APP_CSS = """
 .app-hero::after {
   content: none;
 }
+.app-hero-top {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.app-hero-copy {
+  min-width: 0;
+}
+.app-preferences {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.app-pref-btn {
+  appearance: none;
+  min-height: 36px;
+  border: 1px solid rgba(226,232,240,0.92);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.88);
+  color: #334155;
+  padding: 0 13px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  box-shadow: 0 8px 18px rgba(15,23,42,0.06);
+  transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+.app-pref-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(37,99,235,0.32);
+  background: #eff6ff;
+  color: #1d4ed8;
+}
 .app-hero h1 {
   position: relative;
   z-index: 1;
@@ -541,6 +578,89 @@ APP_CSS = """
   background: linear-gradient(135deg, var(--orange), var(--blue));
   color: #ffffff;
   box-shadow: 0 10px 24px rgba(37, 99, 235, 0.23);
+}
+body[data-dental-theme="dark"] .gradio-container {
+  background:
+    radial-gradient(circle at 12% 0%, rgba(14,165,233,0.16), transparent 30%),
+    radial-gradient(circle at 88% 8%, rgba(249,115,22,0.13), transparent 32%),
+    linear-gradient(180deg, #0f172a 0%, #111827 320px, #020617 100%) !important;
+  color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .app-hero,
+body[data-dental-theme="dark"] .dental-page,
+body[data-dental-theme="dark"] .dental-page-nav,
+body[data-dental-theme="dark"] .section-note,
+body[data-dental-theme="dark"] .gradio-container .block,
+body[data-dental-theme="dark"] .gradio-container .form,
+body[data-dental-theme="dark"] .gradio-container .panel,
+body[data-dental-theme="dark"] .gradio-container .accordion {
+  background: linear-gradient(180deg, rgba(15,23,42,0.94), rgba(17,24,39,0.88)) !important;
+  border-color: rgba(71,85,105,0.78) !important;
+  color: #e5e7eb !important;
+  box-shadow: 0 18px 42px rgba(0,0,0,0.28) !important;
+}
+body[data-dental-theme="dark"] .app-hero h1,
+body[data-dental-theme="dark"] .app-hero p,
+body[data-dental-theme="dark"] .gradio-container h1,
+body[data-dental-theme="dark"] .gradio-container h2,
+body[data-dental-theme="dark"] .gradio-container h3,
+body[data-dental-theme="dark"] .gradio-container label,
+body[data-dental-theme="dark"] .gradio-container .prose,
+body[data-dental-theme="dark"] .gradio-container .markdown,
+body[data-dental-theme="dark"] .gradio-container [data-testid="markdown"] {
+  color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .dental-page-nav-item,
+body[data-dental-theme="dark"] .app-pref-btn,
+body[data-dental-theme="dark"] .gradio-container input,
+body[data-dental-theme="dark"] .gradio-container textarea,
+body[data-dental-theme="dark"] .gradio-container select {
+  background: rgba(15,23,42,0.9) !important;
+  border-color: rgba(71,85,105,0.82) !important;
+  color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .dental-page-nav-item:hover,
+body[data-dental-theme="dark"] .app-pref-btn:hover {
+  background: rgba(30,41,59,0.96) !important;
+  color: #93c5fd !important;
+}
+body[data-dental-theme="dark"] .result-card,
+body[data-dental-theme="dark"] .metric-card,
+body[data-dental-theme="dark"] .knowledge-card,
+body[data-dental-theme="dark"] .quality-card,
+body[data-dental-theme="dark"] .report-preview-panel,
+body[data-dental-theme="dark"] .batch-knowledge-content,
+body[data-dental-theme="dark"] .det-explain {
+  background: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(30,41,59,0.86)) !important;
+  border-color: rgba(71,85,105,0.76) !important;
+  color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .native-ai-assistant {
+  background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(17,24,39,0.96)) !important;
+  border-color: rgba(71,85,105,0.78) !important;
+  color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .native-ai-top,
+body[data-dental-theme="dark"] .native-ai-messages,
+body[data-dental-theme="dark"] .native-ai-composer,
+body[data-dental-theme="dark"] .native-ai-empty-card,
+body[data-dental-theme="dark"] .native-ai-msg.assistant .native-ai-bubble {
+  background: linear-gradient(180deg, rgba(15,23,42,0.94), rgba(30,41,59,0.86)) !important;
+  border-color: rgba(71,85,105,0.76) !important;
+  color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .native-ai-subtitle,
+body[data-dental-theme="dark"] .native-ai-empty-card p,
+body[data-dental-theme="dark"] .native-ai-md,
+body[data-dental-theme="dark"] .native-ai-suggestion-title {
+  color: #cbd5e1 !important;
+}
+body[data-dental-theme="dark"] .native-ai-assistant button.native-ai-suggestion,
+body[data-dental-theme="dark"] .native-ai-export-btn,
+body[data-dental-theme="dark"] #ask-ai-input textarea {
+  background: rgba(15,23,42,0.9) !important;
+  border-color: rgba(71,85,105,0.82) !important;
+  color: #e5e7eb !important;
 }
 .dental-page {
   display: none !important;
@@ -747,13 +867,99 @@ body[data-dental-page="report"] #page-report {
   font-size: 12px;
   line-height: 1.5;
 }
+.dental-image-loupe {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 190px;
+  height: 190px;
+  display: none;
+  border-radius: 22px;
+  border: 1px solid rgba(191, 219, 254, 0.95);
+  background-repeat: no-repeat;
+  background-color: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 22px 48px rgba(15, 23, 42, 0.22);
+  pointer-events: none;
+  z-index: 10020;
+  overflow: hidden;
+}
+.dental-image-loupe.visible {
+  display: block;
+}
+.dental-batch-fullscreen-btn {
+  position: fixed;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid rgba(191,219,254,0.9);
+  background: rgba(15,23,42,0.78);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 12px 26px rgba(15,23,42,0.24);
+  backdrop-filter: blur(10px);
+  z-index: 10022;
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+.dental-batch-fullscreen-btn.visible {
+  display: inline-flex;
+}
+.dental-batch-fullscreen-btn:hover {
+  transform: translateY(-1px) scale(1.03);
+  background: rgba(37,99,235,0.88);
+}
+.dental-image-fullscreen-layer {
+  position: fixed;
+  inset: 0;
+  display: none;
+  place-items: center;
+  padding: 38px;
+  background: rgba(2,6,23,0.86);
+  backdrop-filter: blur(12px);
+  z-index: 10040;
+}
+.dental-image-fullscreen-layer.visible {
+  display: grid;
+}
+.dental-image-fullscreen-layer img {
+  max-width: min(96vw, 1480px);
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 28px 76px rgba(0,0,0,0.42);
+}
+.dental-image-fullscreen-close {
+  position: fixed;
+  right: 24px;
+  top: 22px;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.24);
+  background: rgba(15,23,42,0.72);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+  box-shadow: 0 14px 30px rgba(0,0,0,0.28);
+}
 #page-batch .batch-work-row {
-  align-items: stretch !important;
+  align-items: flex-start !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 #page-batch .batch-work-row > * {
-  min-height: 100%;
+  min-height: 0;
+  align-self: flex-start !important;
 }
-#page-batch .batch-work-row > *:last-child,
 #page-batch .batch-empty-state-panel {
   display: flex !important;
   flex-direction: column !important;
@@ -761,17 +967,18 @@ body[data-dental-page="report"] #page-report {
 #page-batch .batch-empty-state-panel,
 #page-batch .batch-empty-state-panel > *,
 #page-batch .batch-empty-state-panel .html-container {
-  flex: 1 1 auto !important;
-  height: 100%;
+  flex: 0 0 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
 }
 #page-batch .batch-empty-state-panel .detection-empty-state {
-  min-height: 100%;
+  min-height: 210px;
   max-height: none;
   margin: 8px 0 0;
   padding: 28px 30px;
 }
 #page-batch .batch-empty-state-panel .detection-empty-copy {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   max-width: none;
   width: 100%;
 }
@@ -1067,15 +1274,30 @@ button.solid-primary-action {
   box-shadow: 0 10px 28px rgba(15,23,42,0.06) !important;
 }
 .batch-knowledge-panel {
-  min-height: 390px !important;
-  max-height: 390px !important;
-  overflow-y: auto !important;
   margin-top: 12px !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  overflow: visible !important;
+}
+.batch-knowledge-content {
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: min(620px, 70vh) !important;
+  flex: none !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
   background: rgba(255,255,255,0.96) !important;
   border: 1px solid rgba(226,232,240,0.88) !important;
   border-radius: 18px !important;
   padding: 14px !important;
   box-shadow: 0 10px 28px rgba(15,23,42,0.06) !important;
+  scrollbar-gutter: stable;
+}
+.batch-knowledge-placeholder {
+  display: none !important;
 }
 .batch-knowledge-panel .knowledge-grid {
   grid-template-columns: 1fr !important;
@@ -1090,17 +1312,25 @@ button.solid-primary-action {
   box-shadow: none !important;
 }
 .batch-work-row .det-explain {
-  min-height: 390px !important;
-  max-height: 390px !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: min(620px, 70vh) !important;
+  flex: none !important;
   overflow-y: auto !important;
+  overflow-x: hidden !important;
   scrollbar-gutter: stable;
+}
+#batch-result-preview-gallery {
+  margin-bottom: 10px !important;
+}
+#batch-result-preview-gallery img {
+  cursor: zoom-in;
 }
 .batch-work-row .det-explain > *,
 .batch-work-row .det-explain .prose,
 .batch-work-row .det-explain .markdown,
 .batch-work-row .det-explain .md,
 .batch-work-row .det-explain [data-testid="markdown"],
-.batch-knowledge-panel > *,
 .batch-knowledge-panel .prose,
 .batch-knowledge-panel .markdown,
 .batch-knowledge-panel .html-container {
@@ -1108,8 +1338,68 @@ button.solid-primary-action {
   height: auto !important;
   overflow: visible !important;
 }
-.batch-knowledge-panel {
-  scrollbar-gutter: stable;
+#page-batch .batch-knowledge-panel .batch-knowledge-content {
+  max-height: min(620px, 70vh) !important;
+  height: auto !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+#page-batch .batch-work-row:has(.batch-knowledge-content) {
+  align-items: flex-start !important;
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+}
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-left-column,
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-right-column {
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  align-self: flex-start !important;
+  display: block !important;
+  overflow: visible !important;
+}
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-left-column .batch-knowledge-panel,
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-right-column .det-explain {
+  display: block !important;
+  min-height: 0 !important;
+}
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-knowledge-panel {
+  display: block !important;
+  overflow: visible !important;
+}
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-knowledge-panel .html-container {
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  display: block !important;
+}
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-knowledge-content,
+#page-batch .batch-work-row:has(.batch-knowledge-content) .batch-right-column .det-explain {
+  display: block !important;
+  height: auto !important;
+  max-height: min(620px, 70vh) !important;
+  min-height: 0 !important;
+  flex: none !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+#page-batch .batch-left-column .accordion,
+#page-batch .batch-left-column .accordion > *,
+#page-batch .batch-left-column .accordion .wrap,
+#page-batch .batch-left-column .accordion .form {
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+#page-batch .batch-left-column .block:not(.batch-knowledge-panel),
+#page-batch .batch-right-column .block:not(.det-explain):not(#batch-result-preview-gallery) {
+  height: auto !important;
+  min-height: 0 !important;
+  flex: none !important;
+  overflow: visible !important;
 }
 .batch-knowledge-title {
   margin: 0 0 12px;
@@ -1172,51 +1462,317 @@ button.solid-primary-action {
   color: #334155 !important;
   font-weight: 700 !important;
 }
-.education-hero {
+.education-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.55fr);
   gap: 16px;
+}
+.education-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(320px, 0.82fr);
+  gap: 18px;
   align-items: stretch;
-  margin-bottom: 14px;
+  padding: 22px;
+  margin-bottom: 0;
+  overflow: hidden;
+  border: 1px solid rgba(191, 219, 254, 0.82);
+  border-radius: 28px;
+  background:
+    linear-gradient(120deg, rgba(255,255,255,0.98), rgba(239,246,255,0.86) 48%, rgba(240,253,250,0.72)),
+    repeating-linear-gradient(90deg, rgba(148,163,184,0.08) 0, rgba(148,163,184,0.08) 1px, transparent 1px, transparent 36px);
+  box-shadow: 0 24px 58px rgba(15, 23, 42, 0.075);
 }
-.education-panel, .education-card, .education-tip {
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 14px;
+.education-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 2px 4px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.education-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(14, 165, 233, 0.22);
+  background: rgba(240, 249, 255, 0.84);
+  color: #0369a1;
+  font-size: 12px;
+  font-weight: 800;
+}
+.education-eyebrow::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #14b8a6;
+  box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.14);
+}
+.education-panel h2 {
+  margin: 0;
+  max-width: 760px;
+  color: #0f172a;
+  font-size: clamp(30px, 4vw, 48px);
+  line-height: 1.08;
+  letter-spacing: 0;
+}
+.education-lead {
+  max-width: 780px;
+  margin: 14px 0 0;
+  color: #334155;
+  font-size: 16px;
+  line-height: 1.8;
+}
+.education-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+.education-metric {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.82);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.education-metric b {
+  display: block;
+  color: #0f766e;
+  font-size: 22px;
+  line-height: 1.1;
+}
+.education-metric span {
+  display: block;
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.education-insight-panel,
+.education-tip {
+  border: 1px solid rgba(226, 232, 240, 0.86);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.065);
+}
+.education-insight-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
   padding: 16px;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.055);
 }
-.education-panel h2 { margin: 0 0 8px; font-size: 26px; color: var(--orange-dark); }
-.education-panel p { margin: 8px 0; line-height: 1.75; color: var(--ink); }
-.education-tip { background: #fff7ed; border-color: #fed7aa; }
-.education-tip b { display: block; margin-bottom: 8px; color: #9a3412; }
+.education-insight-visual {
+  min-height: 178px;
+  border-radius: 18px;
+  border: 1px solid rgba(191, 219, 254, 0.82);
+  background: linear-gradient(145deg, #ffffff, #eff6ff 58%, #f0fdfa);
+  overflow: hidden;
+}
+.education-insight-panel h3 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 18px;
+}
+.education-insight-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.education-insight-list li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.education-insight-list li::before {
+  content: "";
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--orange), var(--blue));
+}
+.education-review-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.education-review-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid rgba(226,232,240,0.9);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 10px 24px rgba(15,23,42,0.045);
+}
+.education-review-step b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  font-size: 13px;
+}
+.education-review-step span {
+  display: block;
+  color: #0f172a;
+  font-weight: 800;
+  line-height: 1.25;
+}
+.education-review-step small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  line-height: 1.45;
+}
 .education-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(230px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 16px;
   align-items: stretch;
 }
-.education-card { display: flex; flex-direction: column; gap: 10px; min-height: 100%; }
-.education-card h3 { margin: 0; color: var(--ink); font-size: 20px; }
-.education-card .subtitle { color: var(--muted); font-size: 13px; margin-top: -4px; }
-.education-visual {
-  min-height: 150px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #fff7ed, #eff6ff);
+.education-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94));
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.058);
+}
+.education-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: linear-gradient(90deg, var(--orange), var(--sky), var(--teal));
+}
+.education-card h3 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 19px;
+  line-height: 1.25;
+}
+.education-card .subtitle {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.education-card-top {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+.education-badge {
+  display: inline-flex;
+  width: fit-content;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #9a3412;
+  background: #fff7ed;
   border: 1px solid #fed7aa;
+  font-size: 12px;
+  font-weight: 800;
+}
+.education-visual {
+  aspect-ratio: 1 / 1;
+  min-height: 96px;
+  border-radius: 18px;
+  background:
+    linear-gradient(145deg, #fff7ed, #eff6ff 58%, #f0fdfa);
+  border: 1px solid rgba(254, 215, 170, 0.82);
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
 }
-.education-card dl { margin: 0; display: grid; gap: 8px; }
-.education-card dt { font-weight: 700; color: var(--orange-dark); }
-.education-card dd { margin: 2px 0 0; color: var(--ink); line-height: 1.6; }
+.education-visual svg {
+  width: 100%;
+  height: 100%;
+}
+.education-card dl {
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+.education-card dl > div {
+  padding: 10px;
+  border: 1px solid rgba(226,232,240,0.76);
+  border-radius: 14px;
+  background: rgba(248,250,252,0.72);
+}
+.education-card dt {
+  font-weight: 800;
+  color: #0f766e;
+  font-size: 13px;
+}
+.education-card dd {
+  margin: 4px 0 0;
+  color: #1e293b;
+  line-height: 1.62;
+  font-size: 13px;
+}
+.education-card-note {
+  margin-top: auto;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(191, 219, 254, 0.88);
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .education-footer-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  margin-top: 14px;
+}
+.education-tip {
+  padding: 16px;
+  background: linear-gradient(180deg, #ffffff, #fff7ed);
+}
+.education-tip b {
+  display: block;
+  margin-bottom: 8px;
+  color: #9a3412;
+  font-size: 15px;
+}
+.education-tip p,
+.education-tip li {
+  color: #334155;
+  line-height: 1.65;
+}
+.education-tip ul {
+  margin: 0;
+  padding-left: 18px;
 }
 #ask-ai-floating-button {
   position: fixed;
@@ -1552,6 +2108,7 @@ body.dental-show-feedback-reason #chat-feedback-panel {
 @media (max-width: 1100px) {
   .metric-grid, .result-cards, .knowledge-grid, .quality-grid, .dashboard-detail-grid, .education-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .education-hero { grid-template-columns: 1fr; }
+  .education-review-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .det-input-row,
   .det-result-row,
   .compare-model-row,
@@ -1589,9 +2146,26 @@ body.dental-show-feedback-reason #chat-feedback-panel {
   #ask-ai-floating-button svg { width: 36px; height: 36px; }
   #ask-ai-selection-popover::after { content: ""; }
   .knowledge-grid, .dashboard-detail-grid, .education-grid, .education-footer-grid { grid-template-columns: 1fr; }
+  .education-hero { padding: 16px; border-radius: 20px; }
+  .education-panel h2 { font-size: 30px; }
+  .education-metrics,
+  .education-review-strip { grid-template-columns: 1fr; }
+  .education-card-top { grid-template-columns: 78px minmax(0, 1fr); }
+  .education-visual { min-height: 78px; border-radius: 15px; }
+  .education-insight-visual { min-height: 150px; }
   .app-hero {
     padding: 18px 16px 14px;
     border-radius: 18px;
+  }
+  .app-hero-top {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .app-preferences {
+    width: 100%;
+  }
+  .app-pref-btn {
+    flex: 1 1 0;
   }
   .app-hero h1 { font-size: 27px; line-height: 1.22; }
   .dental-page-nav {
@@ -1650,6 +2224,83 @@ ASK_AI_HEAD = r"""
   }
 
   const DENTAL_PAGES = new Set(["learn", "dashboard", "image", "compare", "batch", "history", "assistant", "report"]);
+  const DENTAL_I18N = {
+    zh: {
+      app_title: "牙齿病变目标区域识别与辅助分析平台",
+      app_subtitle: "面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。",
+      nav_learn: "牙病学习",
+      nav_dashboard: "首页 Dashboard",
+      nav_image: "图像检测",
+      nav_compare: "多模型对比",
+      nav_batch: "批量检测",
+      nav_history: "历史记录",
+      nav_assistant: "智诊管家",
+      nav_report: "报告中心"
+    },
+    en: {
+      app_title: "Dental Lesion Candidate-region Detection Platform",
+      app_subtitle: "Auxiliary recognition, model comparison and report generation for dental and oral images.",
+      nav_learn: "Learning",
+      nav_dashboard: "Dashboard",
+      nav_image: "Single Image",
+      nav_compare: "Model Review",
+      nav_batch: "Batch Screening",
+      nav_history: "History",
+      nav_assistant: "AI Assistant",
+      nav_report: "Reports"
+    }
+  };
+
+  function applyDentalLanguage(lang) {
+    const next = lang === "en" ? "en" : "zh";
+    const copy = DENTAL_I18N[next] || DENTAL_I18N.zh;
+    document.body.dataset.dentalLang = next;
+    document.documentElement.lang = next === "en" ? "en" : "zh-CN";
+    document.querySelectorAll("[data-i18n]").forEach(node => {
+      const key = node.dataset.i18n;
+      if (copy[key]) node.textContent = copy[key];
+    });
+    const toggle = document.getElementById("dental-lang-toggle");
+    if (toggle) {
+      toggle.textContent = next === "en" ? "中文" : "EN";
+      toggle.title = next === "en" ? "切换为中文界面" : "Switch to English";
+    }
+    try { window.localStorage.setItem("dental-ui-language", next); } catch (_) {}
+  }
+
+  function applyDentalTheme(theme) {
+    const next = theme === "dark" ? "dark" : "light";
+    document.body.dataset.dentalTheme = next;
+    const toggle = document.getElementById("dental-theme-toggle");
+    if (toggle) {
+      toggle.textContent = next === "dark" ? "浅色" : "暗色";
+      toggle.title = next === "dark" ? "切换为浅色模式" : "切换为暗色模式";
+    }
+    try { window.localStorage.setItem("dental-ui-theme", next); } catch (_) {}
+  }
+
+  function installPreferences() {
+    let lang = "zh";
+    let theme = "light";
+    try {
+      lang = window.localStorage.getItem("dental-ui-language") || lang;
+      theme = window.localStorage.getItem("dental-ui-theme") || theme;
+    } catch (_) {}
+    applyDentalLanguage(lang);
+    applyDentalTheme(theme);
+    const langBtn = document.getElementById("dental-lang-toggle");
+    const themeBtn = document.getElementById("dental-theme-toggle");
+    if (langBtn && langBtn.dataset.installed !== "true") {
+      langBtn.dataset.installed = "true";
+      langBtn.addEventListener("click", () => applyDentalLanguage(document.body.dataset.dentalLang === "en" ? "zh" : "en"));
+    }
+    if (themeBtn && themeBtn.dataset.installed !== "true") {
+      themeBtn.dataset.installed = "true";
+      themeBtn.addEventListener("click", () => applyDentalTheme(document.body.dataset.dentalTheme === "dark" ? "light" : "dark"));
+    }
+    setTimeout(() => applyDentalLanguage(document.body.dataset.dentalLang || lang), 400);
+    setTimeout(() => applyDentalLanguage(document.body.dataset.dentalLang || lang), 1200);
+  }
 
   function activateDentalPage(page, shouldScroll = true) {
     const nextPage = DENTAL_PAGES.has(page) ? page : "learn";
@@ -1695,6 +2346,151 @@ ASK_AI_HEAD = r"""
       e.stopPropagation();
       userNavigated = true;
       activateDentalPage(btn.dataset.page || "learn");
+    }, true);
+  }
+
+  function installImageMagnifier() {
+    if (window.__dentalImageMagnifierInstalled) return;
+    window.__dentalImageMagnifierInstalled = true;
+    const selector = '#page-image img, #page-compare img, #page-batch img, #page-report img, .dental-image-fullscreen-layer img';
+    const zoom = 2.4;
+    let loupe = document.getElementById('dental-image-loupe');
+
+    if (!loupe) {
+      loupe = document.createElement('div');
+      loupe.id = 'dental-image-loupe';
+      loupe.className = 'dental-image-loupe';
+      document.body.appendChild(loupe);
+    }
+
+    function usableImage(img) {
+      if (!img || !img.src || img.naturalWidth < 40 || img.naturalHeight < 40) return false;
+      const rect = img.getBoundingClientRect();
+      return rect.width >= 80 && rect.height >= 80;
+    }
+
+    function placeNearCursor(el, x, y, size, offset) {
+      const gap = offset || 18;
+      let left = x + gap;
+      let top = y + gap;
+      if (left + size > window.innerWidth - 12) left = x - size - gap;
+      if (top + size > window.innerHeight - 12) top = y - size - gap;
+      el.style.left = `${Math.max(12, left)}px`;
+      el.style.top = `${Math.max(12, top)}px`;
+    }
+
+    function updateLoupe(event, img) {
+      const rect = img.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+        hideLoupe();
+        return;
+      }
+      const src = img.currentSrc || img.src;
+      const size = 190;
+      loupe.style.backgroundImage = `url("${src}")`;
+      loupe.style.backgroundSize = `${rect.width * zoom}px ${rect.height * zoom}px`;
+      loupe.style.backgroundPosition = `${size / 2 - x * zoom}px ${size / 2 - y * zoom}px`;
+      placeNearCursor(loupe, event.clientX, event.clientY, size, 18);
+      loupe.classList.add('visible');
+    }
+
+    function hideLoupe() {
+      loupe.classList.remove('visible');
+    }
+
+    document.addEventListener('mousemove', event => {
+      const target = event.target && event.target.closest ? event.target.closest(selector) : null;
+      if (usableImage(target)) updateLoupe(event, target);
+      else hideLoupe();
+    }, true);
+    document.addEventListener('scroll', hideLoupe, true);
+    document.addEventListener('mouseleave', hideLoupe);
+  }
+
+  function installBatchPreviewFullscreen() {
+    if (window.__dentalBatchFullscreenInstalled) return;
+    window.__dentalBatchFullscreenInstalled = true;
+    let activeImage = null;
+    const btn = document.createElement('button');
+    btn.id = 'dental-batch-fullscreen-btn';
+    btn.className = 'dental-batch-fullscreen-btn';
+    btn.type = 'button';
+    btn.title = '全屏查看批量预览图';
+    btn.setAttribute('aria-label', '全屏查看批量预览图');
+    btn.textContent = '⛶';
+    document.body.appendChild(btn);
+
+    const layer = document.createElement('div');
+    layer.id = 'dental-image-fullscreen-layer';
+    layer.className = 'dental-image-fullscreen-layer';
+    layer.innerHTML = '<button type="button" class="dental-image-fullscreen-close" aria-label="关闭全屏">×</button><img alt="批量检测结果全屏预览">';
+    document.body.appendChild(layer);
+    const fullImage = layer.querySelector('img');
+    const close = layer.querySelector('.dental-image-fullscreen-close');
+
+    function targetImage(node) {
+      const img = node && node.closest ? node.closest('#batch-result-preview-gallery img') : null;
+      if (!img || !img.src || img.naturalWidth < 40 || img.naturalHeight < 40) return null;
+      return img;
+    }
+
+    function positionButton(img) {
+      const rect = img.getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 70) {
+        hideButton();
+        return;
+      }
+      activeImage = img;
+      btn.style.left = `${Math.max(12, rect.right - 46)}px`;
+      btn.style.top = `${Math.max(12, rect.top + 10)}px`;
+      btn.classList.add('visible');
+    }
+
+    function hideButton() {
+      btn.classList.remove('visible');
+      activeImage = null;
+    }
+
+    function openFullscreen(img) {
+      if (!img) return;
+      fullImage.src = img.currentSrc || img.src;
+      fullImage.alt = img.alt || '批量检测结果全屏预览';
+      layer.classList.add('visible');
+      try {
+        if (layer.requestFullscreen && !document.fullscreenElement) {
+          layer.requestFullscreen().catch(() => {});
+        }
+      } catch (_) {}
+    }
+
+    function closeFullscreen() {
+      layer.classList.remove('visible');
+      fullImage.removeAttribute('src');
+      try {
+        if (document.fullscreenElement === layer) document.exitFullscreen().catch(() => {});
+      } catch (_) {}
+    }
+
+    document.addEventListener('mousemove', event => {
+      const img = targetImage(event.target);
+      if (img) positionButton(img);
+      else if (event.target !== btn && !btn.contains(event.target)) hideButton();
+    }, true);
+    btn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openFullscreen(activeImage);
+    });
+    layer.addEventListener('click', event => {
+      if (event.target === layer || event.target === close) closeFullscreen();
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && layer.classList.contains('visible')) closeFullscreen();
+    });
+    document.addEventListener('scroll', () => {
+      if (activeImage) positionButton(activeImage);
     }, true);
   }
 
@@ -1828,6 +2624,9 @@ ASK_AI_HEAD = r"""
 
   function install() {
     installPageNavigation();
+    installPreferences();
+    installImageMagnifier();
+    installBatchPreviewFullscreen();
     ensureUi();
     document.addEventListener('mouseup', () => setTimeout(showSelectionPopover, 60));
     document.addEventListener('touchend', () => setTimeout(showSelectionPopover, 180));
@@ -3154,7 +3953,7 @@ def render_fusion_view(image: Any, results: list[dict[str, Any]] | None, filter_
         high = item["一致性等级"] == "高一致性疑似区域"
         color = (22, 163, 74) if high else (225, 29, 72)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
-        label = f"F{item['区域编号']} {'一致' if high else '待复核'}"
+        label = f"{item['区域编号']} {item['类别']}"
         draw.rectangle([x1, max(0, y1 - 18), x1 + max(70, len(label) * 7), y1], fill=color)
         draw.text((x1 + 3, max(0, y1 - 16)), label, fill=(0, 0, 0), font=font)
         rows.append(
@@ -3377,6 +4176,20 @@ def batch_image_choices(items: list[dict[str, Any]] | None) -> list[str]:
     return choices
 
 
+def batch_image_default_choice(items: list[dict[str, Any]] | None) -> str | None:
+    choices = batch_image_choices(items)
+    if not choices:
+        return None
+    for index, item in enumerate(items or []):
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result", {}) if isinstance(item.get("result"), dict) else {}
+        boxes = result.get("boxes", [])
+        if result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu" and isinstance(boxes, list) and boxes:
+            return choices[index]
+    return choices[0]
+
+
 def batch_image_index_from_choice(items: list[dict[str, Any]] | None, selected_image: str | None) -> int:
     if not items:
         return 0
@@ -3434,19 +4247,34 @@ def batch_image_explanation_markdown(items: list[dict[str, Any]] | None, selecte
     return "\n".join(lines)
 
 
+BATCH_KNOWLEDGE_PLACEHOLDER_HTML = "<div class='batch-knowledge-placeholder' aria-hidden='true'></div>"
+
+
+def batch_knowledge_panel_html(content: str) -> str:
+    return f"<div class='batch-knowledge-content'>{content}</div>"
+
+
 def batch_image_knowledge_html(items: list[dict[str, Any]] | None, selected_image: str | None) -> str:
     if not items:
-        return "<div class='section-note'>运行批量检测后，这里会显示当前图片检出的牙病类别说明。</div>"
+        return BATCH_KNOWLEDGE_PLACEHOLDER_HTML
     image_idx = batch_image_index_from_choice(items, selected_image)
     item = items[image_idx] if image_idx < len(items) else items[0]
     result = item.get("result", {}) if isinstance(item, dict) else {}
     image_name = item.get("image_name") or result.get("image_name") or f"图片{image_idx + 1}"
     title = f"<div class='batch-knowledge-title'>图片 {image_idx + 1}｜{xml_escape(str(image_name))}<br>牙病类别说明</div>"
-    return title + class_knowledge_cards(result)
+    return batch_knowledge_panel_html(title + class_knowledge_cards(result))
 
 
-def batch_image_detail_outputs(items: list[dict[str, Any]] | None, selected_image: str | None) -> tuple[str, str]:
-    return batch_image_explanation_markdown(items, selected_image), batch_image_knowledge_html(items, selected_image)
+def batch_image_detail_outputs(items: list[dict[str, Any]] | None, selected_image: str | None) -> tuple[Any, Any]:
+    if not items:
+        return (
+            gr.update(value="运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。", visible=False),
+            gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
+        )
+    return (
+        gr.update(value=batch_image_explanation_markdown(items, selected_image), visible=True),
+        gr.update(value=batch_image_knowledge_html(items, selected_image)),
+    )
 
 
 def report_result_pairs(
@@ -3589,8 +4417,11 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     lines = [
         "# 批量牙齿病变疑似区域辅助识别报告",
         "",
-        f"- 报告生成时间：{now_iso()}",
-        "- 运行设备：CPU",
+        report_cover_markdown("批量检测报告", report_result_pairs(batch_items=items)),
+        "",
+        report_executive_summary_markdown(report_result_pairs(batch_items=items)),
+        "",
+        report_risk_legend_markdown(),
         "",
         report_scene_markdown("批量检测报告", report_result_pairs(batch_items=items)),
         "",
@@ -3638,9 +4469,9 @@ def run_batch_detection(
             gr.update(value=[], visible=False),
             gr.update(choices=[], value=None, visible=False),
             gr.update(value="请先上传一张或多张图片。", visible=False),
-            gr.update(value="<div class='section-note'>运行批量检测后，这里会显示当前图片检出的牙病类别说明。</div>", visible=False),
+            gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
             "尚未生成批量报告预览。",
-            [],
+            gr.update(value=[], visible=False),
             None,
             None,
             [],
@@ -3661,9 +4492,9 @@ def run_batch_detection(
         gr.update(value=[], visible=False),
         gr.update(choices=[], value=None, visible=False),
         gr.update(value="批量检测进行中，请稍候。", visible=False),
-        gr.update(value="<div class='section-note'>批量检测进行中，完成后会显示当前图片检出的牙病类别说明。</div>", visible=False),
+        gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
         "尚未生成批量报告预览。",
-        [],
+        gr.update(value=[], visible=False),
         None,
         None,
         [],
@@ -3691,9 +4522,9 @@ def run_batch_detection(
             gr.update(value=preview, visible=bool(preview)),
             gr.update(choices=[], value=None, visible=False),
             gr.update(value="批量检测进行中，请稍候。", visible=False),
-            gr.update(value="<div class='section-note'>批量检测进行中，完成后会显示当前图片检出的牙病类别说明。</div>", visible=False),
+            gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
             "尚未生成批量报告预览。",
-            [],
+            gr.update(value=[], visible=False),
             None,
             None,
             items,
@@ -3734,9 +4565,9 @@ def run_batch_detection(
             gr.update(value=preview, visible=bool(preview)),
             gr.update(choices=[], value=None, visible=False),
             gr.update(value="批量检测进行中，请稍候。", visible=False),
-            gr.update(value="<div class='section-note'>批量检测进行中，完成后会显示当前图片检出的牙病类别说明。</div>", visible=False),
+            gr.update(value=batch_image_knowledge_html(items, batch_image_default_choice(items))),
             "尚未生成批量报告预览。",
-            [],
+            gr.update(value=[], visible=False),
             None,
             None,
             items,
@@ -3756,9 +4587,9 @@ def run_batch_detection(
         gr.update(value=preview, visible=bool(preview)),
         gr.update(choices=[], value=None, visible=False),
         gr.update(value="正在生成批量汇总。", visible=False),
-        gr.update(value="<div class='section-note'>正在生成批量类别说明。</div>", visible=False),
+        gr.update(value=batch_image_knowledge_html(items, batch_image_default_choice(items))),
         "正在生成批量报告预览。",
-        [],
+        gr.update(value=[], visible=False),
         None,
         None,
         items,
@@ -3777,7 +4608,7 @@ def run_batch_detection(
     rows = [batch_result_row(item) for item in items]
     linked_choices = batch_region_choices(items)
     image_choices = batch_image_choices(items)
-    selected_image = image_choices[0] if image_choices else None
+    selected_image = batch_image_default_choice(items)
     report_preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告生成失败。"
     report_preview = markdown_for_gradio_preview(report_preview_raw)
     report_gallery = report_visual_gallery("批量检测报告", {}, [], items)
@@ -3789,9 +4620,9 @@ def run_batch_detection(
         gr.update(value=preview, visible=True),
         gr.update(choices=image_choices, value=selected_image, visible=True),
         gr.update(value=batch_image_explanation_markdown(items, selected_image), visible=True),
-        gr.update(value=batch_image_knowledge_html(items, selected_image), visible=True),
+        gr.update(value=batch_image_knowledge_html(items, selected_image)),
         report_preview,
-        report_gallery,
+        gr.update(value=report_gallery, visible=bool(report_gallery)),
         md_path,
         csv_path,
         items,
@@ -3811,9 +4642,9 @@ def reset_batch_detection_outputs():
         gr.update(value=[], visible=False),
         gr.update(choices=[], value=None, visible=False),
         gr.update(value="运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。", visible=False),
-        gr.update(value="<div class='section-note'>运行批量检测后，这里会显示当前图片检出的牙病类别说明。</div>", visible=False),
+        gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
         "尚未生成批量报告预览。",
-        [],
+        gr.update(value=[], visible=False),
         None,
         None,
         [],
@@ -6016,6 +6847,150 @@ def report_asset_markdown_path(path: str | Path) -> str:
         return str(path).replace("\\", "/")
 
 
+def report_language_is_en(language: str | None) -> bool:
+    return str(language or "").strip().lower() in {"english", "en", "英文"}
+
+
+def report_type_label(report_type: str, language: str | None = "中文") -> str:
+    if not report_language_is_en(language):
+        return report_type
+    return {
+        "单图检测报告": "Single-image Detection Report",
+        "多模型对比报告": "Multi-model Comparison Report",
+        "批量检测报告": "Batch Screening Report",
+        "综合报告": "Integrated Report",
+    }.get(report_type, report_type)
+
+
+def report_pair_metrics(pairs: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    success = [r for _, r in pairs if r.get("status") == "success" and r.get("runtime_mode") == "real_yolo_cpu"]
+    boxes = [box for result in success for box in result.get("boxes", [])]
+    confs = [float(box.get("confidence", 0.0)) for box in boxes]
+    review_boxes = sum(1 for box in boxes if box.get("risk_level") in {"建议人工复核", "强烈建议人工复核"})
+    classes = sorted({normalize_class_name(box.get("class_name", "")) for box in boxes if box.get("class_name")})
+    return {
+        "groups": len(pairs),
+        "success": len(success),
+        "boxes": len(boxes),
+        "review_boxes": review_boxes,
+        "avg_confidence": sum(confs) / len(confs) if confs else None,
+        "max_confidence": max(confs) if confs else None,
+        "classes": classes,
+    }
+
+
+def report_cover_markdown(report_type: str, pairs: list[tuple[str, dict[str, Any]]], language: str | None = "中文") -> str:
+    metrics = report_pair_metrics(pairs)
+    if report_language_is_en(language):
+        classes = ", ".join(metrics["classes"]) if metrics["classes"] else "No explicit class at current thresholds"
+        return "\n".join(
+            [
+                "## Cover",
+                "| Item | Value |",
+                "|---|---|",
+                f"| Report type | {report_type_label(report_type, language)} |",
+                f"| Generated at | {now_iso()} |",
+                "| Project | Dental lesion candidate-region detection and auxiliary analysis platform |",
+                "| Runtime device | CPU |",
+                f"| App version | {APP_VERSION} |",
+                f"| Valid inference groups | {metrics['success']} / {metrics['groups']} |",
+                f"| Candidate regions | {metrics['boxes']} |",
+                f"| Classes involved | {classes} |",
+            ]
+        )
+    classes = "、".join(metrics["classes"]) if metrics["classes"] else "当前阈值下未检出明确类别"
+    return "\n".join(
+        [
+            "## 报告封面",
+            "| 项目 | 内容 |",
+            "|---|---|",
+            f"| 报告类型 | {report_type_label(report_type, language)} |",
+            f"| 生成时间 | {now_iso()} |",
+            "| 项目名称 | 牙齿病变目标区域识别与辅助分析平台 |",
+            "| 运行设备 | CPU |",
+            f"| 应用版本 | {APP_VERSION} |",
+            f"| 有效推理结果 | {metrics['success']} / {metrics['groups']} 组 |",
+            f"| 疑似区域总数 | {metrics['boxes']} 个 |",
+            f"| 涉及类别 | {classes} |",
+        ]
+    )
+
+
+def report_executive_summary_markdown(pairs: list[tuple[str, dict[str, Any]]], language: str | None = "中文") -> str:
+    metrics = report_pair_metrics(pairs)
+    avg_conf = f"{metrics['avg_confidence']:.3f}" if metrics["avg_confidence"] is not None else "-"
+    max_conf = f"{metrics['max_confidence']:.3f}" if metrics["max_confidence"] is not None else "-"
+    if report_language_is_en(language):
+        return "\n".join(
+            [
+                "## Executive Summary",
+                "| Metric | Value |",
+                "|---|---:|",
+                f"| Inference groups | {metrics['groups']} |",
+                f"| Successful groups | {metrics['success']} |",
+                f"| Candidate regions | {metrics['boxes']} |",
+                f"| Regions recommended for review | {metrics['review_boxes']} |",
+                f"| Average confidence | {avg_conf} |",
+                f"| Highest confidence | {max_conf} |",
+            ]
+        )
+    return "\n".join(
+        [
+            "## 摘要",
+            "| 指标 | 数值 |",
+            "|---|---:|",
+            f"| 结果组数 | {metrics['groups']} |",
+            f"| 成功推理组数 | {metrics['success']} |",
+            f"| 疑似区域总数 | {metrics['boxes']} |",
+            f"| 建议重点复核区域 | {metrics['review_boxes']} |",
+            f"| 平均置信度 | {avg_conf} |",
+            f"| 最高置信度 | {max_conf} |",
+        ]
+    )
+
+
+def report_risk_legend_markdown(language: str | None = "中文") -> str:
+    if report_language_is_en(language):
+        return "\n".join(
+            [
+                "## Risk Level Guide",
+                "| Level | Meaning | Suggested action |",
+                "|---|---|---|",
+                "| High confidence | The model output is relatively stable under the current threshold. | Review together with the original image and clinical context. |",
+                "| Manual review suggested | Medium confidence or a region that needs location/class verification. | Prioritize manual review before using it in any conclusion. |",
+                "| Strong manual review suggested | Low confidence or potentially ambiguous region. | Treat only as a candidate cue and verify carefully. |",
+            ]
+        )
+    return "\n".join(
+        [
+            "## 风险分级说明",
+            "| 等级 | 含义 | 建议动作 |",
+            "|---|---|---|",
+            "| 可信度较高 | 当前阈值下模型输出相对稳定。 | 结合原图和临床信息常规复核。 |",
+            "| 建议人工复核 | 置信度中等或位置/类别需要进一步确认。 | 在形成结论前优先人工复核。 |",
+            "| 强烈建议人工复核 | 低置信度或疑似区域可能存在歧义。 | 仅作为候选提示，需谨慎核对。 |",
+        ]
+    )
+
+
+def report_region_crop_assets(source: str, result: dict[str, Any], max_regions: int) -> list[tuple[str, str, str]]:
+    original, annotated = result_original_and_annotated(None, result)
+    if original is None or annotated is None:
+        return []
+    crops: list[tuple[str, str, str]] = []
+    boxes = sorted(result.get("boxes", []), key=lambda box: float(box.get("confidence", 0.0)), reverse=True)
+    for region_idx, box in enumerate(boxes[:max_regions], 1):
+        original_crop, annotated_crop = crop_region_pair(original, annotated, box)
+        if original_crop is None or annotated_crop is None:
+            continue
+        prefix = f"report_{safe_asset_stem(source)}_r{region_idx}"
+        original_path = save_image_asset(original_crop, prefix, "crop_original")
+        annotated_path = save_image_asset(annotated_crop, prefix, "crop_result")
+        caption = f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
+        crops.append((caption, original_path, annotated_path))
+    return crops
+
+
 def report_visual_gallery(
     report_type: str,
     detection: dict[str, Any] | None,
@@ -6024,11 +6999,75 @@ def report_visual_gallery(
     max_overall: int = 8,
     max_regions: int = 12,
 ) -> list[tuple[Image.Image, str]]:
-    return []
+    gallery: list[tuple[Image.Image, str]] = []
+    pairs = report_result_pairs(detection, comparison, batch_items)
+    for source, result in pairs[:max_overall]:
+        annotated = load_visual_asset(result, "result")
+        original = load_visual_asset(result, "original")
+        if annotated is not None:
+            gallery.append((annotated, f"{source}｜结果图｜疑似区域 {int(result.get('box_count', 0) or 0)} 个"))
+        elif original is not None:
+            gallery.append((original, f"{source}｜原图｜未生成标注图"))
+    region_count = 0
+    for source, result in pairs:
+        remaining = max_regions - region_count
+        if remaining <= 0:
+            break
+        for caption, _, annotated_path in report_region_crop_assets(source, result, remaining):
+            try:
+                gallery.append((Image.open(annotated_path).convert("RGB"), caption))
+                region_count += 1
+            except Exception:
+                continue
+            if region_count >= max_regions:
+                break
+    return gallery
 
 
-def report_visual_markdown(pairs: list[tuple[str, dict[str, Any]]], max_overall: int = 8, max_regions: int = 12) -> str:
-    return ""
+def report_visual_markdown(
+    pairs: list[tuple[str, dict[str, Any]]],
+    max_overall: int = 8,
+    max_regions: int = 12,
+    language: str | None = "中文",
+) -> str:
+    if not pairs:
+        return "## Image Layout\nNo visual result is available." if report_language_is_en(language) else "## 图片排版\n当前暂无可插入报告的图片结果。"
+    lines = ["## Image Layout"] if report_language_is_en(language) else ["## 图片排版"]
+    if report_language_is_en(language):
+        lines.append("The report includes the annotated overview first, followed by high-priority local crops.")
+    else:
+        lines.append("报告先展示整体标注图，再展示高置信或优先复核的局部截图，便于快速定位。")
+    lines.append("")
+    for source, result in pairs[:max_overall]:
+        assets = result.get("visual_assets") or {}
+        result_path = assets.get("result")
+        original_path = assets.get("original")
+        if not result_path and not original_path:
+            continue
+        lines.append(f"### {source}")
+        if result_path:
+            lines.append(f"![{source} 结果图]({report_asset_markdown_path(result_path)})")
+        if original_path:
+            lines.append(f"![{source} 原图]({report_asset_markdown_path(original_path)})")
+        lines.append("")
+    region_count = 0
+    region_title = "### Local Review Crops" if report_language_is_en(language) else "### 局部复核截图"
+    region_lines = [region_title]
+    for source, result in pairs:
+        remaining = max_regions - region_count
+        if remaining <= 0:
+            break
+        for caption, original_path, annotated_path in report_region_crop_assets(source, result, remaining):
+            region_lines.append(f"**{caption}**")
+            region_lines.append(f"![{caption} 原图局部]({report_asset_markdown_path(original_path)})")
+            region_lines.append(f"![{caption} 标注局部]({report_asset_markdown_path(annotated_path)})")
+            region_lines.append("")
+            region_count += 1
+            if region_count >= max_regions:
+                break
+    if region_count:
+        lines.extend(region_lines)
+    return "\n".join(lines)
 
 
 def make_report_markdown(
@@ -6036,17 +7075,8 @@ def make_report_markdown(
     comparison: list[dict[str, Any]] | None,
     batch_items: list[dict[str, Any]] | None = None,
     report_type: str = "综合报告",
+    report_language: str | None = "中文",
 ) -> str:
-    lines = [
-        "# 牙齿病变疑似区域辅助识别报告",
-        "",
-        f"- 报告生成时间：{now_iso()}",
-        "- 项目名称：牙齿病变目标区域识别与辅助分析平台",
-        "- 运行设备：CPU",
-        f"- 应用版本：{APP_VERSION}",
-        f"- 报告类型：{report_type}",
-        "",
-    ]
     include_detection = report_type in {"单图检测报告", "综合报告"} and detection
     include_comparison = report_type in {"多模型对比报告", "综合报告"} and comparison
     include_batch = report_type in {"批量检测报告", "综合报告"} and batch_items
@@ -6055,11 +7085,23 @@ def make_report_markdown(
         comparison if include_comparison else None,
         batch_items if include_batch else None,
     )
+    if report_language_is_en(report_language):
+        return make_report_markdown_en(detection, comparison, batch_items, report_type, active_pairs)
+    lines = [
+        "# 牙齿病变疑似区域辅助识别报告",
+        "",
+        report_cover_markdown(report_type, active_pairs, report_language),
+        "",
+        report_executive_summary_markdown(active_pairs, report_language),
+        "",
+        report_risk_legend_markdown(report_language),
+        "",
+    ]
     lines.extend(
         [
             report_scene_markdown(report_type, active_pairs),
             "",
-            report_visual_markdown(active_pairs),
+            report_visual_markdown(active_pairs, language=report_language),
             "",
             class_summary_markdown(active_pairs),
             "",
@@ -6156,6 +7198,163 @@ def make_report_markdown(
             "",
             "## 免责声明",
             FULL_DISCLAIMER,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def english_status_text(result: dict[str, Any]) -> str:
+    return {
+        "success": "Success",
+        "load_failed": "Weight not loaded",
+        "inference_failed": "Inference failed",
+        "missing_dependency": "Missing dependency",
+        "no_weight_matched": "No matched weight",
+    }.get(str(result.get("status", "")), status_text(result))
+
+
+def english_risk_text(value: str | None) -> str:
+    return {
+        "可信度较高": "High confidence",
+        "建议人工复核": "Manual review suggested",
+        "强烈建议人工复核": "Strong manual review suggested",
+        "常规人工复核": "Routine manual review",
+        "当前阈值下无疑似区域": "No candidate under current threshold",
+        "无法评估": "Not assessable",
+    }.get(str(value or ""), str(value or "-"))
+
+
+def class_summary_markdown_en(pairs: list[tuple[str, dict[str, Any]]]) -> str:
+    records: dict[str, list[float]] = {}
+    for _, result in pairs:
+        if result.get("status") != "success":
+            continue
+        for box in result.get("boxes", []):
+            class_name = normalize_class_name(box.get("class_name", "")) or "Unnamed class"
+            records.setdefault(class_name, []).append(float(box.get("confidence", 0.0)))
+    lines = ["## Class-level Summary"]
+    if not records:
+        lines.append("No candidate class is available in the selected results.")
+        return "\n".join(lines)
+    lines.extend(["| Class | Candidate regions | Average confidence | Highest confidence | Review focus |", "|---|---:|---:|---:|---|"])
+    for class_name, confs in sorted(records.items()):
+        focus = {
+            "Caries": "Review whether the region is close to hard-tissue loss or caries-like morphology.",
+            "Periapical_Lesion": "Review relation to root apex and surrounding periapical structure.",
+            "Impacted": "Review tooth position, eruption direction, adjacent teeth and overall panoramic context.",
+        }.get(class_name, "Review together with the original image and model training definition.")
+        lines.append(f"| {class_name} | {len(confs)} | {sum(confs) / len(confs):.3f} | {max(confs):.3f} | {focus} |")
+    return "\n".join(lines)
+
+
+def review_worklist_markdown_en(pairs: list[tuple[str, dict[str, Any]]], limit: int = 30) -> str:
+    severity = {"强烈建议人工复核": 3, "建议人工复核": 2, "可信度较高": 1}
+    rows: list[dict[str, Any]] = []
+    for source, result in pairs:
+        for idx, box in enumerate(result.get("boxes", []), 1):
+            rows.append(
+                {
+                    "source": source,
+                    "region": idx,
+                    "class": box.get("class_name", "-"),
+                    "confidence": float(box.get("confidence", 0.0)),
+                    "risk": box.get("risk_level", "Routine manual review"),
+                    "bbox": box.get("bbox_xyxy", []),
+                    "suggestion": box.get("review_suggestion", "Review together with the original image."),
+                }
+            )
+    lines = ["## Manual Review Worklist"]
+    if not rows:
+        lines.append("No region-level review task is available under the current threshold; routine review of the original image is still recommended.")
+        return "\n".join(lines)
+    rows.sort(key=lambda x: (severity.get(str(x["risk"]), 1), x["confidence"]), reverse=True)
+    lines.extend(["| Priority | Source | Region | Class | Confidence | Coordinates | Risk |", "|---:|---|---:|---|---:|---|---|"])
+    for rank, row in enumerate(rows[:limit], 1):
+        bbox = ", ".join(str(v) for v in row["bbox"])
+        lines.append(f"| {rank} | {row['source']} | {row['region']} | {row['class']} | {row['confidence']:.3f} | {bbox} | {english_risk_text(row['risk'])} |")
+    if len(rows) > limit:
+        lines.append(f"\n> Showing the top {limit} regions only. Check the structured table for the remaining {len(rows) - limit} regions.")
+    return "\n".join(lines)
+
+
+def make_report_markdown_en(
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    report_type: str,
+    active_pairs: list[tuple[str, dict[str, Any]]],
+) -> str:
+    lines = [
+        "# Dental Lesion Candidate-region Auxiliary Report",
+        "",
+        report_cover_markdown(report_type, active_pairs, "English"),
+        "",
+        report_executive_summary_markdown(active_pairs, "English"),
+        "",
+        report_risk_legend_markdown("English"),
+        "",
+        "## Scenario Summary",
+        f"- Report use case: {report_type_label(report_type, 'English')}.",
+        f"- Valid inference groups: {report_pair_metrics(active_pairs)['success']}; candidate regions: {report_pair_metrics(active_pairs)['boxes']}.",
+        "- The report is intended for research display and auxiliary recognition only.",
+        "",
+        report_visual_markdown(active_pairs, language="English"),
+        "",
+        class_summary_markdown_en(active_pairs),
+        "",
+        review_worklist_markdown_en(active_pairs),
+        "",
+    ]
+    include_detection = report_type in {"单图检测报告", "综合报告"} and detection
+    include_comparison = report_type in {"多模型对比报告", "综合报告"} and comparison
+    include_batch = report_type in {"批量检测报告", "综合报告"} and batch_items
+    if include_detection:
+        lines.extend(
+            [
+                "## Current Single-image Result",
+                f"- Model: {detection.get('model_name', '-')}",
+                f"- Runtime mode: {detection.get('runtime_mode', '-')}",
+                f"- Status: {english_status_text(detection)}",
+                f"- Candidate regions: {detection.get('box_count', 0)}",
+                f"- Inference time: {detection.get('inference_time_ms', 0)} ms",
+                "",
+                "| No. | Class | Confidence | Coordinates | Risk |",
+                "|---:|---|---:|---|---|",
+            ]
+        )
+        for i, box in enumerate(detection.get("boxes", []), 1):
+            bbox = ", ".join(str(v) for v in box.get("bbox_xyxy", []))
+            lines.append(f"| {i} | {box.get('class_name', '-')} | {float(box.get('confidence', 0.0)):.3f} | {bbox} | {english_risk_text(box.get('risk_level'))} |")
+        if not detection.get("boxes"):
+            lines.append("| - | - | - | - | No candidate under current threshold |")
+        lines.append("")
+    if include_comparison:
+        lines.extend(["## Multi-model Comparison", "| Model | Type | Status | Boxes | Avg conf. | Max conf. | Time(ms) | Review count | Suggested use | Error |", "|---|---|---|---:|---:|---:|---:|---:|---|---|"])
+        for row in compare_rows(comparison):
+            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+        lines.append("")
+    if include_batch:
+        lines.extend(["## Batch Screening Table", "| Image | Status | Boxes | Avg conf. | Max conf. | Time(ms) | Review level | Error |", "|---|---|---:|---:|---:|---:|---|---|"])
+        for item in batch_items:
+            row = batch_result_row(item)
+            row[1] = english_status_text(item.get("result", {}))
+            row[6] = english_risk_text(row[6])
+            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+        lines.append("")
+    trace_results: list[dict[str, Any]] = []
+    if include_detection and isinstance(detection, dict):
+        trace_results.append(detection)
+    if include_comparison:
+        trace_results.extend(item for item in comparison or [] if isinstance(item, dict))
+    if include_batch:
+        trace_results.extend(item.get("result", {}) for item in batch_items or [] if isinstance(item, dict))
+    lines.extend(
+        [
+            "## Traceability",
+            traceability_markdown(trace_results),
+            "",
+            "## Disclaimer",
+            "This system is only for auxiliary recognition and research display. It is not a clinical diagnosis. Final interpretation must be reviewed by qualified dental professionals with the original image and other clinical information.",
         ]
     )
     return "\n".join(lines)
@@ -6400,21 +7599,27 @@ def export_report_docx(markdown: str, path: Path) -> str:
     return str(path)
 
 
-def generate_report(report_type: str, detection: dict[str, Any], comparison: list[dict[str, Any]], batch_items: list[dict[str, Any]]):
+def generate_report(
+    report_type: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+    report_language: str = "中文",
+):
     ensure_dirs()
     has_detection = bool(detection)
     has_comparison = bool(comparison)
     has_batch = bool(batch_items)
     if report_type == "单图检测报告" and not has_detection:
-        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", [], None, None, None
+        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", gr.update(value=[], visible=False), None, None, None
     if report_type == "多模型对比报告" and not has_comparison:
-        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", [], None, None, None
+        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", gr.update(value=[], visible=False), None, None, None
     if report_type == "批量检测报告" and not has_batch:
-        return "当前暂无可生成报告的检测结果，请先完成批量检测。", [], None, None, None
+        return "当前暂无可生成报告的检测结果，请先完成批量检测。", gr.update(value=[], visible=False), None, None, None
     if report_type == "综合报告" and not any([has_detection, has_comparison, has_batch]):
-        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", [], None, None, None
+        return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", gr.update(value=[], visible=False), None, None, None
     gallery = report_visual_gallery(report_type, detection, comparison, batch_items)
-    markdown = make_report_markdown(detection, comparison, batch_items, report_type)
+    markdown = make_report_markdown(detection, comparison, batch_items, report_type, report_language)
     stem = f"dental_aux_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     md_path = REPORT_DIR / f"{stem}.md"
     pdf_path = REPORT_DIR / f"{stem}.pdf"
@@ -6422,17 +7627,17 @@ def generate_report(report_type: str, detection: dict[str, Any], comparison: lis
     md_path.write_text(markdown, encoding="utf-8")
     export_report_pdf(markdown, pdf_path)
     export_report_docx(markdown, docx_path)
-    return markdown_for_gradio_preview(markdown), gallery, str(md_path), str(pdf_path), str(docx_path)
+    return markdown_for_gradio_preview(markdown), gr.update(value=gallery, visible=bool(gallery)), str(md_path), str(pdf_path), str(docx_path)
 
 
-def generate_single_detection_tab_report(detection: dict[str, Any]):
+def generate_single_detection_tab_report(detection: dict[str, Any], report_language: str = "中文"):
     """Generate the rich, single-image report directly from the detection tab."""
-    return generate_report("单图检测报告", detection, [], [])
+    return generate_report("单图检测报告", detection, [], [], report_language)
 
 
-def generate_model_comparison_tab_report(comparison: list[dict[str, Any]]):
+def generate_model_comparison_tab_report(comparison: list[dict[str, Any]], report_language: str = "中文"):
     """Generate the rich, comparison-specific report directly from the comparison tab."""
-    return generate_report("多模型对比报告", {}, comparison, [])
+    return generate_report("多模型对比报告", {}, comparison, [], report_language)
 
 
 def dashboard_stats() -> dict[str, Any]:
@@ -6674,16 +7879,6 @@ def disease_education_html() -> str:
           </g>
           <path d='M73 105 C99 83 134 72 171 74' fill='none' stroke='#f97316' stroke-width='5' stroke-dasharray='7 7'/>
         </svg>""",
-        "periodontal": """
-        <svg viewBox='0 0 220 150' width='100%' height='150' role='img' aria-label='牙周炎牙槽骨吸收示意图'>
-          <rect width='220' height='150' fill='transparent'/>
-          <path d='M28 111 C62 95 92 92 123 101 C151 109 176 101 202 84' fill='none' stroke='#fca5a5' stroke-width='20' stroke-linecap='round'/>
-          <path d='M28 125 C64 110 96 108 126 116 C154 124 180 117 204 101' fill='none' stroke='#cbd5e1' stroke-width='16' stroke-linecap='round'/>
-          <path d='M82 22 C61 29 56 53 64 80 C70 100 79 111 92 103 C100 98 100 86 106 86 C112 86 112 98 120 103 C133 111 142 100 148 80 C156 53 151 29 130 22 C120 18 112 26 106 26 C100 26 92 18 82 22Z' fill='#fff' stroke='#334155' stroke-width='5'/>
-          <path d='M98 85 C97 103 95 119 92 137' stroke='#94a3b8' stroke-width='7' stroke-linecap='round'/>
-          <path d='M116 85 C117 103 119 119 122 137' stroke='#94a3b8' stroke-width='7' stroke-linecap='round'/>
-          <path d='M48 96 C82 80 126 82 171 74' fill='none' stroke='#ef4444' stroke-width='5' stroke-dasharray='8 6'/>
-        </svg>""",
     }
     cards = [
         {
@@ -6713,54 +7908,110 @@ def disease_education_html() -> str:
             "action": "保持后牙区清洁，避免反复刺激肿痛部位；如果反复发炎，不要只靠止痛药拖延。",
             "visit": "建议口腔医生评估阻生方向、邻牙关系和神经管风险，必要时结合 CBCT 制定处理方案。",
         },
-        {
-            "title": "牙周炎/牙槽骨吸收 / Periodontal Bone Loss",
-            "subtitle": "常见牙周问题，可能表现为牙龈炎症、牙槽骨高度下降或牙齿支持组织受损。",
-            "svg": tooth_svg["periodontal"],
-            "cause": "牙菌斑和牙结石长期刺激牙龈，可能引发牙周炎；吸烟、糖尿病、清洁不到位、遗传易感和不规律复诊都会增加风险。",
-            "symptom": "常见表现包括刷牙出血、牙龈红肿、口臭、牙龈退缩、牙缝变大、牙齿松动；早期也可能症状不明显。",
-            "action": "坚持早晚刷牙、使用牙线或牙缝刷，定期洁治；不要因为出血就停止刷牙，但应减少暴力横刷。",
-            "visit": "如果反复出血、牙齿松动、牙龈退缩或影像提示骨吸收，应到牙周科/口腔科做牙周检查和系统治疗。",
-        },
     ]
     card_html = []
-    for card in cards:
+    for index, card in enumerate(cards, 1):
         card_html.append(
             "<article class='education-card'>"
+            "<div class='education-card-top'>"
             f"<div class='education-visual'>{card['svg']}</div>"
+            "<div>"
+            f"<span class='education-badge'>重点 {index:02d}</span>"
             f"<h3>{card['title']}</h3>"
             f"<div class='subtitle'>{card['subtitle']}</div>"
+            "</div>"
+            "</div>"
             "<dl>"
             f"<div><dt>常见成因</dt><dd>{card['cause']}</dd></div>"
             f"<div><dt>可能症状</dt><dd>{card['symptom']}</dd></div>"
             f"<div><dt>日常应对</dt><dd>{card['action']}</dd></div>"
             f"<div><dt>就医建议</dt><dd>{card['visit']}</dd></div>"
             "</dl>"
+            "<div class='education-card-note'>影像识别只负责提示疑似区域；症状、口内检查和原始影像复核同样关键。</div>"
             "</article>"
         )
-    return """
+    insight_svg = """
+    <svg viewBox='0 0 420 230' width='100%' height='100%' role='img' aria-label='牙齿影像复核路径示意图'>
+      <defs>
+        <linearGradient id='eduLine' x1='0' x2='1'>
+          <stop offset='0%' stop-color='#f97316'/>
+          <stop offset='52%' stop-color='#0ea5e9'/>
+          <stop offset='100%' stop-color='#14b8a6'/>
+        </linearGradient>
+      </defs>
+      <rect x='0' y='0' width='420' height='230' rx='24' fill='transparent'/>
+      <path d='M52 166 C110 84 182 78 230 119 C266 149 314 137 368 61' fill='none' stroke='url(#eduLine)' stroke-width='8' stroke-linecap='round'/>
+      <g transform='translate(68 52)'>
+        <path d='M48 0 C22 8 14 36 24 70 C31 96 43 111 61 101 C70 96 73 78 80 78 C87 78 90 96 99 101 C117 111 129 96 136 70 C146 36 138 8 112 0 C99 -5 89 5 80 5 C71 5 61 -5 48 0Z' fill='#fff' stroke='#334155' stroke-width='6'/>
+        <circle cx='53' cy='42' r='12' fill='#92400e'/>
+        <path d='M77 78 C76 96 73 113 69 132' stroke='#94a3b8' stroke-width='8' stroke-linecap='round'/>
+        <path d='M97 78 C98 96 101 113 105 132' stroke='#94a3b8' stroke-width='8' stroke-linecap='round'/>
+      </g>
+      <g fill='#ffffff' stroke='#bfdbfe' stroke-width='3'>
+        <rect x='238' y='38' width='122' height='40' rx='14'/>
+        <rect x='260' y='96' width='104' height='40' rx='14'/>
+        <rect x='218' y='150' width='145' height='50' rx='16'/>
+      </g>
+      <g fill='#0f172a' font-family='Arial, sans-serif' font-size='15' font-weight='700'>
+        <text x='264' y='64'>位置</text>
+        <text x='286' y='122'>类别</text>
+        <text x='248' y='175'>复核优先级</text>
+      </g>
+      <g fill='#64748b' font-family='Arial, sans-serif' font-size='11'>
+        <text x='300' y='64'>区域</text>
+        <text x='322' y='122'>含义</text>
+        <text x='278' y='191'>风险排序</text>
+      </g>
+    </svg>
+    """
+    return f"""
+    <section class='education-shell'>
     <section class='education-hero'>
       <div class='education-panel'>
-        <h2>牙齿病变学习中心</h2>
-        <p>这里用普通用户更容易理解的方式介绍本系统可辅助识别的三类疑似区域：龋坏、根尖周异常、阻生/埋伏牙，并补充常见牙周问题。你可以先了解常见成因、症状和就医建议，再去“图像检测”页面上传影像。</p>
-        <p>页面中的图示是科普示意图，不代表真实影像表现；模型检测结果也只提示“疑似区域”，最终仍需专业口腔医生结合原始影像和临床检查复核。</p>
+        <div class='education-eyebrow'>Dental Lesion Atlas</div>
+        <h2>牙齿病变介绍</h2>
+        <p class='education-lead'>用更清晰的影像复核思路理解模型检测覆盖的三类常见疑似病变：龋坏、根尖周异常、阻生/埋伏牙。先看疑似区域的位置和类别，再结合症状、置信度、邻近结构与就医风险进行判断。页面中的图示是科普示意图，真实结论仍需专业口腔医生结合原始影像和临床检查复核。</p>
+        <div class='education-metrics'>
+          <div class='education-metric'><b>3 类</b><span>常见疑似病变</span></div>
+          <div class='education-metric'><b>4 步</b><span>从影像线索到人工复核</span></div>
+          <div class='education-metric'><b>安全边界</b><span>只做辅助提示，不替代诊断</span></div>
+        </div>
       </div>
-      <aside class='education-tip'>
-        <b>如何使用本平台？</b>
-        <ol>
-          <li>先阅读三类病变的基础知识。</li>
-          <li>在“图像检测”上传牙片或口腔影像。</li>
-          <li>查看检测框、局部放大和复核建议。</li>
-          <li>带着原始影像和报告咨询口腔医生。</li>
-        </ol>
+      <aside class='education-insight-panel'>
+        <div class='education-insight-visual'>{insight_svg}</div>
+        <div>
+          <h3>影像复核关注点</h3>
+          <ul class='education-insight-list'>
+            <li>检测框位置是否落在牙体、牙根或阻生牙相关区域附近</li>
+            <li>类别含义是否与症状、原始影像细节相互印证</li>
+            <li>低置信度和重叠结构区域需要更谨慎人工复核</li>
+          </ul>
+        </div>
       </aside>
     </section>
+    <section class='education-review-strip'>
+      <div class='education-review-step'><b>01</b><div><span>定位疑似区域</span><small>先看检测框落点、邻近牙位和是否处在清洁盲区。</small></div></div>
+      <div class='education-review-step'><b>02</b><div><span>理解类别含义</span><small>区分龋坏、根尖周异常、阻生/埋伏牙这三类检测结果。</small></div></div>
+      <div class='education-review-step'><b>03</b><div><span>结合症状线索</span><small>把疼痛、肿胀、出血、敏感、口臭等症状与影像区域对应起来。</small></div></div>
+      <div class='education-review-step'><b>04</b><div><span>安排人工复核</span><small>把高风险或反复提示区域交给口腔医生结合原片判断。</small></div></div>
+    </section>
     <section class='education-grid'>
-    """ + "\n".join(card_html) + f"""
+    {"".join(card_html)}
     </section>
     <section class='education-footer-grid'>
-      <div class='education-tip'><b>什么时候应尽快就医？</b>出现持续疼痛、面部或牙龈肿胀、发热、流脓、张口受限、外伤后牙齿变色或咬合痛时，不建议仅依赖线上工具，应尽快到正规口腔医疗机构就诊。</div>
-      <div class='education-tip'><b>重要声明</b>{FULL_DISCLAIMER}</div>
+      <div class='education-tip'>
+        <b>需要尽快就医的信号</b>
+        <ul>
+          <li>持续疼痛、咬合痛、夜间痛或冷热刺激后长时间不缓解。</li>
+          <li>面部或牙龈肿胀、发热、流脓、张口受限。</li>
+          <li>外伤后牙齿变色、松动，或疑似区域反复出现在相近位置。</li>
+        </ul>
+      </div>
+      <div class='education-tip'>
+        <b>重要声明</b>
+        <p>{FULL_DISCLAIMER}</p>
+      </div>
+    </section>
     </section>
     """
 
@@ -7215,6 +8466,30 @@ def native_ai_assistant_html() -> str:
           margin-bottom: 0;
           scrollbar-width: thin;
         }}
+        .native-ai-export-row {{
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+          margin: 2px 0 0;
+        }}
+        .native-ai-export-btn {{
+          min-height: 36px;
+          border: 1px solid rgba(226,232,240,0.92);
+          border-radius: 14px;
+          background: rgba(255,255,255,0.76);
+          color: #334155;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 860;
+          box-shadow: 0 7px 16px rgba(15,23,42,0.035);
+          transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+        }}
+        .native-ai-export-btn:hover {{
+          transform: translateY(-1px);
+          border-color: rgba(20,184,166,0.32);
+          background: linear-gradient(135deg, rgba(240,253,250,0.92), rgba(239,246,255,0.92));
+          color: #0f766e;
+        }}
         .native-ai-assistant button.native-ai-suggestion {{
           counter-increment: native-ai-suggestion;
           position: relative;
@@ -7291,42 +8566,66 @@ def native_ai_assistant_html() -> str:
         .native-ai-input-row {{
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
-          gap: 10px;
+          gap: 12px;
           align-items: end;
-          margin-top: 2px;
+          margin-top: 6px;
         }}
         #ask-ai-input {{
           min-width: 0;
         }}
         #ask-ai-input textarea {{
           width: 100%;
-          height: 58px;
-          min-height: 58px;
-          max-height: 58px;
+          height: 92px;
+          min-height: 92px;
+          max-height: 152px;
           resize: none !important;
-          overflow-y: auto;
-          border: 1px solid rgba(203,213,225,0.86);
+          overflow-y: hidden;
+          border: 1px solid rgba(148,163,184,0.45);
           border-radius: 18px;
-          padding: 12px 15px;
+          padding: 14px 16px;
           outline: none;
           color: #0f172a;
-          background: rgba(255,255,255,0.96);
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92));
           font-size: 15px;
-          line-height: 1.45;
+          line-height: 1.6;
           box-sizing: border-box;
-          box-shadow: inset 0 1px 0 rgba(255,255,255,0.86);
+          box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.9),
+            0 8px 20px rgba(15,23,42,0.055);
           scrollbar-width: thin;
+          scrollbar-color: rgba(148,163,184,0.35) transparent;
+          transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
         }}
         #ask-ai-input textarea::-webkit-resizer {{
           display: none;
         }}
+        #ask-ai-input textarea::placeholder {{
+          color: #94a3b8;
+          opacity: 1;
+        }}
+        #ask-ai-input textarea::-webkit-scrollbar {{
+          width: 6px;
+        }}
+        #ask-ai-input textarea::-webkit-scrollbar-track {{
+          background: transparent;
+        }}
+        #ask-ai-input textarea::-webkit-scrollbar-thumb {{
+          background: rgba(148,163,184,0.28);
+          border-radius: 999px;
+        }}
         #ask-ai-input textarea:focus {{
-          border-color: rgba(37,99,235,0.55);
-          box-shadow: 0 0 0 4px rgba(37,99,235,0.09);
+          border-color: rgba(14,165,233,0.62);
+          background:
+            linear-gradient(180deg, rgba(255,255,255,1), rgba(248,252,255,0.96));
+          box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.94),
+            0 0 0 4px rgba(14,165,233,0.12),
+            0 12px 28px rgba(37,99,235,0.10);
         }}
         #ask-ai-send {{
           width: auto;
-          min-height: 58px;
+          min-height: 92px;
           border: 0;
           border-radius: 18px;
           padding: 0 24px;
@@ -7445,6 +8744,7 @@ def native_ai_assistant_html() -> str:
           }}
           #ask-ai-send {{
             width: 100%;
+            min-height: 52px;
           }}
           .native-ai-bubble {{
             max-width: 94%;
@@ -7491,6 +8791,10 @@ def native_ai_assistant_html() -> str:
             <div class="native-ai-suggestion-count">6 条</div>
           </div>
           <div id="native-ai-suggestions" class="native-ai-suggestions">{starters}</div>
+          <div class="native-ai-export-row" aria-label="导出本次问答">
+            <button id="native-ai-export-md" class="native-ai-export-btn" type="button">导出 Markdown</button>
+            <button id="native-ai-export-pdf" class="native-ai-export-btn" type="button">导出 PDF</button>
+          </div>
           <div class="native-ai-input-row">
             <div id="ask-ai-input">
               <textarea aria-label="问题" placeholder="{xml_escape(CHAT_INPUT_PLACEHOLDER)}"></textarea>
@@ -7518,6 +8822,8 @@ def native_ai_assistant_js() -> str:
   const suggestionsEl = root.querySelector("#native-ai-suggestions");
   const input = root.querySelector("#ask-ai-input textarea");
   const sendBtn = root.querySelector("#ask-ai-send");
+  const exportMdBtn = root.querySelector("#native-ai-export-md");
+  const exportPdfBtn = root.querySelector("#native-ai-export-pdf");
   const statusEl = root.querySelector("#native-ai-status");
   const scopeSelect = root.querySelector("#native-ai-scope");
   const roleSelect = root.querySelector("#native-ai-role");
@@ -7525,6 +8831,8 @@ def native_ai_assistant_js() -> str:
   const reasonTemplate = root.querySelector("#native-ai-reason-template");
   const sessionKey = "dental-native-ai-session-id";
   const defaultSuggestions = __DEFAULT_SUGGESTIONS__;
+  const inputMinHeight = 92;
+  const inputMaxHeight = 152;
   let sessionId = "";
   let chatHistory = [];
   let sending = false;
@@ -7546,6 +8854,14 @@ def native_ai_assistant_js() -> str:
   }
 
   sessionId = makeSessionId();
+
+  function syncInputHeight() {
+    if (!input) return;
+    input.style.height = "auto";
+    const nextHeight = Math.min(Math.max(input.scrollHeight, inputMinHeight), inputMaxHeight);
+    input.style.height = nextHeight + "px";
+    input.style.overflowY = input.scrollHeight > inputMaxHeight ? "auto" : "hidden";
+  }
 
   function escapeHtml(value) {
     return String(value || "")
@@ -7726,6 +9042,79 @@ def native_ai_assistant_js() -> str:
     return String(markdown || "").replace(/```[\s\S]*?```/g, "").replace(/[#>*_`-]/g, "").trim();
   }
 
+  function currentChatMarkdown() {
+    const now = new Date().toLocaleString();
+    const lines = [
+      "# 智诊管家问答记录",
+      "",
+      "- 导出时间：" + now,
+      "- 分析范围：" + (scopeSelect.value || "-"),
+      "- 回答视图：" + (roleSelect.value || "-"),
+      "",
+      "## 对话内容",
+      ""
+    ];
+    if (!chatHistory.length) {
+      lines.push("暂无本次对话内容。");
+      return lines.join("\n");
+    }
+    chatHistory.forEach((item, index) => {
+      const title = item.role === "user" ? "用户提问" : "智诊管家回答";
+      lines.push("### " + (index + 1) + ". " + title);
+      lines.push("");
+      lines.push(item.content || "");
+      lines.push("");
+    });
+    lines.push("## 免责声明");
+    lines.push("本记录仅用于回顾本次辅助问答，不作为临床诊断依据。");
+    return lines.join("\n");
+  }
+
+  function downloadTextFile(filename, content, mime) {
+    const blob = new Blob([content], { type: mime || "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      link.remove();
+    }, 0);
+  }
+
+  function exportChatMarkdown() {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    downloadTextFile("dental_ai_chat_" + stamp + ".md", currentChatMarkdown(), "text/markdown;charset=utf-8");
+    setStatus("本次问答已导出为 Markdown。");
+  }
+
+  function exportChatPdf() {
+    const markdown = currentChatMarkdown();
+    const html = renderMarkdown(markdown);
+    const win = window.open("", "_blank", "width=960,height=720");
+    if (!win) {
+      setStatus("浏览器阻止了 PDF 导出窗口，请允许弹窗后重试。");
+      return;
+    }
+    win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>智诊管家问答记录</title>
+      <style>
+        body { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #0f172a; margin: 36px; line-height: 1.75; }
+        h1 { font-size: 28px; margin: 0 0 18px; }
+        h2 { margin-top: 28px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; }
+        h3 { margin-top: 20px; color: #1d4ed8; }
+        blockquote { border-left: 4px solid #bfdbfe; background: #f8fafc; padding: 8px 12px; color: #475569; }
+        table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+        th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: left; vertical-align: top; }
+        @media print { body { margin: 18mm; } }
+      </style></head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 300);
+    setStatus("已打开 PDF 打印窗口，可选择“另存为 PDF”。");
+  }
+
   function addAssistantMessage(answer, options = {}) {
     removeEmptyState();
     const row = document.createElement("div");
@@ -7865,6 +9254,7 @@ def native_ai_assistant_js() -> str:
     addUserMessage(text);
     chatHistory.push({role: "user", content: text});
     input.value = "";
+    syncInputHeight();
     setSending(true);
     setStatus("正在整理检测信息，并生成更清晰的回答…");
     const loading = addLoadingMessage();
@@ -7944,6 +9334,9 @@ def native_ai_assistant_js() -> str:
   });
 
   sendBtn.addEventListener("click", () => sendMessage());
+  exportMdBtn?.addEventListener("click", exportChatMarkdown);
+  exportPdfBtn?.addEventListener("click", exportChatPdf);
+  input.addEventListener("input", syncInputHeight);
   input.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -7967,6 +9360,7 @@ def native_ai_assistant_js() -> str:
     }
   }, 8000);
   renderSuggestions(defaultSuggestions);
+  syncInputHeight();
   refreshSuggestions("initial", {force: true});
 })();
 """
@@ -7984,22 +9378,30 @@ def build_app() -> gr.Blocks:
         gr.HTML(
             """
             <div class="app-hero">
-              <h1>牙齿病变目标区域识别与辅助分析平台</h1>
-              <p>面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。</p>
+              <div class="app-hero-top">
+                <div class="app-hero-copy">
+                  <h1 data-i18n="app_title">牙齿病变目标区域识别与辅助分析平台</h1>
+                  <p data-i18n="app_subtitle">面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。</p>
+                </div>
+                <div class="app-preferences" aria-label="界面偏好">
+                  <button id="dental-lang-toggle" class="app-pref-btn" type="button">EN</button>
+                  <button id="dental-theme-toggle" class="app-pref-btn" type="button">暗色</button>
+                </div>
+              </div>
             </div>
             """
         )
         gr.HTML(
             f"""
             <nav class="dental-page-nav" aria-label="平台导航">
-              <button type="button" class="dental-page-nav-item" data-page="learn">牙病学习</button>
-              <button type="button" class="dental-page-nav-item" data-page="dashboard">首页 Dashboard</button>
-              <button type="button" class="dental-page-nav-item" data-page="image">图像检测</button>
-              <button type="button" class="dental-page-nav-item" data-page="compare">多模型对比</button>
-              <button type="button" class="dental-page-nav-item" data-page="batch">批量检测</button>
-              <button type="button" class="dental-page-nav-item" data-page="history">历史记录</button>
-              <button type="button" class="dental-page-nav-item" data-page="assistant">{AI_ASSISTANT_DISPLAY_NAME}</button>
-              <button type="button" class="dental-page-nav-item" data-page="report">报告中心</button>
+              <button type="button" class="dental-page-nav-item" data-page="learn" data-i18n="nav_learn">牙病学习</button>
+              <button type="button" class="dental-page-nav-item" data-page="dashboard" data-i18n="nav_dashboard">首页 Dashboard</button>
+              <button type="button" class="dental-page-nav-item" data-page="image" data-i18n="nav_image">图像检测</button>
+              <button type="button" class="dental-page-nav-item" data-page="compare" data-i18n="nav_compare">多模型对比</button>
+              <button type="button" class="dental-page-nav-item" data-page="batch" data-i18n="nav_batch">批量检测</button>
+              <button type="button" class="dental-page-nav-item" data-page="history" data-i18n="nav_history">历史记录</button>
+              <button type="button" class="dental-page-nav-item" data-page="assistant" data-i18n="nav_assistant">{AI_ASSISTANT_DISPLAY_NAME}</button>
+              <button type="button" class="dental-page-nav-item" data-page="report" data-i18n="nav_report">报告中心</button>
             </nav>
             """
         )
@@ -8072,6 +9474,7 @@ def build_app() -> gr.Blocks:
                 det_region_note = gr.Markdown("运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。")
             with gr.Accordion("单图检测报告", open=False):
                 gr.Markdown("报告包含模型与权重版本、逐区域明细、复核优先级和可追溯性信息。")
+                single_report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
                 single_report_btn = gr.Button("生成单图检测报告", variant="primary", elem_classes="solid-primary-action")
                 single_report_gallery = gr.Gallery(label="单图报告图片预览", columns=3, height=320, visible=False)
                 single_report_preview = gr.Markdown("尚未生成单图检测报告。")
@@ -8139,6 +9542,7 @@ def build_app() -> gr.Blocks:
                 cmp_region_note = gr.Markdown("运行多模型对比后，可选择模型和区域查看联动放大结果。")
             with gr.Accordion("多模型对比报告", open=False):
                 gr.Markdown("报告包含三模型结果表、一致性区域、差异归因和完整可追溯性信息。")
+                comparison_report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
                 comparison_report_btn = gr.Button("生成多模型对比报告", variant="primary", elem_classes="solid-primary-action")
                 comparison_report_gallery = gr.Gallery(label="多模型报告图片预览", columns=3, height=320, visible=False)
                 comparison_report_preview = gr.Markdown("尚未生成多模型对比报告。")
@@ -8150,7 +9554,7 @@ def build_app() -> gr.Blocks:
         with gr.Group(elem_id="page-batch", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>批量检测</b><br>一次上传多张图片，系统逐张运行 YOLO CPU 推理，并生成批量汇总表和报告。</div>")
             with gr.Row(elem_classes="batch-work-row"):
-                with gr.Column(scale=1):
+                with gr.Column(scale=1, elem_classes="batch-left-column"):
                     batch_files = gr.File(label="上传多张图片", file_count="multiple", file_types=["image"])
                     batch_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
                     batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
@@ -8162,14 +9566,19 @@ def build_app() -> gr.Blocks:
                         batch_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
                     batch_btn = gr.Button("开始批量检测", variant="primary", elem_classes="solid-primary-action")
                     batch_knowledge = gr.HTML(
-                        "<div class='section-note'>运行批量检测后，这里会显示当前图片检出的牙病类别说明。</div>",
+                        BATCH_KNOWLEDGE_PLACEHOLDER_HTML,
                         elem_classes="batch-knowledge-panel",
-                        visible=False,
                     )
-                with gr.Column(scale=2):
+                with gr.Column(scale=2, elem_classes="batch-right-column"):
                     batch_progress = gr.HTML("", visible=False)
                     batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
-                    batch_preview = gr.Gallery(label="批量检测结果预览（最多前 6 张）", columns=3, height=360, visible=False)
+                    batch_preview = gr.Gallery(
+                        label="批量检测结果预览（最多前 6 张）",
+                        columns=3,
+                        height=360,
+                        visible=False,
+                        elem_id="batch-result-preview-gallery",
+                    )
                     batch_image_selector = gr.Dropdown(choices=[], label="选择图片编号查看解释", interactive=True, visible=False)
                     batch_explain = gr.Markdown(
                         "运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。",
@@ -8224,6 +9633,7 @@ def build_app() -> gr.Blocks:
             gr.HTML("<div class='section-note'><b>报告中心</b><br>根据当前检测、对比或批量结果生成可下载 Markdown 报告。</div>")
             with gr.Row(elem_classes="report-controls-row"):
                 report_type = gr.Dropdown(["单图检测报告", "多模型对比报告", "批量检测报告", "综合报告"], value="综合报告", label="报告类型")
+                report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
                 report_btn = gr.Button("生成检测报告")
             report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
             report_preview = gr.Markdown("尚未生成报告。", elem_classes="report-preview-panel")
@@ -8317,16 +9727,16 @@ def build_app() -> gr.Blocks:
 
         single_report_btn.click(
             generate_single_detection_tab_report,
-            inputs=current_detection,
+            inputs=[current_detection, single_report_language],
             outputs=[single_report_preview, single_report_gallery, single_report_md, single_report_pdf, single_report_docx],
         )
         comparison_report_btn.click(
             generate_model_comparison_tab_report,
-            inputs=current_comparison,
+            inputs=[current_comparison, comparison_report_language],
             outputs=[comparison_report_preview, comparison_report_gallery, comparison_report_md, comparison_report_pdf, comparison_report_docx],
         )
 
-        report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch], outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file])
+        report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch, report_language], outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file])
 
     demo.queue(default_concurrency_limit=4, max_size=30)
     return demo
