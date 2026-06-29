@@ -239,7 +239,8 @@ body[data-dental-theme="dark"] .native-ai-msg.assistant .native-ai-bubble {
 body[data-dental-theme="dark"] .native-ai-subtitle,
 body[data-dental-theme="dark"] .native-ai-empty-card p,
 body[data-dental-theme="dark"] .native-ai-md,
-body[data-dental-theme="dark"] .native-ai-suggestion-title {
+body[data-dental-theme="dark"] .native-ai-suggestion-title,
+body[data-dental-theme="dark"] .native-ai-export-btn small {
   color: #cbd5e1 !important;
 }
 body[data-dental-theme="dark"] .native-ai-assistant button.native-ai-suggestion,
@@ -248,6 +249,16 @@ body[data-dental-theme="dark"] #ask-ai-input textarea {
   background: rgba(15,23,42,0.9) !important;
   border-color: rgba(71,85,105,0.82) !important;
   color: #e5e7eb !important;
+}
+body[data-dental-theme="dark"] .native-ai-export-btn::before {
+  background: rgba(30,41,59,0.92) !important;
+  border-color: rgba(96,165,250,0.42) !important;
+  color: #93c5fd !important;
+  box-shadow: inset 0 0 0 4px rgba(15,23,42,0.42) !important;
+}
+body[data-dental-theme="dark"] .native-ai-export-btn.export-pdf::before {
+  border-color: rgba(251,146,60,0.42) !important;
+  color: #fdba74 !important;
 }
 .dental-page {
   display: none !important;

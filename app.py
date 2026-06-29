@@ -2524,6 +2524,73 @@ def chat_context_payload(
     }
 
 
+def result_class_summary_text(result: dict[str, Any]) -> str:
+    boxes = result.get("boxes", []) if isinstance(result.get("boxes", []), list) else []
+    if not boxes:
+        return "-"
+    counts: dict[str, int] = {}
+    for box in boxes:
+        class_name = normalize_class_name(box.get("class_name", "")) or str(box.get("class_name") or "未知类别")
+        counts[class_name] = counts.get(class_name, 0) + 1
+    return "、".join(f"{name}×{count}" for name, count in sorted(counts.items()))
+
+
+def assistant_export_context_markdown(
+    scope: str,
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    updated_at: str = "",
+    limit: int = 20,
+) -> str:
+    sources = selected_chat_sources(scope, detection, comparison, batch_items)
+    total_boxes = sum(int(result.get("box_count", 0) or 0) for _, result in sources)
+    success_count = sum(1 for _, result in sources if result.get("status") == "success")
+    class_counts: dict[str, int] = {}
+    for _, result in sources:
+        for box in result.get("boxes", []) if isinstance(result.get("boxes", []), list) else []:
+            class_name = normalize_class_name(box.get("class_name", "")) or str(box.get("class_name") or "未知类别")
+            class_counts[class_name] = class_counts.get(class_name, 0) + 1
+    class_text = "、".join(f"{name}×{count}" for name, count in sorted(class_counts.items())) if class_counts else "当前范围内未检出明确类别"
+    lines = [
+        "## 当前检测上下文摘要",
+        "",
+        f"- 分析范围：{scope or '-'}",
+        f"- 上下文更新时间：{updated_at or '-'}",
+        f"- 纳入结果：{len(sources)} 组；成功推理：{success_count} 组；疑似区域总数：{total_boxes} 个",
+        f"- 涉及类别：{class_text}",
+        "- 摘要用途：说明本次问答回答所参考的检测结果范围，便于单独查看导出对话时理解依据。",
+        "",
+    ]
+    if not sources:
+        lines.extend(
+            [
+                "当前导出时后端没有可用检测上下文；对话内容可能只包含上传、阈值、模型或报告流程说明。",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+    lines.extend(["### 纳入结果明细", ""])
+    for index, (source, result) in enumerate(sources[:limit], 1):
+        box_count = int(result.get("box_count", 0) or 0)
+        confidence = f"{float(result.get('avg_confidence', 0.0) or 0.0):.3f} / {float(result.get('max_confidence', 0.0) or 0.0):.3f}" if box_count else "-"
+        lines.extend(
+            [
+                f"{index}. {source}",
+                f"   - 模型：{result.get('model_name', '-')}",
+                f"   - 状态：{status_text(result)}",
+                f"   - 疑似区域：{box_count} 个",
+                f"   - 平均/最高置信度：{confidence}",
+                f"   - 主要类别：{result_class_summary_text(result)}",
+                f"   - 复核建议：{overall_review_level(result)}",
+            ]
+        )
+    if len(sources) > limit:
+        lines.append(f"\n> 为避免导出文件过长，上方仅展示前 {limit} 组结果，其余 {len(sources) - limit} 组结果已省略。")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def compact_chat_text(content: Any, max_chars: int | None = None) -> str:
     text = chat_content_to_text(content).strip()
     if not max_chars or len(text) <= max_chars:
@@ -4022,6 +4089,10 @@ class AssistantSuggestionRequest(BaseModel):
     last_assistant_answer: str = Field(default="")
 
 
+class AssistantExportContextRequest(BaseModel):
+    scope: str = Field(default="全部最新结果")
+
+
 def compact_unique_questions(candidates: list[str], fallback: list[str] | None = None, limit: int = 6) -> list[str]:
     unique: list[str] = []
     for question in [*(candidates or []), *((fallback or DEFAULT_FOLLOWUP_QUESTIONS) or [])]:
@@ -4306,6 +4377,37 @@ async def api_assistant_suggestions(payload: AssistantSuggestionRequest) -> dict
             "context_updated_at": "",
             "effective_scope": payload.scope,
             "has_context": False,
+        }
+
+
+@api_app.post("/api/assistant_export_context")
+async def api_assistant_export_context(payload: AssistantExportContextRequest) -> dict[str, Any]:
+    try:
+        latest = get_latest_ai_context()
+        scope = effective_suggestion_scope(payload.scope, latest)
+        detection = latest.get("detection") if isinstance(latest.get("detection"), dict) else {}
+        comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
+        batch_items = latest.get("batch_items") if isinstance(latest.get("batch_items"), list) else []
+        return {
+            "ok": True,
+            "effective_scope": scope,
+            "context_updated_at": latest.get("updated_at", ""),
+            "has_context": bool(selected_chat_sources(scope, detection, comparison, batch_items)),
+            "context_markdown": assistant_export_context_markdown(
+                scope,
+                detection,
+                comparison,
+                batch_items,
+                str(latest.get("updated_at", "")),
+            ),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "effective_scope": payload.scope,
+            "context_updated_at": "",
+            "has_context": False,
+            "context_markdown": "## 当前检测上下文摘要\n\n导出时未能读取检测上下文：" + type(exc).__name__ + "。",
         }
 
 
@@ -5972,29 +6074,113 @@ def native_ai_assistant_html() -> str:
           margin-bottom: 0;
           scrollbar-width: thin;
         }}
+        .native-ai-export-panel {{
+          grid-column: 1 / -1;
+          justify-self: end;
+          width: min(100%, 430px);
+          padding: 0;
+          border: 0;
+          background: transparent;
+          box-shadow: none;
+        }}
         .native-ai-export-row {{
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 8px;
-          margin: 2px 0 0;
+          gap: 11px;
         }}
         .native-ai-export-btn {{
-          min-height: 36px;
+          position: relative;
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          grid-template-rows: auto auto;
+          column-gap: 10px;
+          row-gap: 2px;
+          align-items: center;
+          min-height: 50px;
           border: 1px solid rgba(226,232,240,0.92);
-          border-radius: 14px;
-          background: rgba(255,255,255,0.76);
-          color: #334155;
+          border-radius: 16px;
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94));
+          color: #1e293b;
           cursor: pointer;
+          padding: 8px 12px;
+          text-align: left;
           font-size: 12px;
           font-weight: 860;
-          box-shadow: 0 7px 16px rgba(15,23,42,0.035);
-          transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+          overflow: hidden;
+          box-shadow: 0 10px 22px rgba(15,23,42,0.05);
+          transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+        }}
+        .native-ai-export-btn::before {{
+          content: "MD";
+          grid-row: 1 / 3;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 34px;
+          height: 34px;
+          border-radius: 13px;
+          border: 1px solid rgba(191,219,254,0.88);
+          background:
+            linear-gradient(180deg, rgba(239,246,255,0.98), rgba(240,253,250,0.82));
+          color: #2563eb;
+          font-size: 10px;
+          font-weight: 950;
+          letter-spacing: 0;
+          box-shadow: inset 0 0 0 4px rgba(255,255,255,0.56);
+        }}
+        .native-ai-export-btn.export-pdf::before {{
+          content: "PDF";
+          border-color: rgba(254,215,170,0.94);
+          background:
+            linear-gradient(180deg, rgba(255,247,237,0.98), rgba(239,246,255,0.72));
+          color: #c2410c;
+        }}
+        .native-ai-export-btn::after {{
+          content: "";
+          position: absolute;
+          inset: 0 auto 0 0;
+          width: 3px;
+          background: linear-gradient(180deg, rgba(37,99,235,0.75), rgba(20,184,166,0.55));
+          opacity: 0;
+          transition: opacity 0.16s ease;
+        }}
+        .native-ai-export-btn.export-pdf::after {{
+          background: linear-gradient(180deg, rgba(249,115,22,0.78), rgba(37,99,235,0.52));
+        }}
+        .native-ai-export-btn span {{
+          display: block;
+          min-width: 0;
+          font-size: 13px;
+          font-weight: 920;
+          line-height: 1.18;
+        }}
+        .native-ai-export-btn small {{
+          display: block;
+          min-width: 0;
+          color: #64748b;
+          font-size: 10.5px;
+          font-weight: 760;
+          line-height: 1.2;
+        }}
+        .native-ai-export-btn:disabled {{
+          cursor: wait;
+          opacity: 0.68;
+          transform: none;
         }}
         .native-ai-export-btn:hover {{
           transform: translateY(-1px);
-          border-color: rgba(20,184,166,0.32);
-          background: linear-gradient(135deg, rgba(240,253,250,0.92), rgba(239,246,255,0.92));
-          color: #0f766e;
+          border-color: rgba(37,99,235,0.28);
+          background: linear-gradient(135deg, rgba(255,255,255,0.98), rgba(239,246,255,0.9));
+          color: #1d4ed8;
+          box-shadow: 0 13px 26px rgba(37,99,235,0.09);
+        }}
+        .native-ai-export-btn:hover::after {{
+          opacity: 1;
+        }}
+        .native-ai-export-btn:focus-visible {{
+          outline: 3px solid rgba(37,99,235,0.16);
+          outline-offset: 2px;
         }}
         .native-ai-assistant button.native-ai-suggestion {{
           counter-increment: native-ai-suggestion;
@@ -6223,6 +6409,10 @@ def native_ai_assistant_html() -> str:
           .native-ai-control {{
             min-width: 0;
           }}
+          .native-ai-export-panel {{
+            width: 100%;
+            justify-self: stretch;
+          }}
           .native-ai-messages {{
             padding: 14px;
             height: 420px;
@@ -6240,6 +6430,9 @@ def native_ai_assistant_html() -> str:
           .native-ai-suggestions {{
             grid-template-columns: 1fr;
             gap: 8px;
+          }}
+          .native-ai-export-row {{
+            grid-template-columns: 1fr;
           }}
           .native-ai-assistant button.native-ai-suggestion {{
             min-height: 54px;
@@ -6279,7 +6472,13 @@ def native_ai_assistant_html() -> str:
               <input id="native-ai-allow-cloud" type="checkbox" checked>
               智能回答
             </span>
-          </label>
+            </label>
+          <div class="native-ai-export-panel" aria-label="导出本次问答">
+            <div class="native-ai-export-row">
+              <button id="native-ai-export-md" class="native-ai-export-btn export-md" type="button"><span>Markdown</span><small>.md 原文记录</small></button>
+              <button id="native-ai-export-pdf" class="native-ai-export-btn export-pdf" type="button"><span>PDF</span><small>打印另存归档</small></button>
+            </div>
+          </div>
         </div>
       </header>
       <div class="native-ai-workbench">
@@ -6297,10 +6496,6 @@ def native_ai_assistant_html() -> str:
             <div class="native-ai-suggestion-count">6 条</div>
           </div>
           <div id="native-ai-suggestions" class="native-ai-suggestions">{starters}</div>
-          <div class="native-ai-export-row" aria-label="导出本次问答">
-            <button id="native-ai-export-md" class="native-ai-export-btn" type="button">导出 Markdown</button>
-            <button id="native-ai-export-pdf" class="native-ai-export-btn" type="button">导出 PDF</button>
-          </div>
           <div class="native-ai-input-row">
             <div id="ask-ai-input">
               <textarea aria-label="问题" placeholder="{xml_escape(CHAT_INPUT_PLACEHOLDER)}"></textarea>
@@ -6548,7 +6743,83 @@ def native_ai_assistant_js() -> str:
     return String(markdown || "").replace(/```[\s\S]*?```/g, "").replace(/[#>*_`-]/g, "").trim();
   }
 
-  function currentChatMarkdown() {
+  function exportFallbackContextMarkdown(error) {
+    const reason = error && error.message ? error.message : "未知原因";
+    return "## 当前检测上下文摘要\n\n导出时未能读取当前检测上下文：" + reason + "。\n";
+  }
+
+  function cleanExportCell(value) {
+    let text = String(value || "").trim();
+    text = text.replace(/\*\*([^*]+)\*\*/g, "$1");
+    text = text.replace(/\*([^*]+)\*/g, "$1");
+    text = text.replace(/`([^`]+)`/g, "$1");
+    text = text.replace(/\s*&\s*/g, "、");
+    text = text.replace(/\s+/g, " ").trim();
+    if (!text || text === "—" || text === "-") return "无";
+    return text;
+  }
+
+  function tableToExportList(lines, startIndex) {
+    const header = splitTableRow(lines[startIndex] || "").map(cleanExportCell);
+    let index = startIndex + 2;
+    const rows = [];
+    while (index < lines.length && isTableRow(lines[index]) && !isTableSeparator(lines[index])) {
+      rows.push(splitTableRow(lines[index]).map(cleanExportCell));
+      index += 1;
+    }
+    const out = [];
+    if (rows.length) out.push("**表格内容整理**");
+    rows.forEach(row => {
+      const first = cleanExportCell(row[0] || "");
+      const details = [];
+      for (let i = 1; i < Math.max(header.length, row.length); i += 1) {
+        const key = cleanExportCell(header[i] || ("字段" + (i + 1)));
+        const value = cleanExportCell(row[i] || "");
+        if (value !== "无") details.push(key + "：" + value);
+      }
+      const label = first !== "无" ? first : "记录";
+      out.push("- " + label + (details.length ? "；" + details.join("；") : "；无有效检测信息"));
+    });
+    return { lines: out, nextIndex: index };
+  }
+
+  function sanitizeMarkdownForExport(markdown) {
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    const out = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const current = lines[i] || "";
+      if (isTableRow(current) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        const converted = tableToExportList(lines, i);
+        if (out.length && out[out.length - 1] !== "") out.push("");
+        out.push(...converted.lines);
+        out.push("");
+        i = converted.nextIndex - 1;
+        continue;
+      }
+      out.push(current);
+    }
+    return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  async function fetchExportContextMarkdown() {
+    try {
+      const data = await postJson("/api/assistant_export_context", {
+        scope: scopeSelect.value
+      });
+      return data.context_markdown || "## 当前检测上下文摘要\n\n当前没有可用检测上下文。\n";
+    } catch (error) {
+      return exportFallbackContextMarkdown(error);
+    }
+  }
+
+  function setExportBusy(value) {
+    [exportMdBtn, exportPdfBtn].forEach(btn => {
+      if (!btn) return;
+      btn.disabled = value;
+    });
+  }
+
+  function currentChatMarkdown(contextMarkdown) {
     const now = new Date().toLocaleString();
     const lines = [
       "# 智诊管家问答记录",
@@ -6557,20 +6828,23 @@ def native_ai_assistant_js() -> str:
       "- 分析范围：" + (scopeSelect.value || "-"),
       "- 回答视图：" + (roleSelect.value || "-"),
       "",
+      contextMarkdown || "## 当前检测上下文摘要\n\n当前没有可用检测上下文。",
+      "",
       "## 对话内容",
       ""
     ];
     if (!chatHistory.length) {
       lines.push("暂无本次对话内容。");
-      return lines.join("\n");
+      lines.push("");
+    } else {
+      chatHistory.forEach((item, index) => {
+        const title = item.role === "user" ? "用户提问" : "智诊管家回答";
+        lines.push("### " + (index + 1) + ". " + title);
+        lines.push("");
+        lines.push(sanitizeMarkdownForExport(item.content || ""));
+        lines.push("");
+      });
     }
-    chatHistory.forEach((item, index) => {
-      const title = item.role === "user" ? "用户提问" : "智诊管家回答";
-      lines.push("### " + (index + 1) + ". " + title);
-      lines.push("");
-      lines.push(item.content || "");
-      lines.push("");
-    });
     lines.push("## 免责声明");
     lines.push("本记录仅用于回顾本次辅助问答，不作为临床诊断依据。");
     return lines.join("\n");
@@ -6590,18 +6864,29 @@ def native_ai_assistant_js() -> str:
     }, 0);
   }
 
-  function exportChatMarkdown() {
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-    downloadTextFile("dental_ai_chat_" + stamp + ".md", currentChatMarkdown(), "text/markdown;charset=utf-8");
-    setStatus("本次问答已导出为 Markdown。");
+  async function exportChatMarkdown() {
+    setExportBusy(true);
+    setStatus("正在整理对话和检测上下文摘要…");
+    try {
+      const contextMarkdown = await fetchExportContextMarkdown();
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+      downloadTextFile("dental_ai_chat_" + stamp + ".md", currentChatMarkdown(contextMarkdown), "text/markdown;charset=utf-8");
+      setStatus("本次问答已导出为 Markdown，并包含当前检测上下文摘要。");
+    } finally {
+      setExportBusy(false);
+    }
   }
 
-  function exportChatPdf() {
-    const markdown = currentChatMarkdown();
+  async function exportChatPdf() {
+    setExportBusy(true);
+    setStatus("正在整理对话和检测上下文摘要…");
+    const contextMarkdown = await fetchExportContextMarkdown();
+    const markdown = currentChatMarkdown(contextMarkdown);
     const html = renderMarkdown(markdown);
     const win = window.open("", "_blank", "width=960,height=720");
     if (!win) {
       setStatus("浏览器阻止了 PDF 导出窗口，请允许弹窗后重试。");
+      setExportBusy(false);
       return;
     }
     win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>智诊管家问答记录</title>
@@ -6618,7 +6903,8 @@ def native_ai_assistant_js() -> str:
     win.document.close();
     win.focus();
     setTimeout(() => win.print(), 300);
-    setStatus("已打开 PDF 打印窗口，可选择“另存为 PDF”。");
+    setStatus("已打开 PDF 打印窗口，可选择“另存为 PDF”；内容包含当前检测上下文摘要。");
+    setExportBusy(false);
   }
 
   function addAssistantMessage(answer, options = {}) {
