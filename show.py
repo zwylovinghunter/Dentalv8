@@ -2,6 +2,33 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import os
+from pathlib import Path
+from tkinter import Tk, filedialog
+
+
+def choose_image_file():
+    root = Tk()
+    root.withdraw()
+    root.update()
+    image_path = filedialog.askopenfilename(
+        title="选择牙齿影像图片",
+        filetypes=[
+            ("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff"),
+            ("All files", "*.*"),
+        ],
+    )
+    root.destroy()
+    return image_path
+
+
+def infer_label_path(image_path):
+    path = Path(image_path)
+    parts = list(path.parts)
+    if "images" in parts:
+        idx = parts.index("images")
+        parts[idx] = "labels"
+        return str(Path(*parts).with_suffix(".txt"))
+    return str(path.with_suffix(".txt"))
 
 def view_dental_xray(image_path, label_path, class_names=None):
     # 1. 检查文件是否存在
@@ -64,8 +91,14 @@ def view_dental_xray(image_path, label_path, class_names=None):
 
 # --- 使用示例 ---
 if __name__ == "__main__":
-    # 使用 r"" 避免路径转义问题
-    img_path = r"datasets\datasets\datasets\yolov8_dental\images\val\train_704.png"
-    txt_path = r"datasets\datasets\datasets\yolov8_dental\labels\val\train_704.txt"
+    img_path = choose_image_file()
+    if not img_path:
+        print("未选择图片，程序已退出。")
+        raise SystemExit
+
+    txt_path = infer_label_path(img_path)
+    print(f"已选择图片：{img_path}")
+    print(f"自动匹配标注：{txt_path}")
+
     class_names = {0: "Caries", 1: "Periapical Lesion", 2: "Impacted"}
     view_dental_xray(img_path, txt_path, class_names)

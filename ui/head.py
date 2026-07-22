@@ -17,83 +17,6 @@ ASK_AI_HEAD = r"""
   }
 
   const DENTAL_PAGES = new Set(["learn", "dashboard", "image", "compare", "batch", "history", "assistant", "report"]);
-  const DENTAL_I18N = {
-    zh: {
-      app_title: "牙齿病变目标区域识别与辅助分析平台",
-      app_subtitle: "面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。",
-      nav_learn: "牙病学习",
-      nav_dashboard: "首页 Dashboard",
-      nav_image: "图像检测",
-      nav_compare: "多模型对比",
-      nav_batch: "批量检测",
-      nav_history: "历史记录",
-      nav_assistant: "智诊管家",
-      nav_report: "报告中心"
-    },
-    en: {
-      app_title: "Dental Lesion Candidate-region Detection Platform",
-      app_subtitle: "Auxiliary recognition, model comparison and report generation for dental and oral images.",
-      nav_learn: "Learning",
-      nav_dashboard: "Dashboard",
-      nav_image: "Single Image",
-      nav_compare: "Model Review",
-      nav_batch: "Batch Screening",
-      nav_history: "History",
-      nav_assistant: "AI Assistant",
-      nav_report: "Reports"
-    }
-  };
-
-  function applyDentalLanguage(lang) {
-    const next = lang === "en" ? "en" : "zh";
-    const copy = DENTAL_I18N[next] || DENTAL_I18N.zh;
-    document.body.dataset.dentalLang = next;
-    document.documentElement.lang = next === "en" ? "en" : "zh-CN";
-    document.querySelectorAll("[data-i18n]").forEach(node => {
-      const key = node.dataset.i18n;
-      if (copy[key]) node.textContent = copy[key];
-    });
-    const toggle = document.getElementById("dental-lang-toggle");
-    if (toggle) {
-      toggle.textContent = next === "en" ? "中文" : "EN";
-      toggle.title = next === "en" ? "切换为中文界面" : "Switch to English";
-    }
-    try { window.localStorage.setItem("dental-ui-language", next); } catch (_) {}
-  }
-
-  function applyDentalTheme(theme) {
-    const next = theme === "dark" ? "dark" : "light";
-    document.body.dataset.dentalTheme = next;
-    const toggle = document.getElementById("dental-theme-toggle");
-    if (toggle) {
-      toggle.textContent = next === "dark" ? "浅色" : "暗色";
-      toggle.title = next === "dark" ? "切换为浅色模式" : "切换为暗色模式";
-    }
-    try { window.localStorage.setItem("dental-ui-theme", next); } catch (_) {}
-  }
-
-  function installPreferences() {
-    let lang = "zh";
-    let theme = "light";
-    try {
-      lang = window.localStorage.getItem("dental-ui-language") || lang;
-      theme = window.localStorage.getItem("dental-ui-theme") || theme;
-    } catch (_) {}
-    applyDentalLanguage(lang);
-    applyDentalTheme(theme);
-    const langBtn = document.getElementById("dental-lang-toggle");
-    const themeBtn = document.getElementById("dental-theme-toggle");
-    if (langBtn && langBtn.dataset.installed !== "true") {
-      langBtn.dataset.installed = "true";
-      langBtn.addEventListener("click", () => applyDentalLanguage(document.body.dataset.dentalLang === "en" ? "zh" : "en"));
-    }
-    if (themeBtn && themeBtn.dataset.installed !== "true") {
-      themeBtn.dataset.installed = "true";
-      themeBtn.addEventListener("click", () => applyDentalTheme(document.body.dataset.dentalTheme === "dark" ? "light" : "dark"));
-    }
-    setTimeout(() => applyDentalLanguage(document.body.dataset.dentalLang || lang), 400);
-    setTimeout(() => applyDentalLanguage(document.body.dataset.dentalLang || lang), 1200);
-  }
 
   function activateDentalPage(page, shouldScroll = true) {
     const nextPage = DENTAL_PAGES.has(page) ? page : "learn";
@@ -132,6 +55,17 @@ ASK_AI_HEAD = r"""
     activateDentalPage(initialPage, false);
     setTimeout(() => { if (!userNavigated) activateDentalPage(initialPage, false); }, 300);
     setTimeout(() => { if (!userNavigated) activateDentalPage(initialPage, false); }, 1000);
+    let initialSyncAttempts = 0;
+    const initialSyncTimer = setInterval(() => {
+      initialSyncAttempts += 1;
+      if (userNavigated || document.querySelector(".dental-page-nav-item.active") || initialSyncAttempts >= 40) {
+        clearInterval(initialSyncTimer);
+        return;
+      }
+      if (document.querySelector(".dental-page-nav-item[data-page]")) {
+        activateDentalPage(initialPage, false);
+      }
+    }, 250);
     document.addEventListener("click", e => {
       const btn = e.target && e.target.closest && e.target.closest(".dental-page-nav-item[data-page]");
       if (!btn) return;
@@ -139,7 +73,19 @@ ASK_AI_HEAD = r"""
       e.stopPropagation();
       userNavigated = true;
       activateDentalPage(btn.dataset.page || "learn");
+      const nav = document.querySelector(".dental-page-nav");
+      const toggle = document.querySelector(".dental-nav-toggle");
+      nav?.classList.remove("nav-open");
+      toggle?.setAttribute("aria-expanded", "false");
     }, true);
+    document.addEventListener("click", e => {
+      const toggle = e.target && e.target.closest && e.target.closest(".dental-nav-toggle");
+      if (!toggle) return;
+      const nav = toggle.closest(".dental-page-nav");
+      const open = !nav.classList.contains("nav-open");
+      nav.classList.toggle("nav-open", open);
+      toggle.setAttribute("aria-expanded", String(open));
+    });
   }
 
   function installImageMagnifier() {
@@ -415,11 +361,188 @@ ASK_AI_HEAD = r"""
     pop.classList.add('visible');
   }
 
+  function installSynchronizedComparisonViewer() {
+    if (window.__dentalSyncViewerInstalled) return;
+    window.__dentalSyncViewerInstalled = true;
+    let scale = 1;
+    let origin = "50% 50%";
+    const images = () => Array.from(document.querySelectorAll(".sync-model-viewer img")).filter(img => img.src);
+    const apply = () => images().forEach(img => {
+      img.style.transformOrigin = origin;
+      img.style.transform = `scale(${scale})`;
+    });
+    document.addEventListener("wheel", event => {
+      const image = event.target?.closest?.(".sync-model-viewer img");
+      if (!image) return;
+      event.preventDefault();
+      scale = Math.min(3, Math.max(1, scale + (event.deltaY < 0 ? 0.2 : -0.2)));
+      apply();
+    }, {capture: true, passive: false});
+    document.addEventListener("pointermove", event => {
+      const image = event.target?.closest?.(".sync-model-viewer img");
+      if (!image || scale <= 1) return;
+      const rect = image.getBoundingClientRect();
+      origin = `${Math.max(0, Math.min(100, (event.clientX - rect.left) / rect.width * 100))}% ${Math.max(0, Math.min(100, (event.clientY - rect.top) / rect.height * 100))}%`;
+      apply();
+    }, true);
+    document.addEventListener("dblclick", event => {
+      if (!event.target?.closest?.(".sync-model-viewer img")) return;
+      scale = 1;
+      origin = "50% 50%";
+      apply();
+    }, true);
+  }
+
+  function installDiseaseLearningFilters() {
+    if (window.__dentalEducationFiltersInstalled) return;
+    window.__dentalEducationFiltersInstalled = true;
+    let category = "all";
+    const apply = () => {
+      const input = document.getElementById("disease-search-input");
+      const query = (input?.value || "").trim().toLowerCase();
+      let visible = 0;
+      document.querySelectorAll(".education-card[data-disease]").forEach(card => {
+        const matchesCategory = category === "all" || card.dataset.disease === category;
+        const matchesQuery = !query || (card.dataset.search || card.textContent || "").toLowerCase().includes(query);
+        card.hidden = !(matchesCategory && matchesQuery);
+        if (!card.hidden) visible += 1;
+      });
+      const empty = document.querySelector(".education-no-result");
+      if (empty) empty.hidden = visible > 0;
+    };
+    document.addEventListener("input", event => {
+      if (event.target?.id === "disease-search-input") apply();
+    });
+    document.addEventListener("click", event => {
+      const button = event.target?.closest?.("[data-disease-filter]");
+      if (!button) return;
+      category = button.dataset.diseaseFilter || "all";
+      document.querySelectorAll("[data-disease-filter]").forEach(item => {
+        const active = item === button;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-pressed", String(active));
+      });
+      apply();
+    });
+  }
+
+  function installDetectionWorkflowState() {
+    if (window.__dentalWorkflowStateInstalled) return;
+    window.__dentalWorkflowStateInstalled = true;
+    const configs = {
+      single: {upload: "single-upload", run: "single-run", progress: "single-progress", result: "single-result-slider"},
+      compare: {upload: "compare-upload", run: "compare-run", progress: "compare-progress", result: "compare-results"},
+      batch: {upload: "batch-upload", run: "batch-run", progress: "batch-progress", result: "batch-result-slider"}
+    };
+    const visible = node => {
+      if (!node) return false;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const hasUpload = (kind, root) => {
+      if (!root) return false;
+      if (kind === "batch") return /\.(png|jpe?g|bmp|webp)/i.test(root.textContent || "");
+      return Array.from(root.querySelectorAll("img")).some(img => visible(img) && img.naturalWidth > 80);
+    };
+    const hasResult = (kind, root) => {
+      if (!root) return false;
+      const sliders = kind === "compare" ? root.querySelectorAll(".result-compare-slider") : [root];
+      return Array.from(sliders).some(slider => visible(slider) && slider.querySelector("img"));
+    };
+    const hasStructuredResult = kind => {
+      const pageId = kind === "single" ? "page-image" : `page-${kind}`;
+      const page = document.getElementById(pageId);
+      if (!page) return false;
+      return Array.from(page.querySelectorAll("table tbody tr")).some(row =>
+        visible(row) && Array.from(row.querySelectorAll("td")).some(cell => (cell.textContent || "").trim())
+      );
+    };
+    const render = kind => {
+      const config = configs[kind];
+      const workflow = document.querySelector(`.detection-workflow[data-workflow-kind="${kind}"]`);
+      if (!workflow) return;
+      const uploadRoot = document.getElementById(config.upload);
+      const progressRoot = document.getElementById(config.progress);
+      const resultRoot = document.getElementById(config.result);
+      const uploaded = hasUpload(kind, uploadRoot);
+      const running = visible(progressRoot?.querySelector(".detection-progress-state"));
+      const completed = hasResult(kind, resultRoot) || hasStructuredResult(kind);
+      let step = completed ? 4 : (running ? 3 : (uploaded ? 2 : 1));
+      if (workflow.dataset.forceRun === "true" && !completed) step = 3;
+      if (!uploaded && !running && !completed) workflow.dataset.forceRun = "false";
+      if (completed || !running && step !== 3) workflow.dataset.forceRun = "false";
+      workflow.dataset.activeStep = String(step);
+      workflow.querySelectorAll("li").forEach((item, index) => {
+        const itemStep = index + 1;
+        item.classList.toggle("is-active", itemStep === step && !completed);
+        item.classList.toggle("is-done", itemStep < step || (completed && itemStep === 4));
+        if (itemStep === step) item.setAttribute("aria-current", "step");
+        else item.removeAttribute("aria-current");
+      });
+    };
+    const renderAll = () => Object.keys(configs).forEach(render);
+    document.addEventListener("click", event => {
+      for (const [kind, config] of Object.entries(configs)) {
+        if (event.target?.closest?.(`#${config.run}`)) {
+          const workflow = document.querySelector(`.detection-workflow[data-workflow-kind="${kind}"]`);
+          if (workflow) workflow.dataset.forceRun = "true";
+          setTimeout(() => render(kind), 0);
+        }
+      }
+    }, true);
+    document.addEventListener("input", () => setTimeout(renderAll, 0), true);
+    document.addEventListener("change", () => setTimeout(renderAll, 0), true);
+    let scheduled = false;
+    const observer = new MutationObserver(() => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => { scheduled = false; renderAll(); });
+    });
+    observer.observe(document.body, {subtree: true, childList: true, attributes: true, attributeFilter: ["style", "class", "hidden"]});
+    renderAll();
+    setTimeout(renderAll, 600);
+  }
+
+  function setGradioChoice(targetId, choice) {
+    const root = document.getElementById(targetId);
+    const input = root?.querySelector("input");
+    if (!input) return false;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+    setter ? setter.call(input, choice) : (input.value = choice);
+    input.dispatchEvent(new Event("input", {bubbles: true}));
+    input.dispatchEvent(new Event("change", {bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent("keyup", {key: "Enter", bubbles: true}));
+    return true;
+  }
+
+  window.dentalJumpEvidence = evidence => {
+    if (!evidence) return;
+    activateDentalPage(evidence.page || "image");
+    setTimeout(() => {
+      const target = document.getElementById(evidence.target || "");
+      if (target) {
+        setGradioChoice(evidence.target, evidence.choice || "");
+        target.scrollIntoView({behavior: "smooth", block: "center"});
+      }
+    }, 350);
+  };
+
   function install() {
+    document.documentElement.lang = "zh-CN";
+    delete document.body.dataset.dentalTheme;
+    delete document.body.dataset.dentalLang;
+    try {
+      localStorage.removeItem("dental-ui-theme");
+      localStorage.removeItem("dental-ui-language");
+    } catch (_) {}
     installPageNavigation();
-    installPreferences();
     installImageMagnifier();
     installBatchPreviewFullscreen();
+    installSynchronizedComparisonViewer();
+    installDiseaseLearningFilters();
+    installDetectionWorkflowState();
     ensureUi();
     document.addEventListener('mouseup', () => setTimeout(showSelectionPopover, 60));
     document.addEventListener('touchend', () => setTimeout(showSelectionPopover, 180));

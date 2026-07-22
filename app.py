@@ -27,7 +27,7 @@ import pandas as pd
 import requests
 import torch
 import yaml
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pydantic import BaseModel, Field
 
 from assistant.config import (
@@ -74,8 +74,17 @@ REPORT_DIR = OUTPUT_DIR / "reports"
 REPORT_ASSET_DIR = OUTPUT_DIR / "report_assets"
 HISTORY_PATH = OUTPUT_DIR / "history.json"
 CHAT_FEEDBACK_PATH = OUTPUT_DIR / "chat_feedback.json"
+OUTPUT_RETENTION_DAYS = max(1, int(os.getenv("OUTPUT_RETENTION_DAYS", "30")))
+OUTPUT_MAX_BYTES = max(256 * 1024 * 1024, int(float(os.getenv("OUTPUT_MAX_GB", "2")) * 1024**3))
+OUTPUT_KEEP_RECENT_FILES = max(50, int(os.getenv("OUTPUT_KEEP_RECENT_FILES", "300")))
+OUTPUT_CLEANUP_INTERVAL_SECONDS = max(300, int(os.getenv("OUTPUT_CLEANUP_INTERVAL_SECONDS", "3600")))
 APP_VERSION = "2026.06.23"
 DEVICE = "cpu"
+try:
+    torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
 STATUS_LABELS = {
     "success": "成功",
     "load_failed": "权重未加载",
@@ -118,6 +127,11 @@ DEFAULT_CLOUD_FEEDBACK_STATE = {
 CLOUD_FEEDBACK_CACHE_MAX_SESSIONS = 200
 CLOUD_FEEDBACK_CACHE: dict[str, dict[str, Any]] = {}
 CLOUD_FEEDBACK_CACHE_LOCK = threading.RLock()
+HISTORY_LOCK = threading.RLock()
+OUTPUT_CLEANUP_LOCK = threading.Lock()
+OUTPUT_LAST_CLEANUP_AT = time.time()
+OUTPUT_STORAGE_CACHE: dict[str, Any] = {"value": None, "checked_at": time.time()}
+HISTORY_CACHE: dict[str, Any] = {"mtime_ns": None, "data": None}
 LATEST_AI_CONTEXT: dict[str, Any] = {
     "detection": {},
     "comparison": [],
@@ -199,10 +213,19 @@ MODEL_SPECS = [
 MODEL_CACHE: dict[str, Any] = {}
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {}
 WEIGHT_FINGERPRINT_CACHE: dict[str, dict[str, Any]] = {}
-INFERENCE_JOB_LOCK = threading.RLock()
+MODEL_LOAD_LOCK = threading.RLock()
+INFERENCE_RESULT_CACHE: dict[tuple[Any, ...], tuple[dict[str, Any], Image.Image | None]] = {}
+INFERENCE_RESULT_CACHE_ORDER: list[tuple[Any, ...]] = []
+INFERENCE_RESULT_CACHE_LIMIT = max(6, int(os.getenv("INFERENCE_RESULT_CACHE_LIMIT", "18")))
+INFERENCE_IMAGE_SIZE = max(320, min(960, int(os.getenv("INFERENCE_IMAGE_SIZE", "640"))))
+INFERENCE_WARMUP_IMAGE_SIZE = 320
+BATCH_MAX_IMAGES = max(1, min(24, int(os.getenv("BATCH_MAX_IMAGES", "6"))))
+INFERENCE_JOB_LOCK = threading.Lock()
 INFERENCE_STATE_LOCK = threading.Lock()
 INFERENCE_ACTIVE_JOB: dict[str, Any] | None = None
-INFERENCE_JOB_STALE_SECONDS = 2 * 60 * 60
+INFERENCE_JOB_STALE_SECONDS = 45
+INFERENCE_CONCURRENCY_ID = "yolo_inference"
+INFERENCE_CONCURRENCY_LIMIT = 1
 
 
 def begin_inference_job(kind: str, title: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -250,6 +273,11 @@ def detection_busy_outputs(output_count: int, active_job: dict[str, Any] | None)
     )
 
 
+def deferred_dashboard_outputs() -> tuple[Any, ...]:
+    """Let detection results render before secondary dashboard/history refreshes."""
+    return tuple(gr.skip() for _ in range(7))
+
+
 def gated_inference_job(output_count: int, kind: str, title: str):
     """Gate streaming detection callbacks without turning them into plain returns."""
     def decorator(func):
@@ -270,6 +298,59 @@ def ensure_dirs() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def cleanup_output_artifacts(force: bool = False) -> dict[str, Any]:
+    """Prune generated reports/assets by age and size without touching state files."""
+    global OUTPUT_LAST_CLEANUP_AT
+    now = time.time()
+    if not force and now - OUTPUT_LAST_CLEANUP_AT < OUTPUT_CLEANUP_INTERVAL_SECONDS:
+        return {"skipped": True, "removed": 0, "freed_bytes": 0}
+    if not OUTPUT_CLEANUP_LOCK.acquire(blocking=False):
+        return {"skipped": True, "removed": 0, "freed_bytes": 0}
+    try:
+        ensure_dirs()
+        files: list[tuple[Path, float, int]] = []
+        for folder in (REPORT_DIR, REPORT_ASSET_DIR):
+            if not folder.exists():
+                continue
+            for dirpath, _, filenames in os.walk(folder):
+                base = Path(dirpath)
+                for filename in filenames:
+                    path = base / filename
+                    try:
+                        stat = path.stat()
+                        files.append((path, stat.st_mtime, stat.st_size))
+                    except OSError:
+                        continue
+        files.sort(key=lambda item: item[1], reverse=True)
+        keep_paths = {item[0] for item in files[:OUTPUT_KEEP_RECENT_FILES]}
+        cutoff = now - OUTPUT_RETENTION_DAYS * 86400
+        remove_paths = {path for path, mtime, _ in files if mtime < cutoff and path not in keep_paths}
+        remaining_bytes = sum(size for path, _, size in files if path not in remove_paths)
+        if remaining_bytes > OUTPUT_MAX_BYTES:
+            for path, _, size in reversed(files):
+                if path in keep_paths or path in remove_paths:
+                    continue
+                remove_paths.add(path)
+                remaining_bytes -= size
+                if remaining_bytes <= OUTPUT_MAX_BYTES:
+                    break
+        removed = 0
+        freed = 0
+        size_by_path = {path: size for path, _, size in files}
+        for path in remove_paths:
+            try:
+                path.unlink(missing_ok=True)
+                removed += 1
+                freed += size_by_path.get(path, 0)
+            except OSError:
+                continue
+        OUTPUT_LAST_CLEANUP_AT = now
+        OUTPUT_STORAGE_CACHE.update({"value": remaining_bytes, "checked_at": now})
+        return {"skipped": False, "removed": removed, "freed_bytes": freed, "remaining_bytes": remaining_bytes}
+    finally:
+        OUTPUT_CLEANUP_LOCK.release()
 
 
 def now_iso() -> str:
@@ -374,33 +455,43 @@ def safe_read_text(path: Path, limit: int = 6000) -> str:
 
 
 def load_history() -> dict[str, Any]:
-    ensure_dirs()
-    if not HISTORY_PATH.exists():
-        data = {"events": []}
-        HISTORY_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return data
-    try:
-        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or not isinstance(data.get("events", []), list):
-            raise ValueError("invalid history")
-        return data
-    except Exception:
-        data = {"events": []}
-        HISTORY_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return data
+    with HISTORY_LOCK:
+        ensure_dirs()
+        if not HISTORY_PATH.exists():
+            data = {"events": []}
+            save_history(data)
+            return data
+        try:
+            mtime_ns = HISTORY_PATH.stat().st_mtime_ns
+            if HISTORY_CACHE.get("mtime_ns") == mtime_ns and isinstance(HISTORY_CACHE.get("data"), dict):
+                return copy.deepcopy(HISTORY_CACHE["data"])
+            data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("events", []), list):
+                raise ValueError("invalid history")
+            HISTORY_CACHE.update({"mtime_ns": mtime_ns, "data": copy.deepcopy(data)})
+            return copy.deepcopy(data)
+        except Exception:
+            data = {"events": []}
+            save_history(data)
+            return data
 
 
 def save_history(history: dict[str, Any]) -> None:
-    ensure_dirs()
-    HISTORY_PATH.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    with HISTORY_LOCK:
+        ensure_dirs()
+        temp_path = HISTORY_PATH.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(history, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        temp_path.replace(HISTORY_PATH)
+        HISTORY_CACHE.update({"mtime_ns": HISTORY_PATH.stat().st_mtime_ns, "data": copy.deepcopy(history)})
 
 
 def append_history(event: dict[str, Any]) -> dict[str, Any]:
-    history = load_history()
-    history.setdefault("events", []).append(event)
-    history["events"] = history["events"][-300:]
-    save_history(history)
-    return history
+    with HISTORY_LOCK:
+        history = load_history()
+        history.setdefault("events", []).append(event)
+        history["events"] = history["events"][-300:]
+        save_history(history)
+        return history
 
 
 def clear_history() -> dict[str, Any]:
@@ -516,32 +607,56 @@ def get_yolo_class():
 
 
 def load_model(model_key: str) -> tuple[Any, str]:
-    registry = get_registry()
-    item = registry.get(model_key)
-    if not item or not item.get("weight_path"):
-        return None, "no_weight_matched"
-    if item.get("load_status") == "loaded" and item.get("model") is not None:
-        return item["model"], "success"
-    if item.get("load_status") == "failed":
-        return None, "load_failed"
+    with MODEL_LOAD_LOCK:
+        registry = get_registry()
+        item = registry.get(model_key)
+        if not item or not item.get("weight_path"):
+            return None, "no_weight_matched"
+        if item.get("load_status") == "loaded" and item.get("model") is not None:
+            return item["model"], "success"
+        if item.get("load_status") == "failed":
+            return None, "load_failed"
+        YOLO, err = get_yolo_class()
+        if YOLO is None:
+            item["load_status"] = "failed"
+            item["load_error"] = "缺少 ultralytics 依赖。"
+            return None, "missing_dependency"
 
-    YOLO, err = get_yolo_class()
-    if YOLO is None:
-        item["load_status"] = "failed"
-        item["load_error"] = "缺少 ultralytics 依赖。"
-        return None, "missing_dependency"
+        try:
+            model = YOLO(str(item["weight_path"]))
+            item["model"] = model
+            item["load_status"] = "loaded"
+            item["load_error"] = ""
+            MODEL_CACHE[model_key] = model
+            return model, "success"
+        except Exception:
+            item["load_status"] = "failed"
+            item["load_error"] = MODEL_NOT_LOADED_MSG
+            return None, "load_failed"
 
-    try:
-        model = YOLO(str(item["weight_path"]))
-        item["model"] = model
-        item["load_status"] = "loaded"
-        item["load_error"] = ""
-        MODEL_CACHE[model_key] = model
-        return model, "success"
-    except Exception:
-        item["load_status"] = "failed"
-        item["load_error"] = MODEL_NOT_LOADED_MSG
-        return None, "load_failed"
+
+def warm_detection_models() -> None:
+    """Load and warm every configured detector before accepting browser requests."""
+    sample = np.zeros((INFERENCE_WARMUP_IMAGE_SIZE, INFERENCE_WARMUP_IMAGE_SIZE, 3), dtype=np.uint8)
+    with INFERENCE_JOB_LOCK:
+        for spec in MODEL_SPECS:
+            model, status = load_model(spec.key)
+            if status != "success" or model is None:
+                continue
+            try:
+                with torch.inference_mode():
+                    model.predict(
+                        source=sample,
+                        conf=0.25,
+                        iou=0.7,
+                        imgsz=INFERENCE_WARMUP_IMAGE_SIZE,
+                        max_det=1,
+                        device=DEVICE,
+                        verbose=False,
+                    )
+                weight_fingerprint(spec.key)
+            except Exception:
+                continue
 
 
 def start_step(process_steps: list[dict[str, Any]], name: str) -> float:
@@ -608,6 +723,64 @@ def normalize_image(image: Any) -> Image.Image:
     return Image.fromarray(np.asarray(image)).convert("RGB")
 
 
+def display_image(image: Any, max_side: int = 1024) -> Image.Image | None:
+    """Return a browser-friendly copy while preserving full-resolution report assets."""
+    if image is None:
+        return None
+    try:
+        output = normalize_image(image).copy()
+    except Exception:
+        return None
+    if max(output.size) > max_side:
+        output.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    return output
+
+
+def inference_cache_key(
+    image_sha256: str,
+    model_key: str,
+    conf: float,
+    iou: float,
+    show_label: bool,
+    show_confidence: bool,
+    line_width: int,
+    color_mode: str,
+) -> tuple[Any, ...]:
+    return (
+        image_sha256,
+        model_key,
+        round(float(conf), 4),
+        round(float(iou), 4),
+        bool(show_label),
+        bool(show_confidence),
+        int(line_width),
+        str(color_mode),
+        INFERENCE_IMAGE_SIZE,
+    )
+
+
+def get_cached_inference(key: tuple[Any, ...]) -> tuple[dict[str, Any], Image.Image | None] | None:
+    cached = INFERENCE_RESULT_CACHE.get(key)
+    if cached is None:
+        return None
+    result, rendered = cached
+    copied_result = copy.deepcopy(result)
+    copied_result["created_at"] = now_iso()
+    copied_result["cache_hit"] = True
+    copied_result["total_time_ms"] = 0.0
+    return copied_result, rendered.copy() if isinstance(rendered, Image.Image) else None
+
+
+def cache_inference_result(key: tuple[Any, ...], result: dict[str, Any], rendered: Image.Image | None) -> None:
+    if key in INFERENCE_RESULT_CACHE_ORDER:
+        INFERENCE_RESULT_CACHE_ORDER.remove(key)
+    INFERENCE_RESULT_CACHE[key] = (copy.deepcopy(result), rendered.copy() if isinstance(rendered, Image.Image) else None)
+    INFERENCE_RESULT_CACHE_ORDER.append(key)
+    while len(INFERENCE_RESULT_CACHE_ORDER) > INFERENCE_RESULT_CACHE_LIMIT:
+        oldest = INFERENCE_RESULT_CACHE_ORDER.pop(0)
+        INFERENCE_RESULT_CACHE.pop(oldest, None)
+
+
 def safe_asset_stem(text: str) -> str:
     stem = re.sub(r"[^0-9A-Za-z一-鿿_-]+", "_", text).strip("_")
     return stem[:80] or "asset"
@@ -615,19 +788,36 @@ def safe_asset_stem(text: str) -> str:
 
 def save_image_asset(image: Image.Image, prefix: str, suffix: str) -> str:
     ensure_dirs()
+    cleanup_output_artifacts()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = REPORT_ASSET_DIR / f"{safe_asset_stem(prefix)}_{suffix}_{stamp}.png"
-    image.convert("RGB").save(path)
+    path = REPORT_ASSET_DIR / f"{safe_asset_stem(prefix)}_{suffix}_{stamp}.jpg"
+    quality = 87 if suffix == "result" else 86
+    display_image(image, 1280).convert("RGB").save(path, format="JPEG", quality=quality, subsampling=2, optimize=True)
+    try:
+        cached_size = OUTPUT_STORAGE_CACHE.get("value")
+        if cached_size is not None:
+            OUTPUT_STORAGE_CACHE["value"] = int(cached_size) + path.stat().st_size
+    except OSError:
+        pass
     return str(path)
 
 
-def attach_visual_assets(source_image: Any, rendered_image: Image.Image | None, result: dict[str, Any], prefix: str) -> dict[str, Any]:
+def attach_visual_assets(
+    source_image: Any,
+    rendered_image: Image.Image | None,
+    result: dict[str, Any],
+    prefix: str,
+    original_asset_path: str | None = None,
+) -> dict[str, Any]:
     assets = dict(result.get("visual_assets") or {})
-    try:
-        original = normalize_image(source_image)
-        assets["original"] = save_image_asset(original, prefix, "original")
-    except Exception:
-        pass
+    if original_asset_path and Path(original_asset_path).exists():
+        assets["original"] = original_asset_path
+    else:
+        try:
+            original = normalize_image(source_image)
+            assets["original"] = save_image_asset(original, prefix, "original")
+        except Exception:
+            pass
     if isinstance(rendered_image, Image.Image):
         try:
             assets["result"] = save_image_asset(rendered_image, prefix, "result")
@@ -749,6 +939,59 @@ def box_color(box: dict[str, Any], idx: int, color_mode: str) -> tuple[int, int,
     return palette[idx % len(palette)]
 
 
+def rectangles_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int, int], padding: int = 2) -> bool:
+    return not (
+        first[2] + padding <= second[0]
+        or second[2] + padding <= first[0]
+        or first[3] + padding <= second[1]
+        or second[3] + padding <= first[1]
+    )
+
+
+def label_overlap_area(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> int:
+    width = max(0, min(first[2], second[2]) - max(first[0], second[0]))
+    height = max(0, min(first[3], second[3]) - max(first[1], second[1]))
+    return width * height
+
+
+def place_detection_label(
+    bbox: list[float] | tuple[float, float, float, float],
+    label_size: tuple[int, int],
+    canvas_size: tuple[int, int],
+    occupied: list[tuple[int, int, int, int]],
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+    label_width, label_height = label_size
+    canvas_width, canvas_height = canvas_size
+    left = max(0, min(x1, canvas_width - label_width))
+    right = max(0, min(x2 - label_width, canvas_width - label_width))
+    center = max(0, min((x1 + x2 - label_width) // 2, canvas_width - label_width))
+    candidates: list[tuple[int, int, int, int]] = []
+    candidate_positions = [
+        (left, y1 - label_height - 2),
+        (right, y1 - label_height - 2),
+        (left, y2 + 2),
+        (right, y2 + 2),
+        (left + 2, y1 + 2),
+        (right - 2, y1 + 2),
+        (center, y1 - label_height - 2),
+        (center, y2 + 2),
+    ]
+    for level in range(2, 5):
+        offset = level * (label_height + 2)
+        candidate_positions.extend([(left, y1 - offset), (right, y1 - offset), (left, y2 + offset - label_height)])
+    for candidate_x, candidate_y in candidate_positions:
+        candidate_x = max(0, min(candidate_x, canvas_width - label_width))
+        candidate_y = max(0, min(candidate_y, canvas_height - label_height))
+        candidate = (candidate_x, candidate_y, candidate_x + label_width, candidate_y + label_height)
+        if candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in candidates:
+        if not any(rectangles_overlap(candidate, used) for used in occupied):
+            return candidate
+    return min(candidates, key=lambda candidate: sum(label_overlap_area(candidate, used) for used in occupied))
+
+
 def draw_boxes(
     image: Image.Image,
     boxes: list[dict[str, Any]],
@@ -761,6 +1004,7 @@ def draw_boxes(
     draw = ImageDraw.Draw(out)
     font = ImageFont.load_default()
     line_width = max(1, int(line_width or 3))
+    labels: list[tuple[list[float], str, tuple[int, int, int]]] = []
     for idx, box in enumerate(boxes):
         x1, y1, x2, y2 = box["bbox_xyxy"]
         color = box_color(box, idx, color_mode)
@@ -772,10 +1016,16 @@ def draw_boxes(
             label_parts.append(f"{box['confidence']:.2f}")
         label = " ".join(label_parts).strip()
         if label and (show_label or show_confidence):
-            tw = max(48, len(label) * 7)
-            th = 18
-            draw.rectangle([x1, max(0, y1 - th), x1 + tw, y1], fill=color)
-            draw.text((x1 + 3, max(0, y1 - th + 2)), label, fill=(0, 0, 0), font=font)
+            labels.append(([x1, y1, x2, y2], label, color))
+    occupied_labels: list[tuple[int, int, int, int]] = []
+    for bbox, label, color in labels:
+        text_bbox = draw.textbbox((0, 0), label, font=font)
+        label_width = max(48, text_bbox[2] - text_bbox[0] + 8)
+        label_height = max(18, text_bbox[3] - text_bbox[1] + 6)
+        label_rect = place_detection_label(bbox, (label_width, label_height), out.size, occupied_labels)
+        draw.rounded_rectangle(label_rect, radius=3, fill=color)
+        draw.text((label_rect[0] + 4, label_rect[1] + 3), label, fill=(0, 0, 0), font=font)
+        occupied_labels.append(label_rect)
     return out
 
 
@@ -797,6 +1047,233 @@ def result_to_box_rows(result: dict[str, Any]) -> list[list[Any]]:
             ]
         )
     return rows
+
+
+def filtered_detection_rows(
+    result: dict[str, Any] | None,
+    query: str = "",
+    class_filter: str = "全部类别",
+    risk_filter: str = "全部风险",
+    sort_mode: str = "按区域编号",
+) -> list[list[Any]]:
+    rows = result_to_box_rows(result or {})
+    needle = str(query or "").strip().casefold()
+    if needle:
+        rows = [row for row in rows if needle in " ".join(str(value) for value in row).casefold()]
+    if class_filter and class_filter != "全部类别":
+        rows = [row for row in rows if str(row[1]) == class_filter]
+    if risk_filter and risk_filter != "全部风险":
+        rows = [row for row in rows if str(row[7]) == risk_filter]
+    risk_rank = {"强烈建议人工复核": 0, "建议人工复核": 1, "可信度较高": 2}
+    if sort_mode == "风险优先":
+        rows.sort(key=lambda row: (risk_rank.get(str(row[7]), 9), -float(row[2])))
+    elif sort_mode == "置信度从高到低":
+        rows.sort(key=lambda row: -float(row[2]))
+    elif sort_mode == "置信度从低到高":
+        rows.sort(key=lambda row: float(row[2]))
+    else:
+        rows.sort(key=lambda row: int(row[0]))
+    return rows
+
+
+def detection_table_selected_region(result: dict[str, Any] | None, evt: gr.SelectData):
+    if not result:
+        return gr.Dropdown(), None, None, "当前没有可定位的检测结果。"
+    row_value = getattr(evt, "row_value", None)
+    try:
+        original_index = int(row_value[0]) if row_value else int(evt.value)
+    except (IndexError, TypeError, ValueError):
+        row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+        try:
+            original_index = int(result_to_box_rows(result)[int(row_index)][0])
+        except (IndexError, TypeError, ValueError):
+            original_index = 1
+    choices = region_choices(result)
+    selected = next((item for item in choices if item.startswith(f"区域 {original_index}｜")), choices[0] if choices else None)
+    original, annotated, note = render_linked_region_view(None, result, selected)
+    return gr.Dropdown(choices=choices, value=selected), original, annotated, note
+
+
+def workflow_header(kind: str, active_step: int = 1) -> str:
+    labels = ("上传", "参数", "运行", "结果")
+    items = []
+    for index, label in enumerate(labels, 1):
+        state = "is-active" if index == active_step else ("is-done" if index < active_step else "")
+        items.append(f"<li class='{state}'><span>{index}</span><b>{label}</b></li>")
+    return f"<ol class='detection-workflow' data-workflow-kind='{xml_escape(kind)}' data-active-step='{active_step}' aria-label='检测工作流'>" + "".join(items) + "</ol>"
+
+
+def batch_task_list_html(items: list[dict[str, Any]] | None, total: int | None = None, active_index: int | None = None) -> str:
+    records = list(items or [])
+    total = max(int(total or len(records)), len(records))
+    if total <= 0:
+        return ""
+    rows = ["<section class='batch-task-list' aria-label='批量检测任务列表'><header><b>任务队列</b><span>逐张处理，可按图片查看结果</span></header>"]
+    for index in range(1, total + 1):
+        item = records[index - 1] if index <= len(records) else None
+        result = item.get("result", {}) if item else {}
+        name = item.get("image_name", f"图片 {index}") if item else f"图片 {index}"
+        if item:
+            failed = result.get("status") != "success"
+            state, label, percent = ("failed", "失败", 100) if failed else ("done", "完成", 100)
+        elif active_index == index:
+            state, label, percent = "running", "检测中", 55
+        else:
+            state, label, percent = "pending", "等待", 0
+        rows.append(
+            f"<article class='batch-task-row {state}'><span class='batch-task-index'>{index:02d}</span>"
+            f"<div class='batch-task-main'><b>{xml_escape(str(name))}</b><div class='batch-task-track'><i style='width:{percent}%'></i></div></div>"
+            f"<span class='batch-task-status'>{label}</span></article>"
+        )
+    rows.append("</section>")
+    return "".join(rows)
+
+
+def render_batch_preview_page(items: list[dict[str, Any]] | None, page_label: str | None, page_size: int = 6):
+    records = list(items or [])
+    pages = max(1, (len(records) + page_size - 1) // page_size)
+    match = re.search(r"(\d+)", str(page_label or "1"))
+    page = min(pages, max(1, int(match.group(1)) if match else 1))
+    start = (page - 1) * page_size
+    gallery = []
+    for item in records[start : start + page_size]:
+        result = item.get("result", {})
+        image_path = (result.get("visual_assets") or {}).get("result")
+        if image_path and Path(image_path).exists():
+            gallery.append((image_path, f"{item.get('image_name', '-')}｜{status_text(result)}｜疑似区域 {result.get('box_count', 0)} 个"))
+    choices = [f"第 {idx} / {pages} 页" for idx in range(1, pages + 1)]
+    return gr.Dropdown(choices=choices, value=choices[page - 1], interactive=pages > 1, visible=bool(records)), gr.update(value=gallery, visible=bool(gallery))
+
+
+def single_compare_slider_update(result: dict[str, Any] | None):
+    assets = (result or {}).get("visual_assets") or {}
+    original = assets.get("original")
+    annotated = assets.get("result")
+    if not original or not annotated or not Path(original).exists() or not Path(annotated).exists():
+        return gr.update(value=None, visible=False)
+    return gr.update(value=(original, annotated), visible=True, slider_position=50)
+
+
+def latest_single_compare_slider_update() -> Any:
+    return single_compare_slider_update(get_latest_ai_context().get("detection"))
+
+
+def comparison_slider_outputs(results: list[dict[str, Any]] | None) -> tuple[Any, Any, Any]:
+    updates: list[Any] = []
+    for result in list(results or [])[:3]:
+        assets = result.get("visual_assets") or {}
+        original = assets.get("original")
+        annotated = assets.get("result")
+        available = bool(original and annotated and Path(original).exists() and Path(annotated).exists())
+        updates.append(gr.update(value=(original, annotated) if available else None, visible=available, slider_position=50))
+    while len(updates) < 3:
+        updates.append(gr.update(value=None, visible=False))
+    return tuple(updates)
+
+
+def comparison_slider_output(results: list[dict[str, Any]] | None, index: int) -> Any:
+    records = list(results or [])
+    if index < 0 or index >= len(records):
+        return gr.update(value=None, visible=False)
+    assets = records[index].get("visual_assets") or {}
+    original = assets.get("original")
+    annotated = assets.get("result")
+    available = bool(original and annotated and Path(original).exists() and Path(annotated).exists())
+    return gr.update(value=(original, annotated) if available else None, visible=available, slider_position=50)
+
+
+def latest_comparison_slider_output(index: int) -> Any:
+    return comparison_slider_output(get_latest_ai_context().get("comparison"), index)
+
+
+def latest_batch_slider_output() -> Any:
+    items = get_latest_ai_context().get("batch_items") or []
+    return batch_selected_compare_update(items, batch_image_default_choice(items))
+
+
+def latest_batch_image_selector_output() -> Any:
+    """Restore the batch image selector after the streaming job fully settles."""
+    items = get_latest_ai_context().get("batch_items") or []
+    choices = batch_image_choices(items)
+    selected = batch_image_default_choice(items)
+    return gr.update(
+        choices=choices,
+        value=selected,
+        visible=bool(choices),
+        interactive=bool(choices),
+    )
+
+
+def latest_batch_report_outputs() -> tuple[Any, ...]:
+    return generate_batch_report_outputs(get_latest_ai_context().get("batch_items") or [])
+
+
+def latest_batch_retry_controls() -> tuple[Any, Any, Any]:
+    return batch_failed_retry_controls(get_latest_ai_context().get("batch_items") or [])
+
+
+def batch_selected_compare_update(items: list[dict[str, Any]] | None, selected_image: str | None):
+    records = list(items or [])
+    match = re.search(r"图片\s*(\d+)", str(selected_image or ""))
+    index = int(match.group(1)) - 1 if match else 0
+    if not records or index < 0 or index >= len(records):
+        return gr.update(value=None, visible=False)
+    result = records[index].get("result", {})
+    assets = result.get("visual_assets") or {}
+    original = assets.get("original")
+    annotated = assets.get("result")
+    if not original or not annotated or not Path(original).exists() or not Path(annotated).exists():
+        return gr.update(value=None, visible=False)
+    return gr.update(value=(original, annotated), visible=True, slider_position=50)
+
+
+def batch_failed_retry_controls(items: list[dict[str, Any]] | None):
+    failed_choices = []
+    for index, item in enumerate(items or [], 1):
+        result = item.get("result", {}) if isinstance(item, dict) else {}
+        if result.get("status") != "success":
+            failed_choices.append(
+                f"图片{index}｜{item.get('image_name', f'图片{index}')}｜{status_text(result)}"
+            )
+    visible = bool(failed_choices)
+    return (
+        gr.update(choices=failed_choices, value=failed_choices[0] if failed_choices else None, visible=visible),
+        gr.update(visible=visible),
+        gr.update(visible=visible),
+    )
+
+
+def uploaded_batch_tasks(files: list[Any] | None) -> str:
+    records = [{"image_name": image_display_name(file_obj, f"图片 {index}"), "result": {}} for index, file_obj in enumerate(files or [], 1)]
+    if not records:
+        return ""
+    rows = ["<section class='batch-task-list' aria-label='批量检测任务列表'><header><b>任务队列</b><span>等待开始检测</span></header>"]
+    for index, item in enumerate(records, 1):
+        rows.append(
+            f"<article class='batch-task-row pending'><span class='batch-task-index'>{index:02d}</span>"
+            f"<div class='batch-task-main'><b>{xml_escape(item['image_name'])}</b><div class='batch-task-track'><i></i></div></div>"
+            "<span class='batch-task-status'>等待</span></article>"
+        )
+    rows.append("</section>")
+    return "".join(rows)
+
+
+def uploaded_batch_preview(files: list[Any] | None) -> Any:
+    gallery: list[tuple[Image.Image, str]] = []
+    for index, file_obj in enumerate(files or [], 1):
+        raw_path = getattr(file_obj, "name", None) or file_obj
+        if not raw_path:
+            continue
+        path = Path(str(raw_path))
+        if path.exists():
+            try:
+                with Image.open(path) as source:
+                    preview = ImageOps.exif_transpose(source).convert("RGB")
+                    preview.thumbnail((520, 320), Image.Resampling.LANCZOS)
+                    gallery.append((preview.copy(), image_display_name(file_obj, f"图片 {index}")))
+            except Exception:
+                continue
+    return gr.update(value=gallery, visible=bool(gallery))
 
 
 def overall_review_level(result: dict[str, Any]) -> str:
@@ -1068,6 +1545,19 @@ def run_detection_core(
         return empty_result(model_key, "inference_failed", None, process_steps, str(exc)), None
 
     source_image_sha256 = image_fingerprint(pil_image)
+    cache_key = inference_cache_key(
+        source_image_sha256,
+        model_key,
+        conf,
+        iou,
+        show_label,
+        show_confidence,
+        line_width,
+        color_mode,
+    )
+    cached = get_cached_inference(cache_key)
+    if cached is not None:
+        return cached
 
     step = start_step(process_steps, "图像预处理")
     np_image = np.asarray(pil_image)
@@ -1089,7 +1579,16 @@ def run_detection_core(
     step = start_step(process_steps, "模型推理")
     inference_start = time.perf_counter()
     try:
-        predictions = model.predict(source=np_image, conf=float(conf), iou=float(iou), device=DEVICE, verbose=False)
+        with torch.inference_mode():
+            predictions = model.predict(
+                source=np_image,
+                conf=float(conf),
+                iou=float(iou),
+                imgsz=INFERENCE_IMAGE_SIZE,
+                max_det=100,
+                device=DEVICE,
+                verbose=False,
+            )
     except Exception:
         finish_step(process_steps, "模型推理", step, "失败", MODEL_INFERENCE_FAILED_MSG)
         result = empty_result(model_key, "inference_failed", pil_image, process_steps, MODEL_INFERENCE_FAILED_MSG)
@@ -1103,10 +1602,14 @@ def run_detection_core(
     boxes: list[dict[str, Any]] = []
     names = getattr(model, "names", {}) or getattr(pred, "names", {}) or {}
     if pred is not None and getattr(pred, "boxes", None) is not None:
-        for raw in pred.boxes:
-            cls_id = int(raw.cls.detach().cpu().numpy()[0])
-            confidence = float(raw.conf.detach().cpu().numpy()[0])
-            xyxy = raw.xyxy.detach().cpu().numpy()[0].tolist()
+        raw_boxes = pred.boxes
+        class_ids = raw_boxes.cls.detach().cpu().numpy().astype(np.int32, copy=False)
+        confidence_values = raw_boxes.conf.detach().cpu().numpy()
+        coordinates = raw_boxes.xyxy.detach().cpu().numpy()
+        for cls_value, conf_value, raw_xyxy in zip(class_ids, confidence_values, coordinates):
+            cls_id = int(cls_value)
+            confidence = float(conf_value)
+            xyxy = raw_xyxy.tolist()
             x1, y1, x2, y2 = [round(float(v), 2) for v in xyxy]
             area_ratio = max(0.0, (x2 - x1) * (y2 - y1) / max(1, width * height))
             level, suggestion = risk_level(confidence)
@@ -1155,6 +1658,7 @@ def run_detection_core(
     }
     finish_step(process_steps, "报告数据准备完成", step, message="结构化结果已生成。")
     result["total_time_ms"] = round((time.perf_counter() - total_start) * 1000, 2)
+    cache_inference_result(cache_key, result, rendered)
     return result, rendered
 
 
@@ -1241,7 +1745,7 @@ def run_single_detection(
     yield (
         detection_progress_update(88, "正在整理检测结果", "正在生成检测框、结构化表格、类别解释和复核建议。"),
         detection_empty_state_update("single", False),
-        gr.update(value=rendered if rendered is not None else None, visible=rendered is not None),
+        gr.update(value=None, visible=False),
         gr.update(value=detection_summary_cards(None), visible=False),
         gr.update(value=[], visible=False),
         gr.update(value="正在整理结果。", visible=False),
@@ -1267,22 +1771,19 @@ def run_single_detection(
     attach_result_traceability(result)
     record_detection_history(result, "single_detection")
     update_latest_ai_context(detection=result)
-    image_out = rendered if rendered is not None else None
     choices = region_choices(result)
     progress(1.0, desc="单图检测完成")
     yield (
         detection_progress_hide(),
         detection_empty_state_update("single", False),
-        gr.update(value=image_out, visible=True),
+        gr.update(value=None, visible=False),
         gr.update(value=detection_summary_cards(result), visible=True),
         gr.update(value=result_to_box_rows(result), visible=True),
         gr.update(value=explanation_markdown(result), visible=True),
         gr.update(value=class_knowledge_cards(result), visible=True),
         result,
         gr.Dropdown(choices=choices, value=choices[0] if choices else None),
-        *dashboard_outputs(),
-        registry_status_markdown(),
-        history_rows(),
+        *deferred_dashboard_outputs(),
     )
 
 
@@ -1454,14 +1955,14 @@ def render_fusion_view(image: Any, results: list[dict[str, Any]] | None, filter_
     draw = ImageDraw.Draw(out)
     font = ImageFont.load_default()
     rows: list[list[Any]] = []
+    fusion_labels: list[tuple[list[float], str, tuple[int, int, int]]] = []
     for item in groups:
         x1, y1, x2, y2 = item["融合框"]
         high = item["一致性等级"] == "高一致性疑似区域"
         color = (22, 163, 74) if high else (225, 29, 72)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
         label = f"{item['区域编号']} {item['类别']}"
-        draw.rectangle([x1, max(0, y1 - 18), x1 + max(70, len(label) * 7), y1], fill=color)
-        draw.text((x1 + 3, max(0, y1 - 16)), label, fill=(0, 0, 0), font=font)
+        fusion_labels.append(([x1, y1, x2, y2], label, color))
         rows.append(
             [
                 item["区域编号"],
@@ -1472,6 +1973,15 @@ def render_fusion_view(image: Any, results: list[dict[str, Any]] | None, filter_
                 item["复核建议"],
             ]
         )
+    occupied_labels: list[tuple[int, int, int, int]] = []
+    for bbox, label, color in fusion_labels:
+        text_bbox = draw.textbbox((0, 0), label, font=font)
+        label_width = max(70, text_bbox[2] - text_bbox[0] + 8)
+        label_height = max(18, text_bbox[3] - text_bbox[1] + 6)
+        label_rect = place_detection_label(bbox, (label_width, label_height), out.size, occupied_labels)
+        draw.rounded_rectangle(label_rect, radius=3, fill=color)
+        draw.text((label_rect[0] + 4, label_rect[1] + 3), label, fill=(0, 0, 0), font=font)
+        occupied_labels.append(label_rect)
     high_count = sum(1 for item in all_groups if item["一致性等级"] == "高一致性疑似区域")
     low_count = len(all_groups) - high_count
     message = (
@@ -1502,14 +2012,25 @@ def system_recommendation(results: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def model_comparison_progress_outputs(percent: float, title: str, detail: str, rendered_images: list[Any] | None = None) -> tuple[Any, ...]:
+def model_comparison_progress_outputs(
+    percent: float,
+    title: str,
+    detail: str,
+    rendered_images: list[Any] | None = None,
+    original_image: Any | None = None,
+) -> tuple[Any, ...]:
     rendered_images = rendered_images or []
-    image_updates = [
-        gr.update(value=rendered_images[index], visible=True) if index < len(rendered_images) and rendered_images[index] is not None else gr.update(value=None, visible=False)
-        for index in range(3)
-    ]
+    try:
+        original = display_image(original_image) if original_image is not None else None
+    except Exception:
+        original = None
+    image_updates = (
+        [gr.update(value=None, visible=False) for _ in range(3)]
+        if not rendered_images
+        else [gr.skip(), gr.skip(), gr.skip()]
+    )
     return (
-        gr.update(value=build_detection_progress_state(percent, title, detail), visible=True),
+        detection_progress_update(percent, title, detail),
         detection_empty_state_update("compare", False),
         *image_updates,
         gr.update(value=[], visible=False),
@@ -1530,6 +2051,10 @@ def model_comparison_progress_outputs(percent: float, title: str, detail: str, r
     )
 
 
+def render_latest_fusion_view(image: Any, filter_mode: str = "全部区域") -> tuple[Image.Image | None, list[list[Any]], str]:
+    return render_fusion_view(image, get_latest_ai_context().get("comparison"), filter_mode)
+
+
 @gated_inference_job(20, "compare", "多模型会诊")
 def run_model_comparison(
     image: Any,
@@ -1541,10 +2066,11 @@ def run_model_comparison(
     color_mode: str,
     progress=gr.Progress(track_tqdm=False),
 ):
-    yield model_comparison_progress_outputs(5, "多模型会诊准备中", "正在读取上传影像，并准备依次运行三个模型。")
+    yield model_comparison_progress_outputs(5, "多模型会诊准备中", "正在读取上传影像，并准备依次运行三个模型。", original_image=image)
     with INFERENCE_JOB_LOCK:
         results = []
         rendered_images = []
+        shared_original_asset: str | None = None
         for index, spec in enumerate(MODEL_SPECS, 1):
             progress((index - 1) / max(1, len(MODEL_SPECS)), desc=f"正在运行模型对比：{spec.name}（{index}/{len(MODEL_SPECS)}）")
             yield model_comparison_progress_outputs(
@@ -1552,6 +2078,7 @@ def run_model_comparison(
                 f"正在运行模型 {index}/{len(MODEL_SPECS)}",
                 f"{spec.name} 正在推理，请稍候。",
                 rendered_images,
+                image,
             )
             result, rendered = run_detection_core(image, spec.key, conf, iou, show_label, show_confidence, line_width, color_mode)
             result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
@@ -1561,7 +2088,14 @@ def run_model_comparison(
                 "line_width": int(line_width),
                 "color_mode": color_mode,
             }
-            attach_visual_assets(image, rendered, result, f"comparison_m{index}_{spec.key}")
+            attach_visual_assets(
+                image,
+                rendered,
+                result,
+                f"comparison_m{index}_{spec.key}",
+                original_asset_path=shared_original_asset,
+            )
+            shared_original_asset = (result.get("visual_assets") or {}).get("original") or shared_original_asset
             attach_result_traceability(result)
             results.append(result)
             rendered_images.append(rendered)
@@ -1570,32 +2104,29 @@ def run_model_comparison(
                 f"模型 {index}/{len(MODEL_SPECS)} 已完成",
                 f"{spec.name} 已生成结果，继续处理后续模型。",
                 rendered_images,
+                image,
             )
         progress(0.9, desc="正在生成模型一致性与融合视图…")
-        yield model_comparison_progress_outputs(92, "正在生成一致性分析", "正在整理三模型差异、融合区域和复核提示。", rendered_images)
+        yield model_comparison_progress_outputs(92, "正在生成一致性分析", "正在整理三模型差异、融合区域和复核提示。", rendered_images, image)
         append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
         update_latest_ai_context(comparison=results)
         summary = compare_summary(results) + "\n\n" + system_recommendation(results)
-        fusion_image, fusion_rows, fusion_note = render_fusion_view(image, results)
         linked_choices = comparison_region_choices(results)
+        slider_updates = comparison_slider_outputs(results)
         progress(1.0, desc="多模型对比完成")
         yield (
-            gr.update(value=build_detection_progress_state(100, "多模型会诊完成", "已生成三模型结果、对比表和融合视图。"), visible=False),
+            detection_progress_hide(),
             detection_empty_state_update("compare", False),
-            gr.update(value=rendered_images[0], visible=True),
-            gr.update(value=rendered_images[1], visible=True),
-            gr.update(value=rendered_images[2], visible=True),
+            *slider_updates,
             gr.update(value=compare_rows(results), visible=True),
             gr.update(value=consistency_rows(results), visible=True),
             gr.update(value=summary, visible=True),
             results,
-            gr.update(value=fusion_image, visible=True),
-            gr.update(value=fusion_rows, visible=True),
-            gr.update(value=fusion_note, visible=True),
+            gr.update(value=None, visible=False),
+            gr.update(value=[], visible=False),
+            gr.update(value="正在准备融合视图。", visible=False),
             gr.Dropdown(choices=linked_choices, value=linked_choices[0] if linked_choices else None),
-            *dashboard_outputs(),
-            registry_status_markdown(),
-            history_rows(),
+            *deferred_dashboard_outputs(),
         )
 
 
@@ -1954,6 +2485,33 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     return str(md_path), str(csv_path)
 
 
+def generate_batch_report_outputs(items: list[dict[str, Any]] | None) -> tuple[Any, ...]:
+    """Generate downloadable reports after the detection result is already visible."""
+    if not items:
+        return "尚未生成批量报告预览。", gr.update(value=[], visible=False), None, None
+    try:
+        md_path, csv_path = export_batch_report(items)
+        preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告未能生成。"
+        return markdown_for_gradio_preview(preview_raw), gr.update(value=[], visible=False), md_path, csv_path
+    except Exception as exc:
+        return f"> 批量报告生成失败：{exc}", gr.update(value=[], visible=False), None, None
+
+
+def batch_detection_running_outputs(
+    progress_update: Any,
+    rows: list[list[Any]] | None = None,
+    preview: list[tuple[Image.Image, str]] | None = None,
+) -> tuple[Any, ...]:
+    """Keep streaming updates small so large batches do not congest Gradio's queue."""
+    return (
+        progress_update,
+        detection_empty_state_update("batch", False),
+        gr.update(value=rows, visible=True) if rows is not None else gr.skip(),
+        gr.update(value=preview, visible=True) if preview is not None else gr.skip(),
+        *[gr.skip() for _ in range(16)],
+    )
+
+
 @gated_inference_job(20, "batch", "批量筛查")
 def run_batch_detection(
     files: list[Any] | None,
@@ -1988,11 +2546,20 @@ def run_batch_detection(
         )
         return
     model_key = model_name_to_key(model_name)
+    submitted_files = list(files)
+    batch_limit = min(BATCH_MAX_IMAGES, 3) if model_key == "high_precision" else BATCH_MAX_IMAGES
+    deferred_files = submitted_files[batch_limit:]
+    files = submitted_files[:batch_limit]
     items: list[dict[str, Any]] = []
     preview: list[tuple[Image.Image, str]] = []
     total_files = len(files)
+    queue_note = (
+        f"为保证本轮在 30 秒内完成，当前模型单批最多处理 {batch_limit} 张；其余 {len(deferred_files)} 张已标记为待分批处理。"
+        if deferred_files
+        else f"已接收 {total_files} 张影像，正在准备批量检测队列。"
+    )
     yield (
-        detection_progress_update(4, "批量筛查准备中", f"已接收 {total_files} 张影像，正在准备批量检测队列。"),
+        detection_progress_update(4, "批量筛查准备中", queue_note),
         detection_empty_state_update("batch", False),
         gr.update(value=[], visible=False),
         gr.update(value=[], visible=False),
@@ -2017,34 +2584,30 @@ def run_batch_detection(
         image_name = image_display_name(file_obj, f"图片{idx}")
         start_percent = 8 + int(((idx - 1) / max(1, total_files)) * 76)
         progress((idx - 1) / max(1, total_files), desc=f"正在处理批量图片 {idx}/{total_files}")
-        yield (
+        yield batch_detection_running_outputs(
             detection_progress_update(
                 start_percent,
                 f"正在处理第 {idx}/{total_files} 张",
                 f"{image_name} 正在执行 YOLO CPU 推理，单张影像较大时可能需要几十秒。",
-            ),
-            detection_empty_state_update("batch", False),
-            gr.update(value=[batch_result_row(item) for item in items], visible=bool(items)),
-            gr.update(value=preview, visible=bool(preview)),
-            gr.update(choices=[], value=None, visible=False),
-            gr.update(value="批量检测进行中，请稍候。", visible=False),
-            gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
-            "尚未生成批量报告预览。",
-            gr.update(value=[], visible=False),
-            None,
-            None,
-            items,
-            gr.Dropdown(choices=[], value=None),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
+            )
         )
-        with INFERENCE_JOB_LOCK:
-            result, rendered = run_detection_core(file_obj, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        try:
+            prepared_image = normalize_image(file_obj)
+        except Exception as exc:
+            prepared_image = None
+            result = empty_result(model_key, "inference_failed", None, [], f"该图片读取失败：{exc}")
+            rendered = None
+        try:
+            if prepared_image is not None:
+                with INFERENCE_JOB_LOCK:
+                    result, rendered = run_detection_core(prepared_image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        except Exception as exc:
+            try:
+                fallback_image = prepared_image or normalize_image(file_obj)
+            except Exception:
+                fallback_image = None
+            result = empty_result(model_key, "inference_failed", fallback_image, [], f"该图片处理失败：{exc}")
+            rendered = fallback_image
         result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
         result["visual_options"] = {
             "show_label": bool(show_label),
@@ -2052,90 +2615,70 @@ def run_batch_detection(
             "line_width": int(line_width),
             "color_mode": color_mode,
         }
-        attach_visual_assets(file_obj, rendered, result, f"batch_{idx}_{image_name}_{model_key}")
+        attach_visual_assets(prepared_image or file_obj, rendered, result, f"batch_{idx}_{image_name}_{model_key}")
         attach_result_traceability(result)
         result["image_name"] = image_name
         item = {"image_name": image_name, "result": result}
         items.append(item)
-        if rendered is not None and len(preview) < 6:
-            preview.append((rendered, f"{image_name}｜{status_text(result)}｜疑似区域 {result.get('box_count', 0)} 个"))
+        result_asset = (result.get("visual_assets") or {}).get("result")
+        if result_asset and Path(result_asset).exists() and len(preview) < 6:
+            preview.append((result_asset, f"{image_name}｜{status_text(result)}｜疑似区域 {result.get('box_count', 0)} 个"))
         done_percent = 8 + int((idx / max(1, total_files)) * 76)
-        yield (
+        yield batch_detection_running_outputs(
             detection_progress_update(
                 done_percent,
                 f"第 {idx}/{total_files} 张已完成",
                 f"{image_name} 已完成检测，正在继续处理剩余影像。",
             ),
-            detection_empty_state_update("batch", False),
-            gr.update(value=[batch_result_row(item) for item in items], visible=True),
-            gr.update(value=preview, visible=bool(preview)),
-            gr.update(choices=[], value=None, visible=False),
-            gr.update(value="批量检测进行中，请稍候。", visible=False),
-            gr.update(value=batch_image_knowledge_html(items, batch_image_default_choice(items))),
-            "尚未生成批量报告预览。",
-            gr.update(value=[], visible=False),
-            None,
-            None,
-            items,
-            gr.Dropdown(choices=[], value=None),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
+            rows=[batch_result_row(item) for item in items],
+            preview=None,
         )
-    yield (
-        detection_progress_update(92, "正在生成批量报告", "正在汇总表格、图片预览、报告文件和联动放大区域。"),
-        detection_empty_state_update("batch", False),
-        gr.update(value=[batch_result_row(item) for item in items], visible=True),
-        gr.update(value=preview, visible=bool(preview)),
-        gr.update(choices=[], value=None, visible=False),
-        gr.update(value="正在生成批量汇总。", visible=False),
-        gr.update(value=batch_image_knowledge_html(items, batch_image_default_choice(items))),
-        "正在生成批量报告预览。",
-        gr.update(value=[], visible=False),
-        None,
-        None,
-        items,
-        gr.Dropdown(choices=[], value=None),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
+    for deferred_index, file_obj in enumerate(deferred_files, total_files + 1):
+        image_name = image_display_name(file_obj, f"图片{deferred_index}")
+        deferred_result = empty_result(
+            model_key,
+            "inference_failed",
+            None,
+            [],
+            f"超过当前模型单批 {batch_limit} 张的实时处理上限，请将该图片放入下一批重试。",
+        )
+        deferred_result["image_name"] = image_name
+        deferred_result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
+        items.append({"image_name": image_name, "result": deferred_result})
+    yield batch_detection_running_outputs(
+        detection_progress_update(92, "正在整理批量结果", "正在整理结果表、图片预览和联动查看区域。"),
+        rows=[batch_result_row(item) for item in items],
     )
-    append_history({"type": "batch_detection", "created_at": now_iso(), "items": items})
+    result_errors: list[str] = []
+    try:
+        append_history({"type": "batch_detection", "created_at": now_iso(), "items": items})
+    except Exception as exc:
+        result_errors.append(f"历史记录保存失败：{exc}")
     update_latest_ai_context(batch_items=items)
-    md_path, csv_path = export_batch_report(items)
     rows = [batch_result_row(item) for item in items]
     linked_choices = batch_region_choices(items)
     image_choices = batch_image_choices(items)
     selected_image = batch_image_default_choice(items)
-    report_preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告生成失败。"
-    report_preview = markdown_for_gradio_preview(report_preview_raw)
-    report_gallery = report_visual_gallery("批量检测报告", {}, [], items)
+    report_preview = "> 检测结果已显示，Markdown 与 CSV 报告正在后台生成。"
+    report_gallery: list[Any] = []
+    if result_errors:
+        report_preview += "\n\n> " + "；".join(result_errors)
     progress(1.0, desc="批量检测完成")
     yield (
         detection_progress_hide(),
         detection_empty_state_update("batch", False),
         gr.update(value=rows, visible=True),
-        gr.update(value=preview, visible=True),
-        gr.update(choices=image_choices, value=selected_image, visible=True),
+        gr.skip(),
+        gr.Dropdown(choices=image_choices, value=selected_image, visible=True, interactive=True),
         gr.update(value=batch_image_explanation_markdown(items, selected_image), visible=True),
         gr.update(value=batch_image_knowledge_html(items, selected_image)),
         report_preview,
         gr.update(value=report_gallery, visible=bool(report_gallery)),
-        md_path,
-        csv_path,
+        None,
+        None,
         items,
         gr.Dropdown(choices=linked_choices, value=linked_choices[0] if linked_choices else None),
-        *dashboard_outputs(),
-        registry_status_markdown(),
-        history_rows(),
+        *deferred_dashboard_outputs(),
     )
 
 
@@ -2158,6 +2701,55 @@ def reset_batch_detection_outputs():
         *dashboard_outputs(),
         registry_status_markdown(),
         history_rows(),
+    )
+
+
+@gated_inference_job(7, "batch_retry", "批量单项重试")
+def retry_batch_item(
+    items: list[dict[str, Any]] | None,
+    selected_image: str | None,
+    model_name: str,
+    conf: float,
+    iou: float,
+    show_label: bool,
+    show_confidence: bool,
+    line_width: int,
+    color_mode: str,
+):
+    records = copy.deepcopy(items or [])
+    match = re.search(r"图片\s*(\d+)", str(selected_image or ""))
+    index = int(match.group(1)) - 1 if match else 0
+    if not records or index < 0 or index >= len(records):
+        yield detection_progress_update(0, "无法重试", "请先完成批量检测并选择一张图片。"), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        return
+    item = records[index]
+    original = load_visual_asset(item.get("result", {}), "original")
+    if original is None:
+        yield detection_progress_update(0, "无法重试", "未找到该图片的原始影像产物，请重新上传。"), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        return
+    yield (
+        detection_progress_update(24, "正在重试所选图片", f"{item.get('image_name', f'图片{index + 1}')} 正在重新执行推理。"),
+        batch_task_list_html(records[:index], total=len(records), active_index=index + 1),
+        gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+    )
+    model_key = model_name_to_key(model_name)
+    with INFERENCE_JOB_LOCK:
+        result, rendered = run_detection_core(original, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+    result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
+    result["visual_options"] = {"show_label": bool(show_label), "show_confidence": bool(show_confidence), "line_width": int(line_width), "color_mode": color_mode}
+    result["image_name"] = item.get("image_name", f"图片{index + 1}")
+    attach_visual_assets(original, rendered, result, f"batch_retry_{index + 1}_{result['image_name']}_{model_key}")
+    attach_result_traceability(result)
+    records[index] = {"image_name": result["image_name"], "result": result}
+    update_latest_ai_context(batch_items=records)
+    yield (
+        detection_progress_hide(),
+        batch_task_list_html(records),
+        gr.update(value=[batch_result_row(record) for record in records], visible=True),
+        gr.skip(),
+        gr.update(value=batch_image_explanation_markdown(records, batch_image_choices(records)[index]), visible=True),
+        gr.update(value=batch_image_knowledge_html(records, batch_image_choices(records)[index])),
+        records,
     )
 
 
@@ -2193,6 +2785,20 @@ def history_event_rows(events: list[dict[str, Any]]) -> list[list[Any]]:
 
 def history_rows() -> list[list[Any]]:
     return history_event_rows(load_history().get("events", []))
+
+
+def output_storage_bytes() -> int | None:
+    now = time.time()
+    if now - float(OUTPUT_STORAGE_CACHE.get("checked_at", 0.0)) < OUTPUT_CLEANUP_INTERVAL_SECONDS:
+        value = OUTPUT_STORAGE_CACHE.get("value")
+        return int(value) if value is not None else None
+    try:
+        value = sum(path.stat().st_size for path in OUTPUT_DIR.rglob("*") if path.is_file())
+    except OSError:
+        cached = OUTPUT_STORAGE_CACHE.get("value")
+        value = int(cached) if cached is not None else 0
+    OUTPUT_STORAGE_CACHE.update({"value": value, "checked_at": now})
+    return value
 
 
 def history_summary_markdown(rows: list[list[Any]] | None = None) -> str:
@@ -2272,9 +2878,67 @@ def history_detail_markdown(selected: str | None) -> str:
 def refresh_history_view(task_filter: str = "全部任务", review_filter: str = "全部复核等级") -> tuple[str, list[list[Any]], Any, str, str]:
     rows = filter_history_rows(task_filter, review_filter)
     options = history_detail_options(rows)
-    notice = "暂无检测历史，请先上传图片并运行检测。" if not rows else f"当前筛选后共 {len(rows)} 条记录。"
+    visible_rows = list(reversed(rows))[:20]
+    pages = max(1, (len(rows) + 19) // 20)
+    notice = "暂无检测历史，请先上传图片并运行检测。" if not rows else f"当前筛选后共 {len(rows)} 条记录，第 1/{pages} 页。"
     detail = history_detail_markdown(options[-1] if options else None)
-    return history_summary_markdown(rows), rows, gr.Dropdown(choices=options, value=options[-1] if options else None), detail, notice
+    return history_summary_markdown(rows), visible_rows, gr.Dropdown(choices=options, value=options[-1] if options else None), detail, notice
+
+
+def paged_history_view(task_filter: str = "全部任务", review_filter: str = "全部复核等级", page_label: str = "第 1 页"):
+    rows = list(reversed(filter_history_rows(task_filter, review_filter)))
+    page_size = 20
+    pages = max(1, (len(rows) + page_size - 1) // page_size)
+    match = re.search(r"(\d+)", str(page_label or "1"))
+    page = min(pages, max(1, int(match.group(1)) if match else 1))
+    visible_rows = rows[(page - 1) * page_size : page * page_size]
+    choices = [f"第 {index} / {pages} 页" for index in range(1, pages + 1)]
+    return visible_rows, gr.Dropdown(choices=choices, value=choices[page - 1], interactive=pages > 1), f"当前筛选共 {len(rows)} 条，第 {page}/{pages} 页。"
+
+
+def history_thumbnail_gallery(limit: int = 12) -> list[tuple[str, str]]:
+    gallery: list[tuple[str, str]] = []
+    for event in reversed(load_history().get("events", [])):
+        pairs: list[tuple[str, dict[str, Any]]] = []
+        if event.get("type") == "single_detection":
+            pairs.append((event.get("image_name", "单图检测"), event.get("result", {})))
+        elif event.get("type") == "model_comparison":
+            pairs.extend((event.get("image_name", "多模型对比"), result) for result in event.get("results", []))
+        elif event.get("type") == "batch_detection":
+            pairs.extend((item.get("image_name", "批量图片"), item.get("result", {})) for item in event.get("items", []))
+        for name, result in pairs:
+            path = (result.get("visual_assets") or {}).get("result") or (result.get("visual_assets") or {}).get("original")
+            if path and Path(path).exists():
+                gallery.append((str(path), f"{name}｜{status_text(result)}｜{overall_review_level(result)}"))
+                if len(gallery) >= limit:
+                    return gallery
+    return gallery
+
+
+def recent_reports_html(limit: int = 10) -> str:
+    ensure_dirs()
+    files = []
+    for path in REPORT_DIR.glob("*"):
+        try:
+            if path.is_file() and path.suffix.lower() in {".md", ".pdf", ".docx", ".csv"}:
+                stat = path.stat()
+                files.append((path, stat.st_mtime, stat.st_size))
+        except OSError:
+            continue
+    files.sort(key=lambda item: item[1], reverse=True)
+    if not files:
+        return "<div class='report-recent-empty'>暂无已生成报告。</div>"
+    rows = ["<section class='report-recent-list' aria-label='最近报告'><header><b>最近报告</b><span>已生成文件</span></header>"]
+    for path, mtime, size in files[:limit]:
+        size_text = f"{size / 1024:.1f} KB" if size < 1024**2 else f"{size / 1024**2:.1f} MB"
+        rows.append(
+            "<article class='report-recent-item'>"
+            f"<div class='report-cover-mini'>{xml_escape(path.suffix[1:].upper())}</div>"
+            f"<div><b>{xml_escape(path.stem[:72])}</b><span>{datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')} · {size_text}</span></div>"
+            "<strong>已完成</strong></article>"
+        )
+    rows.append("</section>")
+    return "".join(rows)
 
 
 def export_history_csv() -> str | None:
@@ -4251,6 +4915,29 @@ def effective_suggestion_scope(scope: str, latest: dict[str, Any]) -> str:
     return requested
 
 
+def assistant_evidence_links(
+    scope: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    if scope in {"当前单图检测", "全部最新结果"} and detection:
+        for index, choice in enumerate(region_choices(detection), 1):
+            links.append({"label": f"单图 · 区域 {index}", "page": "image", "target": "det-region-selector", "choice": choice})
+    if scope in {"当前多模型对比", "全部最新结果"}:
+        for choice in comparison_region_choices(comparison):
+            prefix = " · ".join(part.strip() for part in choice.split("｜")[:3])
+            links.append({"label": prefix, "page": "compare", "target": "cmp-region-selector", "choice": choice})
+    if scope in {"当前批量任务", "全部最新结果"}:
+        for choice in batch_region_choices(batch_items):
+            parts = choice.split("｜")
+            label = " · ".join(part.strip() for part in (parts[0], parts[2] if len(parts) > 2 else ""))
+            links.append({"label": label, "page": "batch", "target": "batch-region-selector", "choice": choice})
+    return links[:limit]
+
+
 def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
     session_id = normalize_session_id(payload.session_id)
     user_message = chat_content_to_text(payload.message).strip()
@@ -4314,6 +5001,7 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
         "elapsed_seconds": elapsed_seconds,
         "message_id": f"assistant-{uuid.uuid4().hex}",
         "suggested_questions": assistant_suggested_questions(scope, detection, comparison, batch_items, user_message, content),
+        "evidence_links": assistant_evidence_links(scope, detection, comparison, batch_items),
         "source": source_note,
         "pending_for_next_answer": bool(feedback_after.get("pending_for_next_answer")),
         "consumed_count": int(feedback_after.get("consumed_count", 0) or 0),
@@ -4621,12 +5309,17 @@ def report_visual_gallery(
         remaining = max_regions - region_count
         if remaining <= 0:
             break
-        for caption, _, annotated_path in report_region_crop_assets(source, result, remaining):
-            try:
-                gallery.append((Image.open(annotated_path).convert("RGB"), caption))
-                region_count += 1
-            except Exception:
+        original, annotated = result_original_and_annotated(None, result)
+        if original is None or annotated is None:
+            continue
+        boxes = sorted(result.get("boxes", []), key=lambda box: float(box.get("confidence", 0.0)), reverse=True)
+        for region_idx, box in enumerate(boxes[:remaining], 1):
+            _, annotated_crop = crop_region_pair(original, annotated, box)
+            if annotated_crop is None:
                 continue
+            caption = f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
+            gallery.append((annotated_crop, caption))
+            region_count += 1
             if region_count >= max_regions:
                 break
     return gallery
@@ -5248,8 +5941,8 @@ def generate_model_comparison_tab_report(comparison: list[dict[str, Any]], repor
     return generate_report("多模型对比报告", {}, comparison, [], report_language)
 
 
-def dashboard_stats() -> dict[str, Any]:
-    history = load_history()
+def dashboard_stats(history: dict[str, Any] | None = None) -> dict[str, Any]:
+    history = history if history is not None else load_history()
     events = history.get("events", [])
     image_tasks = 0
     failure_count = 0
@@ -5308,60 +6001,58 @@ def dashboard_stats() -> dict[str, Any]:
     }
 
 
-def dashboard_markdown() -> str:
-    stats = dashboard_stats()
+def dashboard_markdown(
+    stats: dict[str, Any] | None = None,
+    history: dict[str, Any] | None = None,
+    rows: list[list[Any]] | None = None,
+) -> str:
+    history = history if history is not None else load_history()
+    stats = stats if stats is not None else dashboard_stats(history)
     avg_conf = f"{stats['avg_confidence']:.3f}" if stats["avg_confidence"] else "-"
-    def detail_card(title: str, items: list[str]) -> str:
-        if not items:
-            body = "<p class='empty'>暂无可用记录</p>"
-        else:
-            body = "<ul>" + "".join(f"<li>{xml_escape(item)}</li>" for item in items) + "</ul>"
-        return f"<section class='dashboard-detail-card'><h3>{xml_escape(title)}</h3>{body}</section>"
-
-    time_items = [f"{name}：{value:.2f} ms" for name, value in stats["times_by_model"].items()]
-    conf_items = [f"{name}：{value:.3f}" for name, value in stats["conf_by_model"].items()]
-    risk_items = [f"{name}：{value}" for name, value in stats["risk_counts"].items()]
-    latest_items = []
-    if stats["last_detection"]:
-        result = stats["last_detection"]
-        latest_items.append(f"{result['model_name']}：{result['box_count']} 个疑似区域，状态 {STATUS_LABELS.get(result['status'], result['status'])}")
-        latest_items.append(f"推理耗时：{result.get('inference_time_ms', 0):.2f} ms；平均置信度：{result.get('avg_confidence', 0):.3f}")
-    comparison_items = []
-    if stats["last_comparison"]:
-        ok = successful_results(stats["last_comparison"])
-        if ok:
-            fastest = min(ok, key=lambda item: item.get("inference_time_ms", float("inf")))
-            most_boxes = max(ok, key=lambda item: item.get("box_count", 0))
-            comparison_items.extend([
-                f"速度最快：{fastest['model_name']}，{fastest['inference_time_ms']:.2f} ms",
-                f"检出最多：{most_boxes['model_name']}，{most_boxes['box_count']} 个疑似区域",
-                f"成功模型数：{len(ok)}/{len(stats['last_comparison'])}",
-            ])
+    events = history.get("events", [])
+    day_counts: dict[str, int] = {}
+    for event in events:
+        day = str(event.get("created_at", ""))[:10]
+        if day:
+            day_counts[day] = day_counts.get(day, 0) + 1
+    recent_days = sorted(day_counts)[-7:]
+    max_day = max((day_counts[day] for day in recent_days), default=1)
+    trend = "".join(
+        f"<div class='dashboard-trend-bar' title='{day}：{day_counts[day]} 个任务'><i style='height:{max(8, int(day_counts[day] / max_day * 100))}%'></i><span>{day[5:]}</span></div>"
+        for day in recent_days
+    ) or "<p class='empty'>暂无趋势数据</p>"
+    anomalies = []
+    rows = rows if rows is not None else history_event_rows(events)
+    for row in reversed(rows):
+        if str(row[8]) in {"强烈建议人工复核", "建议人工复核", "无法评估"}:
+            anomalies.append(
+                f"<li><span class='status-dot {'status-failed' if row[8] == '无法评估' else 'status-review'}'></span>"
+                f"<b>{xml_escape(str(row[2]))}</b><small>{xml_escape(str(row[1]))} · {xml_escape(str(row[8]))}</small></li>"
+            )
+        if len(anomalies) >= 6:
+            break
+    storage_bytes = output_storage_bytes()
+    storage_text = f"{storage_bytes / 1024**2:.0f} MB" if storage_bytes is not None else "后台统计"
     lines = [
-        "<div class='section-note'><b>首页 Dashboard</b><br>集中展示检测任务统计、风险等级分布、模型权重状态和最近一次辅助识别结果。</div>",
+        "<div class='section-note compact-section-note'><b>首页 Dashboard</b><br>任务指标、近期趋势和待复核异常集中展示。</div>",
         "<div class='metric-grid'>",
-        f"<div class='metric-card'><div class='metric-label'>累计检测任务数</div><div class='metric-value'>{stats['image_tasks']}</div><div class='metric-sub'>单图、多模型、批量图片合计</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>累计检测框数量</div><div class='metric-value'>{stats['target_count']}</div><div class='metric-sub'>真实 YOLO 输出疑似区域</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>失败次数</div><div class='metric-value'>{stats['failure_count']}</div><div class='metric-sub'>权重或推理失败</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>平均置信度</div><div class='metric-value'>{avg_conf}</div><div class='metric-sub'>仅统计成功结果</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>建议重点复核数量</div><div class='metric-value'>{stats['high_review_count']}</div><div class='metric-sub'>建议人工复核及以上</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>当前运行设备</div><div class='metric-value'>{DEVICE.upper()}</div><div class='metric-sub'>默认 CPU 推理</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>检测任务</div><div class='metric-value'>{stats['image_tasks']}</div><div class='metric-sub'>累计图片</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>疑似区域</div><div class='metric-value'>{stats['target_count']}</div><div class='metric-sub'>YOLO 输出</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>重点复核</div><div class='metric-value'>{stats['high_review_count']}</div><div class='metric-sub'>建议复核及以上</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>平均置信度</div><div class='metric-value'>{avg_conf}</div><div class='metric-sub'>成功结果</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>失败任务</div><div class='metric-value'>{stats['failure_count']}</div><div class='metric-sub'>需检查</div></div>",
+        f"<div class='metric-card'><div class='metric-label'>产物空间</div><div class='metric-value'>{storage_text}</div><div class='metric-sub'>自动保留 {OUTPUT_RETENTION_DAYS} 天</div></div>",
+        "</div>",
+        "<div class='dashboard-operations-grid'>",
+        f"<section class='dashboard-compact-panel'><header><b>近期任务趋势</b><span>最近 7 个活跃日</span></header><div class='dashboard-trend'>{trend}</div></section>",
+        f"<section class='dashboard-compact-panel'><header><b>异常与复核任务</b><span>最近记录</span></header><ul class='dashboard-anomaly-list'>{''.join(anomalies) if anomalies else '<li class=empty>暂无异常任务</li>'}</ul></section>",
         "</div>",
     ]
-    detail_cards = [
-        detail_card("三个模型平均推理耗时", time_items),
-        detail_card("三个模型平均置信度", conf_items),
-        detail_card("风险等级统计", risk_items),
-        detail_card("最近一次检测摘要", latest_items),
-        detail_card("最近一次多模型对比摘要", comparison_items),
-        detail_card("运行与复核提示", [f"当前运行设备：{DEVICE.upper()}", f"建议重点复核数量：{stats['high_review_count']}", "所有输出均为辅助识别结果，需人工复核。"]),
-    ]
-    lines.extend(["<div class='dashboard-detail-grid'>", *detail_cards, "</div>"])
     return "\n".join(lines)
 
 
-def dashboard_chart_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    stats = dashboard_stats()
+def dashboard_chart_data(stats: dict[str, Any] | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    stats = stats if stats is not None else dashboard_stats()
     kpi_rows = [
         {"指标": "累计检测图片任务数", "数值": int(stats["image_tasks"])},
         {"指标": "累计真实检测目标数", "数值": int(stats["target_count"])},
@@ -5390,7 +6081,10 @@ def dashboard_chart_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd
 
 
 def dashboard_outputs():
-    return (dashboard_markdown(), *dashboard_chart_data())
+    history = load_history()
+    stats = dashboard_stats(history)
+    rows = history_event_rows(history.get("events", []))
+    return (dashboard_markdown(stats, history, rows), *dashboard_chart_data(stats))
 
 
 def reset_dashboard_records():
@@ -5518,9 +6212,11 @@ def disease_education_html() -> str:
         },
     ]
     card_html = []
+    disease_keys = ("caries", "periapical", "impacted")
     for index, card in enumerate(cards, 1):
+        search_text = " ".join(str(card[key]) for key in ("title", "subtitle", "cause", "symptom", "action", "visit"))
         card_html.append(
-            "<article class='education-card'>"
+            f"<article class='education-card' data-disease='{disease_keys[index - 1]}' data-search='{xml_escape(search_text)}'>"
             "<div class='education-card-top'>"
             f"<div class='education-visual'>{card['svg']}</div>"
             "<div>"
@@ -5574,6 +6270,16 @@ def disease_education_html() -> str:
     """
     return f"""
     <section class='education-shell'>
+    <section class='education-toolbar' aria-label='牙病学习检索'>
+      <label for='disease-search-input'>关键词搜索</label>
+      <input id='disease-search-input' type='search' placeholder='搜索病变、症状或建议' autocomplete='off'>
+      <div class='education-directory' role='group' aria-label='类别目录'>
+        <button type='button' class='active' data-disease-filter='all' aria-pressed='true'>全部</button>
+        <button type='button' data-disease-filter='caries' aria-pressed='false'>龋坏</button>
+        <button type='button' data-disease-filter='periapical' aria-pressed='false'>根尖周异常</button>
+        <button type='button' data-disease-filter='impacted' aria-pressed='false'>阻生/埋伏牙</button>
+      </div>
+    </section>
     <section class='education-hero'>
       <div class='education-panel'>
         <div class='education-eyebrow'>Dental Lesion Atlas</div>
@@ -5606,6 +6312,7 @@ def disease_education_html() -> str:
     <section class='education-grid'>
     {"".join(card_html)}
     </section>
+    <p class='education-no-result' hidden>没有匹配的内容，请尝试其他关键词。</p>
     <section class='education-footer-grid'>
       <div class='education-tip'>
         <b>需要尽快就医的信号</b>
@@ -6078,6 +6785,7 @@ def native_ai_assistant_html() -> str:
           grid-column: 1 / -1;
           justify-self: end;
           width: min(100%, 430px);
+          margin-top: 30px;
           padding: 0;
           border: 0;
           background: transparent;
@@ -6475,7 +7183,7 @@ def native_ai_assistant_html() -> str:
             </label>
           <div class="native-ai-export-panel" aria-label="导出本次问答">
             <div class="native-ai-export-row">
-              <button id="native-ai-export-md" class="native-ai-export-btn export-md" type="button"><span>Markdown</span><small>.md 原文记录</small></button>
+              <button id="native-ai-export-md" class="native-ai-export-btn export-md" type="button"><span>Markdown</span><small>.md 对话记录</small></button>
               <button id="native-ai-export-pdf" class="native-ai-export-btn export-pdf" type="button"><span>PDF</span><small>打印另存归档</small></button>
             </div>
           </div>
@@ -6665,10 +7373,14 @@ def native_ai_assistant_js() -> str:
         i = table.nextIndex - 1;
       } else if (/^###\s+/.test(trimmed)) {
         closeList();
-        out.push("<h3>" + inlineMarkdown(trimmed.replace(/^###\s+/, "")) + "</h3>");
+        const heading = trimmed.replace(/^###\s+/, "");
+        const kind = /结论/.test(heading) ? "conclusion" : (/依据|检测/.test(heading) ? "evidence" : (/风险|注意/.test(heading) ? "risk" : (/建议|下一步/.test(heading) ? "next" : "general")));
+        out.push("<h3 class=\"native-ai-heading native-ai-heading-" + kind + "\">" + inlineMarkdown(heading) + "</h3>");
       } else if (/^##\s+/.test(trimmed)) {
         closeList();
-        out.push("<h2>" + inlineMarkdown(trimmed.replace(/^##\s+/, "")) + "</h2>");
+        const heading = trimmed.replace(/^##\s+/, "");
+        const kind = /结论/.test(heading) ? "conclusion" : (/依据|检测/.test(heading) ? "evidence" : (/风险|注意/.test(heading) ? "risk" : (/建议|下一步/.test(heading) ? "next" : "general")));
+        out.push("<h2 class=\"native-ai-heading native-ai-heading-" + kind + "\">" + inlineMarkdown(heading) + "</h2>");
       } else if (/^#\s+/.test(trimmed)) {
         closeList();
         out.push("<h1>" + inlineMarkdown(trimmed.replace(/^#\s+/, "")) + "</h1>");
@@ -6919,6 +7631,7 @@ def native_ai_assistant_js() -> str:
       <div class="native-ai-bubble">
         <div class="native-ai-thinking">已思考 ${elapsed}s</div>
         <div class="native-ai-md">${renderMarkdown(answer || "")}</div>
+        <div class="native-ai-evidence-links" aria-label="回答依据"></div>
         <div class="native-ai-actions">
           <button type="button" class="native-ai-action" data-action="copy" title="复制" aria-label="复制">⧉</button>
           <button type="button" class="native-ai-action" data-action="like" title="喜欢" aria-label="喜欢">👍</button>
@@ -6928,6 +7641,16 @@ def native_ai_assistant_js() -> str:
         <div class="native-ai-feedback-note"></div>
       </div>`;
     messagesEl.appendChild(row);
+    const evidenceRoot = row.querySelector(".native-ai-evidence-links");
+    (Array.isArray(options.evidenceLinks) ? options.evidenceLinks : []).forEach(item => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "native-ai-evidence-link";
+      button.textContent = "查看依据 · " + (item.label || "检测区域");
+      button.addEventListener("click", () => window.dentalJumpEvidence?.(item));
+      evidenceRoot.appendChild(button);
+    });
+    if (!evidenceRoot.children.length) evidenceRoot.remove();
     scrollBottom();
     return row;
   }
@@ -7063,7 +7786,8 @@ def native_ai_assistant_js() -> str:
       loading.remove();
       addAssistantMessage(data.answer || "未获得有效回复。", {
         elapsedSeconds: data.elapsed_seconds || 1,
-        messageId: data.message_id
+        messageId: data.message_id,
+        evidenceLinks: data.evidence_links || []
       });
       chatHistory.push({role: "assistant", content: data.answer || ""});
       if (data.context_updated_at) lastSuggestionContextAt = data.context_updated_at;
@@ -7175,10 +7899,6 @@ def build_app() -> gr.Blocks:
                   <h1 data-i18n="app_title">牙齿病变目标区域识别与辅助分析平台</h1>
                   <p data-i18n="app_subtitle">面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。</p>
                 </div>
-                <div class="app-preferences" aria-label="界面偏好">
-                  <button id="dental-lang-toggle" class="app-pref-btn" type="button">EN</button>
-                  <button id="dental-theme-toggle" class="app-pref-btn" type="button">暗色</button>
-                </div>
               </div>
             </div>
             """
@@ -7186,14 +7906,17 @@ def build_app() -> gr.Blocks:
         gr.HTML(
             f"""
             <nav class="dental-page-nav" aria-label="平台导航">
-              <button type="button" class="dental-page-nav-item" data-page="learn" data-i18n="nav_learn">牙病学习</button>
-              <button type="button" class="dental-page-nav-item" data-page="dashboard" data-i18n="nav_dashboard">首页 Dashboard</button>
-              <button type="button" class="dental-page-nav-item" data-page="image" data-i18n="nav_image">图像检测</button>
-              <button type="button" class="dental-page-nav-item" data-page="compare" data-i18n="nav_compare">多模型对比</button>
-              <button type="button" class="dental-page-nav-item" data-page="batch" data-i18n="nav_batch">批量检测</button>
-              <button type="button" class="dental-page-nav-item" data-page="history" data-i18n="nav_history">历史记录</button>
-              <button type="button" class="dental-page-nav-item" data-page="assistant" data-i18n="nav_assistant">{AI_ASSISTANT_DISPLAY_NAME}</button>
-              <button type="button" class="dental-page-nav-item" data-page="report" data-i18n="nav_report">报告中心</button>
+              <button type="button" class="dental-nav-toggle" aria-expanded="false" aria-controls="dental-nav-items"><span>功能导航</span><b>☰</b></button>
+              <div id="dental-nav-items" class="dental-nav-items">
+                <button type="button" class="dental-page-nav-item" data-page="learn">牙病学习</button>
+                <button type="button" class="dental-page-nav-item" data-page="dashboard">首页 Dashboard</button>
+                <button type="button" class="dental-page-nav-item" data-page="image">图像检测</button>
+                <button type="button" class="dental-page-nav-item" data-page="compare">多模型对比</button>
+                <button type="button" class="dental-page-nav-item" data-page="batch">批量检测</button>
+                <button type="button" class="dental-page-nav-item" data-page="history">历史记录</button>
+                <button type="button" class="dental-page-nav-item" data-page="assistant">{AI_ASSISTANT_DISPLAY_NAME}</button>
+                <button type="button" class="dental-page-nav-item" data-page="report">报告中心</button>
+              </div>
             </nav>
             """
         )
@@ -7218,38 +7941,44 @@ def build_app() -> gr.Blocks:
 
         with gr.Group(elem_id="page-image", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>图像检测</b><br>按步骤完成单张口腔影像上传、模型选择、阈值设置、真实 YOLO 推理和人工复核建议查看。</div>")
-            with gr.Row(equal_height=False, elem_classes="det-input-row"):
-                with gr.Column(scale=1):
+            gr.HTML(workflow_header("single"), elem_classes="workflow-header")
+            with gr.Row(equal_height=False, elem_classes=["det-input-row", "detection-setup-grid"]):
+                with gr.Column(scale=1, elem_classes="detection-upload-panel"):
                     gr.Markdown("### 第 1 步：上传口腔或牙齿影像")
-                    det_image = gr.Image(type="pil", label="上传牙齿或口腔图像", height=260, elem_classes="det-upload")
+                    det_image = gr.Image(type="pil", label="上传牙齿或口腔图像", height=260, elem_classes="det-upload", elem_id="single-upload")
                     gr.Markdown("建议上传清晰的口腔全景片或牙齿相关影像。本系统仅用于科研演示和辅助识别。")
                     det_quality = gr.HTML(image_quality_precheck(None), label="影像质量预检")
-                with gr.Column(scale=1):
+                with gr.Column(scale=1, elem_classes="detection-parameter-panel"):
                     gr.Markdown("### 第 2 步：选择模型和阈值")
-                    det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
-                    det_preset = gr.Radio(
-                        ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.70）", "高精度复核（0.50 / 0.60）"],
-                        value="均衡推荐（0.25 / 0.70）",
-                        label="阈值预设",
-                    )
-                    det_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                    det_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-                    det_threshold_hint = gr.Markdown(threshold_hint(0.25, 0.70))
-                    with gr.Accordion("检测框可视化选项", open=False):
-                        det_show_label = gr.Checkbox(value=True, label="显示类别名称")
-                        det_show_conf = gr.Checkbox(value=True, label="显示置信度")
-                        det_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
-                        det_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
-                    det_btn = gr.Button("运行单模型检测", variant="primary", elem_classes="solid-primary-action")
+                    with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"]):
+                        det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
+                        det_preset = gr.Radio(
+                            ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.70）", "高精度复核（0.50 / 0.60）"],
+                            value="均衡推荐（0.25 / 0.70）",
+                            label="阈值预设",
+                        )
+                        det_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
+                        det_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                        det_threshold_hint = gr.Markdown(threshold_hint(0.25, 0.70))
+                        with gr.Accordion("检测框可视化选项", open=False):
+                            det_show_label = gr.Checkbox(value=True, label="显示类别名称")
+                            det_show_conf = gr.Checkbox(value=True, label="显示置信度")
+                            det_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
+                            det_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                        det_btn = gr.Button("运行单模型检测", variant="primary", elem_classes="solid-primary-action", elem_id="single-run")
             gr.Markdown("### 第 3 步：查看检测结果和复核建议")
-            det_progress = gr.HTML("", visible=False)
+            det_progress = gr.HTML("", visible=False, elem_id="single-progress")
             det_empty_state = gr.HTML(build_detection_empty_state("single"))
             det_summary = gr.HTML(detection_summary_cards(None), visible=False)
-            with gr.Row(equal_height=False, elem_classes="det-result-row"):
-                with gr.Column(scale=1):
-                    det_output = gr.Image(type="pil", label="检测结果图", height=360, elem_classes="det-output", visible=False)
-                with gr.Column(scale=1):
-                    det_explain = gr.Markdown("等待检测。", elem_classes="det-explain", visible=False)
+            with gr.Group(elem_classes="detection-result-stack"):
+                det_compare_slider = gr.ImageSlider(label="原图 / 检测结果滑动对比", visible=False, elem_classes="result-compare-slider", elem_id="single-result-slider")
+                det_output = gr.Image(type="pil", label="检测结果图数据", elem_classes="det-output-data", visible=False)
+                det_explain = gr.Markdown("等待检测。", elem_classes="det-explain", visible=False)
+            with gr.Row(elem_classes="result-filter-bar"):
+                det_search = gr.Textbox(label="搜索结果", placeholder="搜索类别、风险或建议", lines=1)
+                det_class_filter = gr.Dropdown(["全部类别", *CLASS_KNOWLEDGE.keys()], value="全部类别", label="类别筛选")
+                det_risk_filter = gr.Dropdown(["全部风险", "强烈建议人工复核", "建议人工复核", "可信度较高"], value="全部风险", label="风险筛选")
+                det_sort = gr.Dropdown(["按区域编号", "风险优先", "置信度从高到低", "置信度从低到高"], value="按区域编号", label="排序")
             det_table = gr.Dataframe(
                 headers=["编号", "类别", "置信度", "坐标 x1", "坐标 y1", "坐标 x2", "坐标 y2", "风险等级", "复核建议"],
                 label="结构化检测结果",
@@ -7259,7 +7988,7 @@ def build_app() -> gr.Blocks:
             det_knowledge = gr.HTML(class_knowledge_cards(None), visible=False)
             with gr.Accordion("原图—结果图联动放大镜", open=True):
                 gr.Markdown("选择一个结构化检测区域，左侧显示原图局部，右侧显示同一位置的模型标注；检测结果图最大化不便查看局部时，可用这里逐区复核。")
-                det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True)
+                det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True, elem_id="det-region-selector")
                 with gr.Row(elem_classes="linked-region-row"):
                     det_region_original = gr.Image(type="pil", label="原图局部放大")
                     det_region_annotated = gr.Image(type="pil", label="结果图同位置放大")
@@ -7277,29 +8006,36 @@ def build_app() -> gr.Blocks:
 
         with gr.Group(elem_id="page-compare", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>多模型对比</b><br>多模型对比用于观察不同 YOLO 模型在同一影像上的检测差异，辅助判断疑似区域的稳定性。</div>")
-            cmp_image = gr.Image(type="pil", label="上传同一张图像", height=260, elem_classes="det-upload")
-            with gr.Row(elem_classes="compare-threshold-row"):
-                cmp_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                cmp_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-            with gr.Accordion("检测框可视化选项", open=False):
-                with gr.Row():
-                    cmp_show_label = gr.Checkbox(value=True, label="显示类别名称")
-                    cmp_show_conf = gr.Checkbox(value=True, label="显示置信度")
-                    cmp_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
-                    cmp_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
-            cmp_btn = gr.Button("一键运行三个模型", variant="primary", elem_classes="solid-primary-action")
-            cmp_progress = gr.HTML("", visible=False)
+            gr.HTML(workflow_header("compare"), elem_classes="workflow-header")
+            with gr.Row(equal_height=False, elem_classes="detection-setup-grid"):
+                with gr.Column(scale=1, elem_classes="detection-upload-panel"):
+                    gr.Markdown("### 上传同一张口腔影像")
+                    cmp_image = gr.Image(type="pil", label="上传同一张图像", height=300, elem_classes="det-upload", elem_id="compare-upload")
+                with gr.Column(scale=1, elem_classes="detection-parameter-panel"):
+                    gr.Markdown("### 设置统一检测参数")
+                    with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"], elem_id="compare-controls"):
+                        with gr.Row(elem_classes="compare-threshold-row", elem_id="compare-threshold-row"):
+                            cmp_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
+                            cmp_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                        with gr.Accordion("检测框可视化选项", open=False):
+                            with gr.Row():
+                                cmp_show_label = gr.Checkbox(value=True, label="显示类别名称")
+                                cmp_show_conf = gr.Checkbox(value=True, label="显示置信度")
+                                cmp_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
+                                cmp_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                        cmp_btn = gr.Button("一键运行三个模型", variant="primary", elem_classes="solid-primary-action", elem_id="compare-run")
+            cmp_progress = gr.HTML("", visible=False, elem_id="compare-progress")
             cmp_empty_state = gr.HTML(build_detection_empty_state("compare"))
-            with gr.Row(elem_classes="compare-model-row"):
+            with gr.Row(elem_classes=["compare-model-row", "compare-slider-row"], elem_id="compare-results"):
                 with gr.Column():
                     gr.HTML("<div class='model-tag'>均衡型基线模型：速度优先、默认基线</div>")
-                    cmp_img1 = gr.Image(type="pil", label="均衡型基线模型", visible=False)
+                    cmp_img1 = gr.ImageSlider(label="均衡型基线模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
                 with gr.Column():
                     gr.HTML("<div class='model-tag'>高精度牙齿病变定位模型：定位稳定性优先</div>")
-                    cmp_img2 = gr.Image(type="pil", label="高精度牙齿病变定位模型", visible=False)
+                    cmp_img2 = gr.ImageSlider(label="高精度模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
                 with gr.Column():
                     gr.HTML("<div class='model-tag'>高召回牙齿病变检测模型：减少漏检优先</div>")
-                    cmp_img3 = gr.Image(type="pil", label="高召回牙齿病变检测模型", visible=False)
+                    cmp_img3 = gr.ImageSlider(label="高召回模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
             cmp_table = gr.Dataframe(
                 headers=["模型名称", "模型类型", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议数量", "推荐使用场景", "失败原因"],
                 label="多模型对比表",
@@ -7316,9 +8052,8 @@ def build_app() -> gr.Blocks:
             with gr.Accordion("多模型融合视图", open=True):
                 gr.Markdown("绿色表示至少两个模型在相近位置检出同一类别；红色表示仅单模型检出。可用筛选器聚焦复核重点。")
                 fusion_filter = gr.Radio(["全部区域", "仅高一致性区域", "仅低一致性区域"], value="全部区域", label="融合区域筛选")
-                with gr.Row(elem_classes="compare-fusion-row"):
-                    fusion_image = gr.Image(type="pil", label="多模型融合叠加图", visible=False)
-                    fusion_note = gr.HTML("等待多模型对比完成后生成融合视图。", visible=False)
+                fusion_image = gr.Image(type="pil", label="多模型融合叠加图", visible=False)
+                fusion_note = gr.HTML("等待多模型对比完成后生成融合视图。", visible=False)
                 fusion_table = gr.Dataframe(
                     headers=["融合区域", "类别", "涉及模型", "最高置信度", "一致性等级", "复核建议"],
                     label="融合区域明细",
@@ -7327,7 +8062,7 @@ def build_app() -> gr.Blocks:
                 )
             with gr.Accordion("多模型原图—结果图联动放大镜", open=False):
                 gr.Markdown("按模型编号和区域编号查看局部细节，区域标签会包含模型名称，便于区分不同模型的检测结果。")
-                cmp_region_selector = gr.Dropdown(choices=[], label="选择模型与疑似区域", interactive=True)
+                cmp_region_selector = gr.Dropdown(choices=[], label="选择模型与疑似区域", interactive=True, elem_id="cmp-region-selector")
                 with gr.Row(elem_classes="linked-region-row"):
                     cmp_region_original = gr.Image(type="pil", label="原图局部放大")
                     cmp_region_annotated = gr.Image(type="pil", label="对应模型结果图局部")
@@ -7345,38 +8080,73 @@ def build_app() -> gr.Blocks:
 
         with gr.Group(elem_id="page-batch", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>批量检测</b><br>一次上传多张图片，系统逐张运行 YOLO CPU 推理，并生成批量汇总表和报告。</div>")
-            with gr.Row(elem_classes="batch-work-row"):
-                with gr.Column(scale=1, elem_classes="batch-left-column"):
-                    batch_files = gr.File(label="上传多张图片", file_count="multiple", file_types=["image"])
-                    batch_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
-                    batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                    batch_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-                    with gr.Accordion("检测框可视化选项", open=False):
-                        batch_show_label = gr.Checkbox(value=True, label="显示类别名称")
-                        batch_show_conf = gr.Checkbox(value=True, label="显示置信度")
-                        batch_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
-                        batch_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
-                    batch_btn = gr.Button("开始批量检测", variant="primary", elem_classes="solid-primary-action")
-                    batch_knowledge = gr.HTML(
-                        BATCH_KNOWLEDGE_PLACEHOLDER_HTML,
-                        elem_classes="batch-knowledge-panel",
-                    )
-                with gr.Column(scale=2, elem_classes="batch-right-column"):
-                    batch_progress = gr.HTML("", visible=False)
-                    batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
-                    batch_preview = gr.Gallery(
-                        label="批量检测结果预览（最多前 6 张）",
-                        columns=3,
-                        height=360,
-                        visible=False,
-                        elem_id="batch-result-preview-gallery",
-                    )
-                    batch_image_selector = gr.Dropdown(choices=[], label="选择图片编号查看解释", interactive=True, visible=False)
-                    batch_explain = gr.Markdown(
-                        "运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。",
-                        elem_classes="det-explain",
-                        visible=False,
-                    )
+            gr.HTML(workflow_header("batch"), elem_classes="workflow-header")
+            with gr.Row(equal_height=False, elem_classes=["batch-work-row", "batch-setup-row", "detection-setup-grid"]):
+                with gr.Column(scale=1, elem_classes=["batch-upload-column", "detection-upload-panel"]):
+                    with gr.Group(elem_classes="batch-upload-composite"):
+                        batch_files = gr.File(label="上传多张图片", file_count="multiple", file_types=["image"], height=300, elem_id="batch-upload")
+                        batch_upload_preview = gr.Gallery(
+                            label="已上传图片",
+                            show_label=False,
+                            container=False,
+                            columns=3,
+                            rows=1,
+                            height=218,
+                            object_fit="contain",
+                            allow_preview=False,
+                            visible=False,
+                            elem_id="batch-upload-preview",
+                        )
+                    gr.Markdown(f"单批建议不超过 {BATCH_MAX_IMAGES} 张，以保证实时检测速度。")
+                with gr.Column(scale=1, elem_classes=["batch-params-column", "detection-parameter-panel"]):
+                    with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"]):
+                        batch_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
+                        batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
+                        batch_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                        with gr.Accordion("检测框可视化选项", open=False):
+                            batch_show_label = gr.Checkbox(value=True, label="显示类别名称")
+                            batch_show_conf = gr.Checkbox(value=True, label="显示置信度")
+                            batch_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
+                            batch_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                        batch_btn = gr.Button("开始批量检测", variant="primary", elem_classes="solid-primary-action", elem_id="batch-run")
+            batch_progress = gr.HTML("", visible=False, elem_id="batch-progress")
+            batch_tasks = gr.HTML("", visible=False, elem_classes="batch-task-panel")
+            batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
+            batch_preview_page = gr.Dropdown(["第 1 / 1 页"], value="第 1 / 1 页", label="结果预览分页", interactive=False, visible=False)
+            batch_preview = gr.Gallery(
+                label="批量检测结果预览",
+                columns=3,
+                height=360,
+                visible=False,
+                elem_id="batch-result-preview-gallery",
+            )
+            with gr.Row(elem_classes="batch-item-actions"):
+                batch_image_selector = gr.Dropdown(choices=[], label="选择图片查看检测结果", interactive=True, visible=False, elem_id="batch-image-selector")
+            batch_compare_slider = gr.ImageSlider(
+                label="所选图片：原图 / 检测结果滑动对比",
+                show_label=False,
+                visible=False,
+                slider_position=50,
+                max_height=620,
+                buttons=["fullscreen", "download"],
+                elem_classes="result-compare-slider",
+                elem_id="batch-result-slider",
+            )
+            with gr.Group(elem_classes="batch-retry-panel", visible=False) as batch_retry_panel:
+                gr.Markdown("#### 失败任务重试")
+                with gr.Row(elem_classes="batch-retry-actions"):
+                    batch_retry_selector = gr.Dropdown(choices=[], label="选择失败图片", interactive=True, visible=False)
+                    batch_retry_btn = gr.Button("重新检测", visible=False)
+            batch_explain = gr.Markdown(
+                "运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。",
+                elem_classes="det-explain",
+                visible=False,
+            )
+            with gr.Accordion("牙病类别说明", open=False):
+                batch_knowledge = gr.HTML(
+                    BATCH_KNOWLEDGE_PLACEHOLDER_HTML,
+                    elem_classes="batch-knowledge-panel",
+                )
             batch_table = gr.Dataframe(
                 headers=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
                 label="批量检测汇总表",
@@ -7391,7 +8161,7 @@ def build_app() -> gr.Blocks:
                 batch_report_preview = gr.Markdown("尚未生成批量报告预览。")
             with gr.Accordion("批量原图—结果图联动放大镜", open=False):
                 gr.Markdown("按图片编号和区域编号查看局部细节，区域标签会包含图片名称，便于批量任务中快速定位。")
-                batch_region_selector = gr.Dropdown(choices=[], label="选择图片与疑似区域", interactive=True)
+                batch_region_selector = gr.Dropdown(choices=[], label="选择图片与疑似区域", interactive=True, elem_id="batch-region-selector")
                 with gr.Row(elem_classes="linked-region-row"):
                     batch_region_original = gr.Image(type="pil", label="原图局部放大")
                     batch_region_annotated = gr.Image(type="pil", label="结果图同位置放大")
@@ -7400,6 +8170,7 @@ def build_app() -> gr.Blocks:
         with gr.Group(elem_id="page-history", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>历史记录</b><br>记录单模型检测、多模型对比和批量检测任务，Dashboard 统计优先基于这些历史记录计算。</div>")
             history_summary_cards = gr.HTML(history_summary_markdown())
+            history_gallery = gr.Gallery(value=history_thumbnail_gallery(), label="最近检测缩略图", columns=6, rows=2, height=260, elem_classes="history-thumbnail-gallery")
             with gr.Row(elem_classes="history-action-row"):
                 refresh_history_btn = gr.Button("刷新历史记录")
                 clear_history_page_btn = gr.Button("清空历史记录")
@@ -7407,8 +8178,11 @@ def build_app() -> gr.Blocks:
             with gr.Row(elem_classes="history-filter-row"):
                 history_task_filter = gr.Dropdown(["全部任务", "单模型检测", "多模型对比", "批量检测"], value="全部任务", label="按任务类型筛选")
                 history_review_filter = gr.Dropdown(["全部复核等级", "强烈建议人工复核", "建议人工复核", "常规人工复核", "当前阈值下无疑似区域", "无法评估"], value="全部复核等级", label="按复核等级筛选")
+                history_initial_pages = max(1, (len(history_rows()) + 19) // 20)
+                history_initial_choices = [f"第 {index} / {history_initial_pages} 页" for index in range(1, history_initial_pages + 1)]
+                history_page = gr.Dropdown(history_initial_choices, value=history_initial_choices[0], label="分页", interactive=history_initial_pages > 1)
             history_table = gr.Dataframe(
-                value=history_rows(),
+                value=list(reversed(history_rows()))[:20],
                 headers=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级"],
                 label="检测历史",
                 wrap=True,
@@ -7433,6 +8207,7 @@ def build_app() -> gr.Blocks:
                 report_file = gr.File(label="下载 Markdown 报告")
                 report_pdf_file = gr.File(label="下载 PDF 报告")
                 report_docx_file = gr.File(label="下载 Word 报告")
+            recent_reports = gr.HTML(recent_reports_html(), elem_classes="recent-reports-panel")
 
         refresh_btn.click(lambda: (*dashboard_outputs(), registry_status_markdown()), outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status])
         clear_outputs = [dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, current_detection, current_comparison, current_batch, history_summary_cards, history_table, history_detail_selector, history_detail, history_notice]
@@ -7449,15 +8224,17 @@ def build_app() -> gr.Blocks:
             run_single_detection,
             inputs=[det_image, det_model, det_conf, det_iou, det_show_label, det_show_conf, det_line_width, det_color_mode],
             outputs=[det_progress, det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
-            concurrency_id="yolo_inference",
-            concurrency_limit=3,
+            concurrency_id=INFERENCE_CONCURRENCY_ID,
+            concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
-            show_progress="hidden",
+            show_progress="minimal",
         )
+        det_event.then(latest_single_compare_slider_update, outputs=det_compare_slider)
         det_image.clear(
             reset_single_detection_outputs,
             outputs=[det_progress, det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
+        det_image.clear(lambda: gr.update(value=None, visible=False), outputs=det_compare_slider)
         det_image.change(image_quality_precheck, inputs=det_image, outputs=det_quality)
         det_image.change(single_empty_state_for_upload, inputs=det_image, outputs=det_empty_state)
         det_preset.change(apply_threshold_preset, inputs=det_preset, outputs=[det_conf, det_iou, det_threshold_hint])
@@ -7468,14 +8245,25 @@ def build_app() -> gr.Blocks:
             inputs=[det_image, current_detection, det_region_selector],
             outputs=[det_region_original, det_region_annotated, det_region_note],
         )
+        for filter_component in (det_search, det_class_filter, det_risk_filter, det_sort):
+            filter_component.change(
+                filtered_detection_rows,
+                inputs=[current_detection, det_search, det_class_filter, det_risk_filter, det_sort],
+                outputs=det_table,
+            )
+        det_table.select(
+            detection_table_selected_region,
+            inputs=current_detection,
+            outputs=[det_region_selector, det_region_original, det_region_annotated, det_region_note],
+        )
         cmp_event = cmp_btn.click(
             run_model_comparison,
             inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
             outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
-            concurrency_id="yolo_inference",
-            concurrency_limit=3,
+            concurrency_id=INFERENCE_CONCURRENCY_ID,
+            concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
-            show_progress="hidden",
+            show_progress="minimal",
         )
         cmp_image.clear(
             reset_model_comparison_outputs,
@@ -7483,6 +8271,12 @@ def build_app() -> gr.Blocks:
         )
         cmp_image.change(compare_empty_state_for_upload, inputs=cmp_image, outputs=cmp_empty_state)
         fusion_filter.change(render_fusion_view, inputs=[cmp_image, current_comparison, fusion_filter], outputs=[fusion_image, fusion_table, fusion_note])
+        cmp_event.then(
+            render_latest_fusion_view,
+            inputs=[cmp_image, fusion_filter],
+            outputs=[fusion_image, fusion_table, fusion_note],
+            show_progress="hidden",
+        )
         cmp_region_selector.change(
             render_comparison_linked_region_view,
             inputs=[cmp_image, current_comparison, cmp_region_selector],
@@ -7493,19 +8287,38 @@ def build_app() -> gr.Blocks:
             run_batch_detection,
             inputs=[batch_files, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
             outputs=[batch_progress, batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
-            concurrency_id="yolo_inference",
-            concurrency_limit=3,
+            concurrency_id=INFERENCE_CONCURRENCY_ID,
+            concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
-            show_progress="hidden",
+            show_progress="minimal",
         )
         batch_files.clear(
             reset_batch_detection_outputs,
             outputs=[batch_progress, batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
         batch_files.change(batch_empty_state_for_upload, inputs=batch_files, outputs=batch_empty_state)
-        det_event.then(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
-        cmp_event.then(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
-        batch_event.then(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
+        batch_files.change(uploaded_batch_preview, inputs=batch_files, outputs=batch_upload_preview)
+        batch_files.clear(lambda: gr.update(value=[], visible=False), outputs=batch_upload_preview)
+        batch_files.clear(lambda: ("", gr.update(visible=False)), outputs=[batch_tasks, batch_preview_page])
+        batch_files.clear(lambda: gr.update(value=None, visible=False), outputs=batch_compare_slider)
+        batch_files.clear(
+            lambda: (gr.update(visible=False), gr.update(choices=[], value=None, visible=False), gr.update(visible=False)),
+            outputs=[batch_retry_panel, batch_retry_selector, batch_retry_btn],
+        )
+        batch_selector_event = batch_event.then(
+            latest_batch_image_selector_output,
+            outputs=batch_image_selector,
+            show_progress="hidden",
+        )
+        batch_slider_event = batch_selector_event.then(latest_batch_slider_output, outputs=batch_compare_slider)
+        batch_slider_event.then(
+            latest_batch_report_outputs,
+            outputs=[batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file],
+            show_progress="hidden",
+        )
+        batch_event.then(latest_batch_retry_controls, outputs=[batch_retry_selector, batch_retry_btn, batch_retry_panel])
+        # Detection callbacks persist history immediately. Dashboard and history views
+        # refresh on their own controls, so hidden pages do not congest the inference queue.
         batch_region_selector.change(
             render_batch_linked_region_view,
             inputs=[current_batch, batch_region_selector],
@@ -7516,19 +8329,43 @@ def build_app() -> gr.Blocks:
             inputs=[current_batch, batch_image_selector],
             outputs=[batch_explain, batch_knowledge],
         )
+        batch_image_selector.change(batch_selected_compare_update, inputs=[current_batch, batch_image_selector], outputs=batch_compare_slider)
+        batch_retry_event = batch_retry_btn.click(
+            retry_batch_item,
+            inputs=[current_batch, batch_retry_selector, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
+            outputs=[batch_progress, batch_tasks, batch_table, batch_preview, batch_explain, batch_knowledge, current_batch],
+            concurrency_id=INFERENCE_CONCURRENCY_ID,
+            concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
+            trigger_mode="once",
+            show_progress="minimal",
+        )
+        batch_retry_event.then(batch_failed_retry_controls, inputs=current_batch, outputs=[batch_retry_selector, batch_retry_btn, batch_retry_panel])
+        batch_retry_event.then(batch_selected_compare_update, inputs=[current_batch, batch_image_selector], outputs=batch_compare_slider)
 
-        single_report_btn.click(
+        single_report_event = single_report_btn.click(
             generate_single_detection_tab_report,
             inputs=[current_detection, single_report_language],
             outputs=[single_report_preview, single_report_gallery, single_report_md, single_report_pdf, single_report_docx],
         )
-        comparison_report_btn.click(
+        comparison_report_event = comparison_report_btn.click(
             generate_model_comparison_tab_report,
             inputs=[current_comparison, comparison_report_language],
             outputs=[comparison_report_preview, comparison_report_gallery, comparison_report_md, comparison_report_pdf, comparison_report_docx],
         )
 
-        report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch, report_language], outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file])
+        report_event = report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch, report_language], outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file])
+        report_event.then(recent_reports_html, outputs=recent_reports)
+        single_report_event.then(recent_reports_html, outputs=recent_reports)
+        comparison_report_event.then(recent_reports_html, outputs=recent_reports)
+
+        history_page.change(
+            paged_history_view,
+            inputs=[history_task_filter, history_review_filter, history_page],
+            outputs=[history_table, history_page, history_notice],
+        )
+        refresh_history_btn.click(lambda: history_thumbnail_gallery(), outputs=history_gallery)
+        for history_event in (det_event, cmp_event, batch_event):
+            history_event.then(lambda: history_thumbnail_gallery(), outputs=history_gallery)
 
     demo.queue(default_concurrency_limit=4, max_size=30)
     return demo
@@ -7548,7 +8385,20 @@ demo = build_app()
 app = gr.mount_gradio_app(api_app, demo, path="/", css=APP_CSS, head=ASK_AI_HEAD)
 
 
+def schedule_output_cleanup() -> None:
+    cleanup_timer = threading.Timer(600.0, cleanup_output_artifacts, kwargs={"force": True})
+    cleanup_timer.daemon = True
+    cleanup_timer.start()
+
+
 if __name__ == "__main__":
     import uvicorn
 
+    # Load weights before serving requests without retaining large warm-up tensors.
+    for spec in MODEL_SPECS:
+        try:
+            load_model(spec.key)
+        except Exception:
+            continue
+    schedule_output_cleanup()
     uvicorn.run(app, host="127.0.0.1", port=find_free_port())

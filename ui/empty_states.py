@@ -51,6 +51,12 @@ DETECTION_EMPTY_ICONS = {
     """,
 }
 
+DETECTION_READY_STATES = {
+    "single": ("影像已就绪", "确认模型与阈值后运行单图精检。"),
+    "compare": ("影像已就绪", "确认阈值后运行三个模型，结果将以滑动对比方式展示。"),
+    "batch": ("任务已就绪", "确认模型与阈值后开始批量筛查，系统将逐张更新任务状态。"),
+}
+
 def build_detection_empty_state(kind: str) -> str:
     state = DETECTION_EMPTY_STATES.get(kind, DETECTION_EMPTY_STATES["single"])
     icon = DETECTION_EMPTY_ICONS.get(state.get("icon", ""), DETECTION_EMPTY_ICONS["single"])
@@ -71,7 +77,7 @@ def build_detection_progress_state(percent: float, title: str, detail: str) -> s
     bounded_percent = max(0, min(100, int(round(float(percent)))))
     return "\n".join(
         [
-            "<div class='detection-progress-state'>",
+            f"<div class='detection-progress-state' role='status' aria-live='polite' aria-label='{xml_escape(title)}，进度 {bounded_percent}%'>",
             "  <div class='detection-progress-head'>",
             f"    <span>{xml_escape(title)}</span>",
             f"    <b>{bounded_percent}%</b>",
@@ -80,6 +86,20 @@ def build_detection_progress_state(percent: float, title: str, detail: str) -> s
             f"    <div class='detection-progress-fill' style='width: {bounded_percent}%;'></div>",
             "  </div>",
             f"  <div class='detection-progress-detail'>{xml_escape(detail)}</div>",
+            "</div>",
+        ]
+    )
+
+def build_detection_ready_state(kind: str) -> str:
+    title, detail = DETECTION_READY_STATES.get(kind, DETECTION_READY_STATES["single"])
+    return "\n".join(
+        [
+            f"<div class='detection-ready-state' role='status' data-ready-kind='{xml_escape(kind)}'>",
+            "  <span class='detection-ready-check' aria-hidden='true'>✓</span>",
+            "  <div>",
+            f"    <b>{xml_escape(title)}</b>",
+            f"    <small>{xml_escape(detail)}</small>",
+            "  </div>",
             "</div>",
         ]
     )
@@ -94,7 +114,9 @@ def detection_empty_state_update(kind: str, visible: bool) -> Any:
     return gr.update(value=build_detection_empty_state(kind) if visible else "", visible=visible)
 
 def detection_empty_state_for_upload(value: Any, kind: str) -> Any:
-    return detection_empty_state_update(kind, not bool(value))
+    if value:
+        return gr.update(value=build_detection_ready_state(kind), visible=True)
+    return detection_empty_state_update(kind, True)
 
 def single_empty_state_for_upload(image: Any) -> Any:
     return detection_empty_state_for_upload(image, "single")
