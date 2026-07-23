@@ -1336,17 +1336,53 @@ def crop_region_pair(
     annotated: Image.Image,
     box: dict[str, Any],
     pad_ratio: float = 0.35,
+    source_size: tuple[int, int] | None = None,
 ) -> tuple[Image.Image | None, Image.Image | None]:
+    """Crop the same detection region from display assets of any resolution.
+
+    Detection boxes use the uploaded image coordinates, while persisted browser
+    assets may be resized for faster display. Scale one padded source-space crop
+    into each asset so the selected box cannot drift or become pinned to an edge.
+    """
     try:
-        x1, y1, x2, y2 = box["bbox_xyxy"]
-        pad = max(25, int(max(x2 - x1, y2 - y1) * pad_ratio))
-        left, top = max(0, int(x1) - pad), max(0, int(y1) - pad)
-        right, bottom = min(original.width, int(x2) + pad), min(original.height, int(y2) + pad)
-        if right <= left or bottom <= top:
+        source_width, source_height = source_size or original.size
+        source_width, source_height = int(source_width), int(source_height)
+        if source_width <= 0 or source_height <= 0:
             return None, None
-        return original.crop((left, top, right, bottom)), annotated.crop((left, top, right, bottom))
+        x1, y1, x2, y2 = [float(value) for value in box["bbox_xyxy"]]
+        pad = max(25, int(max(x2 - x1, y2 - y1) * pad_ratio))
+        source_left, source_top = max(0, int(x1) - pad), max(0, int(y1) - pad)
+        source_right = min(source_width, int(x2) + pad)
+        source_bottom = min(source_height, int(y2) + pad)
+        if source_right <= source_left or source_bottom <= source_top:
+            return None, None
+
+        def scaled_crop(image: Image.Image) -> Image.Image | None:
+            scale_x = image.width / source_width
+            scale_y = image.height / source_height
+            left = max(0, min(image.width, int(source_left * scale_x)))
+            top = max(0, min(image.height, int(source_top * scale_y)))
+            right = max(0, min(image.width, int(np.ceil(source_right * scale_x))))
+            bottom = max(0, min(image.height, int(np.ceil(source_bottom * scale_y))))
+            if right <= left or bottom <= top:
+                return None
+            return image.crop((left, top, right, bottom))
+
+        return scaled_crop(original), scaled_crop(annotated)
     except Exception:
         return None, None
+
+
+def result_source_size(result: dict[str, Any] | None, fallback: Image.Image) -> tuple[int, int]:
+    image_info = (result or {}).get("image_info") or {}
+    try:
+        width = int(image_info.get("width", 0))
+        height = int(image_info.get("height", 0))
+        if width > 0 and height > 0:
+            return width, height
+    except (TypeError, ValueError):
+        pass
+    return fallback.size
 
 
 def result_original_and_annotated(image: Any, result: dict[str, Any] | None) -> tuple[Image.Image | None, Image.Image | None]:
@@ -1381,7 +1417,12 @@ def render_linked_region_view(image: Any, result: dict[str, Any] | None, selecte
         original, annotated = result_original_and_annotated(image, result)
         if original is None or annotated is None:
             return None, None, "未找到可用于联动放大的原图或结果图，请重新运行检测。"
-        original_crop, annotated_crop = crop_region_pair(original, annotated, box)
+        original_crop, annotated_crop = crop_region_pair(
+            original,
+            annotated,
+            box,
+            source_size=result_source_size(result, original),
+        )
         note = f"已联动定位区域 {index + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。左侧保留原始细节，右侧显示同一位置的模型框。"
         return original_crop, annotated_crop, note
     except Exception as exc:
@@ -1422,7 +1463,12 @@ def render_comparison_linked_region_view(image: Any, results: list[dict[str, Any
         original, annotated = result_original_and_annotated(image, result)
         if original is None or annotated is None:
             return None, None, "未找到该模型对应的原图或结果图，请重新运行多模型对比。"
-        original_crop, annotated_crop = crop_region_pair(original, annotated, box)
+        original_crop, annotated_crop = crop_region_pair(
+            original,
+            annotated,
+            box,
+            source_size=result_source_size(result, original),
+        )
         note = f"已定位模型{model_idx + 1}｜{result.get('model_name', '-')}｜区域 {region_idx + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。"
         return original_crop, annotated_crop, note
     except Exception as exc:
@@ -1445,7 +1491,12 @@ def render_batch_linked_region_view(items: list[dict[str, Any]] | None, selected
         original, annotated = result_original_and_annotated(None, result)
         if original is None or annotated is None:
             return None, None, "未找到该批量图片的原图或结果图，请重新运行批量检测。"
-        original_crop, annotated_crop = crop_region_pair(original, annotated, box)
+        original_crop, annotated_crop = crop_region_pair(
+            original,
+            annotated,
+            box,
+            source_size=result_source_size(result, original),
+        )
         image_name = item.get("image_name") or result.get("image_name") or f"图片{image_idx + 1}"
         note = f"已定位图片{image_idx + 1}｜{image_name}｜区域 {region_idx + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。"
         return original_crop, annotated_crop, note
@@ -1910,12 +1961,6 @@ def analyze_model_consistency(results: list[dict[str, Any]], iou_threshold: floa
                 "一致性等级": "高一致性疑似区域" if high else "低一致性疑似区域",
                 "复核建议": "多个模型在相近位置检测到疑似区域，建议人工重点复核。" if high else "仅单个模型检测到，建议结合原始影像人工判断。",
                 "类别": group[0].get("class_name", "-"),
-                "融合框": [
-                    min(item["bbox"][0] for item in group),
-                    min(item["bbox"][1] for item in group),
-                    max(item["bbox"][2] for item in group),
-                    max(item["bbox"][3] for item in group),
-                ],
             }
         )
     return rows
@@ -1935,62 +1980,6 @@ def consistency_rows(results: list[dict[str, Any]]) -> list[list[Any]]:
         ]
         for item in analyze_model_consistency(results)
     ]
-
-
-def render_fusion_view(image: Any, results: list[dict[str, Any]] | None, filter_mode: str = "全部区域") -> tuple[Image.Image | None, list[list[Any]], str]:
-    """Overlay consensus groups so users can review model agreement spatially."""
-    if image is None or not results:
-        return None, [], "等待多模型对比完成后生成融合视图。"
-    try:
-        out = normalize_image(image).copy()
-    except Exception as exc:
-        return None, [], f"融合视图无法读取原图：{exc}"
-    all_groups = analyze_model_consistency(results)
-    if filter_mode == "仅高一致性区域":
-        groups = [item for item in all_groups if item["一致性等级"] == "高一致性疑似区域"]
-    elif filter_mode == "仅低一致性区域":
-        groups = [item for item in all_groups if item["一致性等级"] == "低一致性疑似区域"]
-    else:
-        groups = all_groups
-    draw = ImageDraw.Draw(out)
-    font = ImageFont.load_default()
-    rows: list[list[Any]] = []
-    fusion_labels: list[tuple[list[float], str, tuple[int, int, int]]] = []
-    for item in groups:
-        x1, y1, x2, y2 = item["融合框"]
-        high = item["一致性等级"] == "高一致性疑似区域"
-        color = (22, 163, 74) if high else (225, 29, 72)
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
-        label = f"{item['区域编号']} {item['类别']}"
-        fusion_labels.append(([x1, y1, x2, y2], label, color))
-        rows.append(
-            [
-                item["区域编号"],
-                item["类别"],
-                item["涉及模型"],
-                f"{item['最高置信度']:.3f}",
-                item["一致性等级"],
-                item["复核建议"],
-            ]
-        )
-    occupied_labels: list[tuple[int, int, int, int]] = []
-    for bbox, label, color in fusion_labels:
-        text_bbox = draw.textbbox((0, 0), label, font=font)
-        label_width = max(70, text_bbox[2] - text_bbox[0] + 8)
-        label_height = max(18, text_bbox[3] - text_bbox[1] + 6)
-        label_rect = place_detection_label(bbox, (label_width, label_height), out.size, occupied_labels)
-        draw.rounded_rectangle(label_rect, radius=3, fill=color)
-        draw.text((label_rect[0] + 4, label_rect[1] + 3), label, fill=(0, 0, 0), font=font)
-        occupied_labels.append(label_rect)
-    high_count = sum(1 for item in all_groups if item["一致性等级"] == "高一致性疑似区域")
-    low_count = len(all_groups) - high_count
-    message = (
-        "<div class='fusion-legend'><div class='legend-high'>绿色：至少两个模型在同类别、相近位置检出（高一致性）。</div>"
-        "<div class='legend-low'>红色：仅单模型检出（低一致性，建议结合原图复核）。</div></div>"
-        f"<div class='section-note'>融合区域共 {len(all_groups)} 个：高一致性 {high_count} 个，低一致性 {low_count} 个。"
-        "融合仅用于呈现模型间空间一致性，不代表诊断结论。</div>"
-    )
-    return out, rows, message
 
 
 def system_recommendation(results: list[dict[str, Any]]) -> str:
@@ -2037,9 +2026,6 @@ def model_comparison_progress_outputs(
         gr.update(value=[], visible=False),
         gr.update(value="等待对比。", visible=False),
         [],
-        gr.update(value=None, visible=False),
-        gr.update(value=[], visible=False),
-        gr.update(value="等待多模型对比完成后生成融合视图。", visible=False),
         gr.Dropdown(choices=[], value=None),
         gr.skip(),
         gr.skip(),
@@ -2049,10 +2035,6 @@ def model_comparison_progress_outputs(
         gr.skip(),
         gr.skip(),
     )
-
-
-def render_latest_fusion_view(image: Any, filter_mode: str = "全部区域") -> tuple[Image.Image | None, list[list[Any]], str]:
-    return render_fusion_view(image, get_latest_ai_context().get("comparison"), filter_mode)
 
 
 @gated_inference_job(20, "compare", "多模型会诊")
@@ -2106,8 +2088,8 @@ def run_model_comparison(
                 rendered_images,
                 image,
             )
-        progress(0.9, desc="正在生成模型一致性与融合视图…")
-        yield model_comparison_progress_outputs(92, "正在生成一致性分析", "正在整理三模型差异、融合区域和复核提示。", rendered_images, image)
+        progress(0.9, desc="正在生成模型一致性分析…")
+        yield model_comparison_progress_outputs(92, "正在生成一致性分析", "正在整理三模型差异和复核提示。", rendered_images, image)
         append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
         update_latest_ai_context(comparison=results)
         summary = compare_summary(results) + "\n\n" + system_recommendation(results)
@@ -2122,9 +2104,6 @@ def run_model_comparison(
             gr.update(value=consistency_rows(results), visible=True),
             gr.update(value=summary, visible=True),
             results,
-            gr.update(value=None, visible=False),
-            gr.update(value=[], visible=False),
-            gr.update(value="正在准备融合视图。", visible=False),
             gr.Dropdown(choices=linked_choices, value=linked_choices[0] if linked_choices else None),
             *deferred_dashboard_outputs(),
         )
@@ -2142,9 +2121,6 @@ def reset_model_comparison_outputs():
         gr.update(value=[], visible=False),
         gr.update(value="等待对比。", visible=False),
         [],
-        gr.update(value=None, visible=False),
-        gr.update(value=[], visible=False),
-        gr.update(value="等待多模型对比完成后生成融合视图。", visible=False),
         gr.Dropdown(choices=[], value=None),
         *dashboard_outputs(),
         registry_status_markdown(),
@@ -3755,7 +3731,7 @@ def chat_auxiliary_context(image: Any, preset: str, comparison: list[dict[str, A
     return {
         "image_quality_precheck": quality,
         "threshold_preset": preset or "未选择",
-        "fusion_summary": {
+        "consistency_summary": {
             "high_consistency_count": sum(1 for item in consistency if item["一致性等级"] == "高一致性疑似区域"),
             "low_consistency_count": sum(1 for item in consistency if item["一致性等级"] == "低一致性疑似区域"),
         },
@@ -4318,9 +4294,9 @@ def local_rule_answer(
             lines.append(f"当前影像预检：分辨率 {quality['resolution'][0]}×{quality['resolution'][1]}，亮度 {quality['brightness']}，对比度 {quality['contrast']}，清晰度指标 {quality['sharpness']}。这些指标只能提示采集质量，不能判断病变。")
         else:
             lines.append("当前没有可用于质量预检的单图影像，请先在图像检测页上传图片。")
-    elif "融合" in question or "一致" in question:
-        fusion = chat_auxiliary_context(image, preset, comparison).get("fusion_summary", {})
-        lines.append(f"当前多模型融合统计：高一致性区域 {fusion.get('high_consistency_count', 0)} 个，低一致性区域 {fusion.get('low_consistency_count', 0)} 个。高一致性仅表示多个模型在相近位置检出，不等同于确诊。")
+    elif "一致" in question:
+        consistency = chat_auxiliary_context(image, preset, comparison).get("consistency_summary", {})
+        lines.append(f"当前多模型一致性统计：高一致性区域 {consistency.get('high_consistency_count', 0)} 个，低一致性区域 {consistency.get('low_consistency_count', 0)} 个。高一致性仅表示多个模型在相近位置检出，不等同于确诊。")
     elif "为什么不同模型" in question or "数量不同" in question or "模型差异" in question or "类别冲突" in question:
         lines.append("不同模型的结构、训练目标和权重不同，对同一影像的敏感程度也不同。以下为当前结果的差异归因：")
         lines.append(model_difference_markdown(comparison or []))
@@ -5276,7 +5252,12 @@ def report_region_crop_assets(source: str, result: dict[str, Any], max_regions: 
     crops: list[tuple[str, str, str]] = []
     boxes = sorted(result.get("boxes", []), key=lambda box: float(box.get("confidence", 0.0)), reverse=True)
     for region_idx, box in enumerate(boxes[:max_regions], 1):
-        original_crop, annotated_crop = crop_region_pair(original, annotated, box)
+        original_crop, annotated_crop = crop_region_pair(
+            original,
+            annotated,
+            box,
+            source_size=result_source_size(result, original),
+        )
         if original_crop is None or annotated_crop is None:
             continue
         prefix = f"report_{safe_asset_stem(source)}_r{region_idx}"
@@ -5314,7 +5295,12 @@ def report_visual_gallery(
             continue
         boxes = sorted(result.get("boxes", []), key=lambda box: float(box.get("confidence", 0.0)), reverse=True)
         for region_idx, box in enumerate(boxes[:remaining], 1):
-            _, annotated_crop = crop_region_pair(original, annotated, box)
+            _, annotated_crop = crop_region_pair(
+                original,
+                annotated,
+                box,
+                source_size=result_source_size(result, original),
+            )
             if annotated_crop is None:
                 continue
             caption = f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
@@ -7990,8 +7976,8 @@ def build_app() -> gr.Blocks:
                 gr.Markdown("选择一个结构化检测区域，左侧显示原图局部，右侧显示同一位置的模型标注；检测结果图最大化不便查看局部时，可用这里逐区复核。")
                 det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True, elem_id="det-region-selector")
                 with gr.Row(elem_classes="linked-region-row"):
-                    det_region_original = gr.Image(type="pil", label="原图局部放大")
-                    det_region_annotated = gr.Image(type="pil", label="结果图同位置放大")
+                    det_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
+                    det_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
                 det_region_note = gr.Markdown("运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。")
             with gr.Accordion("单图检测报告", open=False):
                 gr.Markdown("报告包含模型与权重版本、逐区域明细、复核优先级和可追溯性信息。")
@@ -7999,10 +7985,10 @@ def build_app() -> gr.Blocks:
                 single_report_btn = gr.Button("生成单图检测报告", variant="primary", elem_classes="solid-primary-action")
                 single_report_gallery = gr.Gallery(label="单图报告图片预览", columns=3, height=320, visible=False)
                 single_report_preview = gr.Markdown("尚未生成单图检测报告。")
-                with gr.Row():
-                    single_report_md = gr.File(label="下载单图 Markdown 报告")
-                    single_report_pdf = gr.File(label="下载单图 PDF 报告")
-                    single_report_docx = gr.File(label="下载单图 Word 报告")
+                with gr.Row(elem_classes="report-download-row"):
+                    single_report_md = gr.DownloadButton("下载单图 Markdown 报告", elem_classes="report-download-action")
+                    single_report_pdf = gr.DownloadButton("下载单图 PDF 报告", elem_classes="report-download-action")
+                    single_report_docx = gr.DownloadButton("下载单图 Word 报告", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-compare", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>多模型对比</b><br>多模型对比用于观察不同 YOLO 模型在同一影像上的检测差异，辅助判断疑似区域的稳定性。</div>")
@@ -8049,23 +8035,12 @@ def build_app() -> gr.Blocks:
                 visible=False,
             )
             cmp_summary = gr.Markdown("等待对比。", visible=False)
-            with gr.Accordion("多模型融合视图", open=True):
-                gr.Markdown("绿色表示至少两个模型在相近位置检出同一类别；红色表示仅单模型检出。可用筛选器聚焦复核重点。")
-                fusion_filter = gr.Radio(["全部区域", "仅高一致性区域", "仅低一致性区域"], value="全部区域", label="融合区域筛选")
-                fusion_image = gr.Image(type="pil", label="多模型融合叠加图", visible=False)
-                fusion_note = gr.HTML("等待多模型对比完成后生成融合视图。", visible=False)
-                fusion_table = gr.Dataframe(
-                    headers=["融合区域", "类别", "涉及模型", "最高置信度", "一致性等级", "复核建议"],
-                    label="融合区域明细",
-                    wrap=True,
-                    visible=False,
-                )
             with gr.Accordion("多模型原图—结果图联动放大镜", open=False):
                 gr.Markdown("按模型编号和区域编号查看局部细节，区域标签会包含模型名称，便于区分不同模型的检测结果。")
                 cmp_region_selector = gr.Dropdown(choices=[], label="选择模型与疑似区域", interactive=True, elem_id="cmp-region-selector")
                 with gr.Row(elem_classes="linked-region-row"):
-                    cmp_region_original = gr.Image(type="pil", label="原图局部放大")
-                    cmp_region_annotated = gr.Image(type="pil", label="对应模型结果图局部")
+                    cmp_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
+                    cmp_region_annotated = gr.Image(type="pil", label="对应模型结果图局部", interactive=False, buttons=["fullscreen", "download"])
                 cmp_region_note = gr.Markdown("运行多模型对比后，可选择模型和区域查看联动放大结果。")
             with gr.Accordion("多模型对比报告", open=False):
                 gr.Markdown("报告包含三模型结果表、一致性区域、差异归因和完整可追溯性信息。")
@@ -8073,10 +8048,10 @@ def build_app() -> gr.Blocks:
                 comparison_report_btn = gr.Button("生成多模型对比报告", variant="primary", elem_classes="solid-primary-action")
                 comparison_report_gallery = gr.Gallery(label="多模型报告图片预览", columns=3, height=320, visible=False)
                 comparison_report_preview = gr.Markdown("尚未生成多模型对比报告。")
-                with gr.Row():
-                    comparison_report_md = gr.File(label="下载对比 Markdown 报告")
-                    comparison_report_pdf = gr.File(label="下载对比 PDF 报告")
-                    comparison_report_docx = gr.File(label="下载对比 Word 报告")
+                with gr.Row(elem_classes="report-download-row"):
+                    comparison_report_md = gr.DownloadButton("下载对比 Markdown 报告", elem_classes="report-download-action")
+                    comparison_report_pdf = gr.DownloadButton("下载对比 PDF 报告", elem_classes="report-download-action")
+                    comparison_report_docx = gr.DownloadButton("下载对比 Word 报告", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-batch", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>批量检测</b><br>一次上传多张图片，系统逐张运行 YOLO CPU 推理，并生成批量汇总表和报告。</div>")
@@ -8153,9 +8128,9 @@ def build_app() -> gr.Blocks:
                 wrap=True,
                 visible=False,
             )
-            with gr.Row(elem_classes="batch-download-row"):
-                batch_md_file = gr.File(label="下载批量 Markdown 报告")
-                batch_csv_file = gr.File(label="下载批量 CSV 报告")
+            with gr.Row(elem_classes=["batch-download-row", "report-download-row"]):
+                batch_md_file = gr.DownloadButton("下载批量 Markdown 报告", elem_classes="report-download-action")
+                batch_csv_file = gr.DownloadButton("下载批量 CSV 报告", elem_classes="report-download-action")
             with gr.Accordion("批量检测报告预览", open=False):
                 batch_report_gallery = gr.Gallery(label="批量报告图片预览", columns=3, height=320, visible=False)
                 batch_report_preview = gr.Markdown("尚未生成批量报告预览。")
@@ -8163,8 +8138,8 @@ def build_app() -> gr.Blocks:
                 gr.Markdown("按图片编号和区域编号查看局部细节，区域标签会包含图片名称，便于批量任务中快速定位。")
                 batch_region_selector = gr.Dropdown(choices=[], label="选择图片与疑似区域", interactive=True, elem_id="batch-region-selector")
                 with gr.Row(elem_classes="linked-region-row"):
-                    batch_region_original = gr.Image(type="pil", label="原图局部放大")
-                    batch_region_annotated = gr.Image(type="pil", label="结果图同位置放大")
+                    batch_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
+                    batch_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
                 batch_region_note = gr.Markdown("运行批量检测后，可选择图片和区域查看联动放大结果。")
 
         with gr.Group(elem_id="page-history", elem_classes=["dental-page"]):
@@ -8204,9 +8179,9 @@ def build_app() -> gr.Blocks:
             report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
             report_preview = gr.Markdown("尚未生成报告。", elem_classes="report-preview-panel")
             with gr.Row(elem_classes="report-download-row"):
-                report_file = gr.File(label="下载 Markdown 报告")
-                report_pdf_file = gr.File(label="下载 PDF 报告")
-                report_docx_file = gr.File(label="下载 Word 报告")
+                report_file = gr.DownloadButton("下载 Markdown 报告", elem_classes="report-download-action")
+                report_pdf_file = gr.DownloadButton("下载 PDF 报告", elem_classes="report-download-action")
+                report_docx_file = gr.DownloadButton("下载 Word 报告", elem_classes="report-download-action")
             recent_reports = gr.HTML(recent_reports_html(), elem_classes="recent-reports-panel")
 
         refresh_btn.click(lambda: (*dashboard_outputs(), registry_status_markdown()), outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status])
@@ -8230,11 +8205,21 @@ def build_app() -> gr.Blocks:
             show_progress="minimal",
         )
         det_event.then(latest_single_compare_slider_update, outputs=det_compare_slider)
+        det_event.then(
+            render_linked_region_view,
+            inputs=[det_image, current_detection, det_region_selector],
+            outputs=[det_region_original, det_region_annotated, det_region_note],
+            show_progress="hidden",
+        )
         det_image.clear(
             reset_single_detection_outputs,
             outputs=[det_progress, det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
         det_image.clear(lambda: gr.update(value=None, visible=False), outputs=det_compare_slider)
+        det_image.clear(
+            lambda: (None, None, "运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。"),
+            outputs=[det_region_original, det_region_annotated, det_region_note],
+        )
         det_image.change(image_quality_precheck, inputs=det_image, outputs=det_quality)
         det_image.change(single_empty_state_for_upload, inputs=det_image, outputs=det_empty_state)
         det_preset.change(apply_threshold_preset, inputs=det_preset, outputs=[det_conf, det_iou, det_threshold_hint])
@@ -8259,7 +8244,7 @@ def build_app() -> gr.Blocks:
         cmp_event = cmp_btn.click(
             run_model_comparison,
             inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
-            outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
             concurrency_id=INFERENCE_CONCURRENCY_ID,
             concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
@@ -8267,15 +8252,18 @@ def build_app() -> gr.Blocks:
         )
         cmp_image.clear(
             reset_model_comparison_outputs,
-            outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, fusion_image, fusion_table, fusion_note, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
+            outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
         cmp_image.change(compare_empty_state_for_upload, inputs=cmp_image, outputs=cmp_empty_state)
-        fusion_filter.change(render_fusion_view, inputs=[cmp_image, current_comparison, fusion_filter], outputs=[fusion_image, fusion_table, fusion_note])
         cmp_event.then(
-            render_latest_fusion_view,
-            inputs=[cmp_image, fusion_filter],
-            outputs=[fusion_image, fusion_table, fusion_note],
+            render_comparison_linked_region_view,
+            inputs=[cmp_image, current_comparison, cmp_region_selector],
+            outputs=[cmp_region_original, cmp_region_annotated, cmp_region_note],
             show_progress="hidden",
+        )
+        cmp_image.clear(
+            lambda: (None, None, "运行多模型对比后，可选择模型和区域查看联动放大结果。"),
+            outputs=[cmp_region_original, cmp_region_annotated, cmp_region_note],
         )
         cmp_region_selector.change(
             render_comparison_linked_region_view,
@@ -8315,6 +8303,16 @@ def build_app() -> gr.Blocks:
             latest_batch_report_outputs,
             outputs=[batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file],
             show_progress="hidden",
+        )
+        batch_event.then(
+            render_batch_linked_region_view,
+            inputs=[current_batch, batch_region_selector],
+            outputs=[batch_region_original, batch_region_annotated, batch_region_note],
+            show_progress="hidden",
+        )
+        batch_files.clear(
+            lambda: (None, None, "运行批量检测后，可选择图片和区域查看联动放大结果。"),
+            outputs=[batch_region_original, batch_region_annotated, batch_region_note],
         )
         batch_event.then(latest_batch_retry_controls, outputs=[batch_retry_selector, batch_retry_btn, batch_retry_panel])
         # Detection callbacks persist history immediately. Dashboard and history views
@@ -8382,7 +8380,14 @@ def find_free_port(start_port: int = 7860, attempts: int = 20) -> int:
 
 ensure_dirs()
 demo = build_app()
-app = gr.mount_gradio_app(api_app, demo, path="/", css=APP_CSS, head=ASK_AI_HEAD)
+app = gr.mount_gradio_app(
+    api_app,
+    demo,
+    path="/",
+    css=APP_CSS,
+    head=ASK_AI_HEAD,
+    allowed_paths=[str(OUTPUT_DIR.resolve())],
+)
 
 
 def schedule_output_cleanup() -> None:

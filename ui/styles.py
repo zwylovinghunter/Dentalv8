@@ -696,7 +696,7 @@ body[data-dental-page="report"] #page-report {
   font-size: 13px;
   line-height: 1.55;
 }
-.quality-grid, .fusion-legend {
+.quality-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
@@ -714,10 +714,6 @@ body[data-dental-page="report"] #page-report {
 .quality-ok { color: #15803d; }
 .quality-warn { color: #b45309; }
 .quality-bad { color: #b91c1c; }
-.fusion-legend { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.legend-high, .legend-low { border-radius: 8px; padding: 9px 11px; font-size: 13px; }
-.legend-high { background: linear-gradient(135deg, #ecfdf5, #f0fdf4); border: 1px solid #86efac; color: #166534; }
-.legend-low { background: linear-gradient(135deg, #fff1f2, #fff7ed); border: 1px solid #fda4af; color: #9f1239; }
 .det-input-row, .det-result-row {
   align-items: stretch !important;
 }
@@ -725,7 +721,6 @@ body[data-dental-page="report"] #page-report {
 .det-result-row,
 .compare-threshold-row,
 .compare-model-row,
-.compare-fusion-row,
 .batch-work-row,
 .batch-output-row,
 .batch-download-row,
@@ -749,7 +744,6 @@ body[data-dental-page="report"] #page-report {
 #page-image .det-result-row > *,
 #page-compare .compare-threshold-row > *,
 #page-compare .compare-model-row > *,
-#page-compare .compare-fusion-row > *,
 #page-batch .batch-work-row > *,
 #page-batch .batch-output-row > *,
 #page-batch .batch-download-row > *,
@@ -803,6 +797,16 @@ button.solid-primary-action {
 }
 #page-report .report-download-row {
   align-items: stretch !important;
+}
+.report-download-row .report-download-action {
+  flex: 1 1 180px !important;
+  min-width: 0 !important;
+}
+.report-download-row .report-download-action a,
+.report-download-row .report-download-action button {
+  width: 100% !important;
+  min-height: 44px !important;
+  justify-content: center !important;
 }
 #page-report .report-download-row .block,
 #page-report .report-download-row .file-preview,
@@ -1710,7 +1714,6 @@ body.dental-show-feedback-reason #chat-feedback-panel {
   .det-input-row,
   .det-result-row,
   .compare-model-row,
-  .compare-fusion-row,
   .batch-work-row,
   .linked-region-row,
   .dashboard-actions-row,
@@ -1725,7 +1728,6 @@ body.dental-show-feedback-reason #chat-feedback-panel {
   .det-input-row > *,
   .det-result-row > *,
   .compare-model-row > *,
-  .compare-fusion-row > *,
   .batch-work-row > *,
   .linked-region-row > *,
   .dashboard-actions-row > *,
@@ -2262,9 +2264,7 @@ button.solid-primary-action,
   align-self: stretch !important;
 }
 .detection-result-stack,
-.detection-result-stack > *,
-#page-compare .compare-fusion-row,
-#page-compare .compare-fusion-row > * {
+.detection-result-stack > * {
   width: 100% !important;
   height: auto !important;
   min-height: 0 !important;
@@ -2318,9 +2318,6 @@ button.solid-primary-action,
   min-height: 300px !important;
   max-height: 440px !important;
 }
-#page-compare .compare-fusion-row { display: block !important; }
-#page-compare .compare-fusion-row .image-container { max-height: 620px !important; }
-
 /* Gradio wraps both comparison sliders in one .form. Let that wrapper span
    the full parameter grid, then lay its two real controls out evenly. */
 #page-compare #compare-controls,
@@ -2560,7 +2557,6 @@ body[data-dental-page="report"] .dental-page-nav-item[data-page="report"] {
 .det-result-row,
 .compare-threshold-row,
 .compare-model-row,
-.compare-fusion-row,
 .batch-work-row,
 .batch-output-row,
 .batch-download-row,

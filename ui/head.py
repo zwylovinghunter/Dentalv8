@@ -104,6 +104,7 @@ ASK_AI_HEAD = r"""
 
     function usableImage(img) {
       if (!img || !img.src || img.naturalWidth < 40 || img.naturalHeight < 40) return false;
+      if (img.closest('.linked-region-row')) return false;
       const rect = img.getBoundingClientRect();
       return rect.width >= 80 && rect.height >= 80;
     }
