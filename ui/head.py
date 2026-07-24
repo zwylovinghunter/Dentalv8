@@ -400,9 +400,12 @@ ASK_AI_HEAD = r"""
     let category = "all";
     const apply = () => {
       const input = document.getElementById("disease-search-input");
+      const clear = document.getElementById("disease-search-clear");
+      const count = document.getElementById("education-result-count");
       const query = (input?.value || "").trim().toLowerCase();
       let visible = 0;
-      document.querySelectorAll(".education-card[data-disease]").forEach(card => {
+      const cards = Array.from(document.querySelectorAll(".education-card[data-disease]"));
+      cards.forEach(card => {
         const matchesCategory = category === "all" || card.dataset.disease === category;
         const matchesQuery = !query || (card.dataset.search || card.textContent || "").toLowerCase().includes(query);
         card.hidden = !(matchesCategory && matchesQuery);
@@ -410,11 +413,23 @@ ASK_AI_HEAD = r"""
       });
       const empty = document.querySelector(".education-no-result");
       if (empty) empty.hidden = visible > 0;
+      if (clear) clear.hidden = !query;
+      if (count) count.textContent = `显示 ${visible} / ${cards.length} 类`;
     };
     document.addEventListener("input", event => {
       if (event.target?.id === "disease-search-input") apply();
     });
     document.addEventListener("click", event => {
+      const clear = event.target?.closest?.("#disease-search-clear");
+      if (clear) {
+        const input = document.getElementById("disease-search-input");
+        if (input) {
+          input.value = "";
+          input.focus();
+        }
+        apply();
+        return;
+      }
       const button = event.target?.closest?.("[data-disease-filter]");
       if (!button) return;
       category = button.dataset.diseaseFilter || "all";
@@ -425,6 +440,12 @@ ASK_AI_HEAD = r"""
       });
       apply();
     });
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || event.target?.id !== "disease-search-input") return;
+      event.target.value = "";
+      apply();
+    });
+    apply();
   }
 
   function installDetectionWorkflowState() {

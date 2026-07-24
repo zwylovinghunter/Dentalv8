@@ -6170,54 +6170,101 @@ def disease_education_html() -> str:
     }
     cards = [
         {
+            "key": "caries",
+            "tone": "amber",
+            "code": "CARIES",
             "title": "龋坏 / Caries",
-            "subtitle": "常被称为“蛀牙”，模型会提示疑似牙体硬组织破坏区域。",
+            "subtitle": "牙菌斑代谢糖产生的酸会使牙体硬组织逐步脱矿，早期可能没有明显感觉。",
             "svg": tooth_svg["caries"],
-            "cause": "牙菌斑细菌利用糖产生酸，长期作用会让牙釉质和牙本质脱矿；清洁盲区、频繁含糖饮食、口干、修复体边缘也会增加风险。",
-            "symptom": "早期可能没有感觉；进展后可出现冷热敏感、咬合痛、食物嵌塞、牙面黑褐色改变或洞形缺损。",
-            "action": "减少含糖频率，使用含氟牙膏，认真清洁牙缝；不要自行抠挖或用偏方处理。",
-            "visit": "若出现持续敏感、疼痛、明显洞形或模型多次提示相近区域，建议尽快带原始影像找口腔医生复核。",
+            "location": "窝沟、邻面、牙颈部、修复体边缘",
+            "early": "常无症状，越早发现越容易保留牙体组织",
+            "cause": "频繁摄入含糖食物或饮料、菌斑未被有效清除、氟暴露不足、口干及难清洁的牙面形态都会增加风险。",
+            "image": "影像上可能表现为牙体局部透射度增加或连续性改变；邻面重叠、颈部透射和修复材料伪影也可能造成相似外观。模型只能标记候选区域，不能判断实际深度。",
+            "symptom": "早期通常没有感觉；进展后可出现冷热或甜食敏感、食物嵌塞、咬合不适、牙面色泽改变或洞形缺损。",
+            "risk": "继续进展可能累及牙髓，引起自发痛、夜间痛、感染或根尖周问题；疼痛突然减轻也不代表病变自行消失。",
+            "myth": "黑点不一定都是龋坏，没有疼痛也不能排除龋坏；是否需要处理取决于临床检查、活动性和累及深度。",
+            "prevention": "每天使用含氟牙膏刷牙两次，清洁牙缝，减少含糖食物和饮料的摄入频率，并按个人风险接受定期口腔检查。",
+            "visit": "出现持续敏感、明显洞形、自发痛，或模型在相近位置反复提示时，应预约口腔医生；若伴明显肿胀、发热或吞咽困难，应尽快就医。",
+            "review": "医生通常会结合视诊、探诊、牙髓状态和咬翼片/根尖片等判断是否为活动性龋坏，以及是否需要预防、充填或进一步牙髓评估。",
         },
         {
+            "key": "periapical",
+            "tone": "blue",
+            "code": "PERIAPICAL",
             "title": "根尖周异常 / Periapical Lesion",
-            "subtitle": "模型关注牙根尖周围可能需要复核的局部影像异常。",
+            "subtitle": "牙根尖周围的影像改变可能与牙髓和根尖周组织状态有关，也可能没有明显症状。",
             "svg": tooth_svg["periapical"],
-            "cause": "常与深龋、牙髓感染、牙外伤、既往根管治疗问题或慢性炎症有关，但影像表现需要结合临床检查判断。",
-            "symptom": "可能出现咬合痛、牙龈肿胀、脓包、持续隐痛，也可能没有明显症状，只在影像上被发现。",
-            "action": "记录疼痛位置和持续时间，避免自行服用或停用抗生素；若肿胀、发热、流脓或张口受限，应及时就诊。",
-            "visit": "建议由医生结合牙髓活力测试、叩诊、根尖片/CBCT 等进一步确认，模型结果不能替代诊断。",
+            "location": "牙根尖、根侧方及既往根管治疗牙周围",
+            "early": "可能完全无痛，仅在影像检查中被发现",
+            "cause": "常见相关因素包括深龋导致的牙髓感染、牙外伤、牙裂、既往根管治疗后的持续感染或根尖周组织慢性炎症。",
+            "image": "可能看到根尖周透射影、牙周膜间隙增宽或硬骨板改变；正常解剖结构、投照角度和重叠也可能形成类似影像，不能仅凭一个暗影确定性质。",
+            "symptom": "可能出现咬合痛、叩痛、牙龈脓包、局部肿胀、持续隐痛或牙齿变色；慢性病灶也可能没有明显症状。",
+            "risk": "感染活动时可能形成脓肿并向周围组织扩散。面部肿胀、发热、张口受限或吞咽/呼吸困难属于需要快速处理的警示信号。",
+            "myth": "根尖附近的透射影不等于已经确诊“脓肿”，无痛也不代表牙髓和根尖周组织一定健康，必须结合牙髓与临床检查。",
+            "prevention": "及时处理深龋和牙外伤，完成并按期复查根管治疗；不要依赖止痛药或自行使用抗生素掩盖反复症状。",
+            "visit": "持续咬合痛、牙龈反复起包、流脓或影像反复提示时应尽快预约；出现扩散性肿胀、发热或全身不适时需及时就诊。",
+            "review": "医生通常会询问疼痛史，进行叩诊、触诊、牙髓活力和牙周检查，并结合根尖片；只有在二维影像无法回答关键问题时才考虑进一步三维影像。",
         },
         {
-            "title": "阻生/埋伏牙 / Impacted",
-            "subtitle": "模型提示牙齿萌出方向、位置或空间可能异常的区域。",
+            "key": "impacted",
+            "tone": "teal",
+            "code": "IMPACTED",
+            "title": "阻生/埋伏牙 / Impacted Tooth",
+            "subtitle": "牙齿未能按正常路径完全萌出，常见于第三磨牙，也可发生于尖牙等其他牙位。",
             "svg": tooth_svg["impacted"],
-            "cause": "常见于智齿，也可能与牙弓空间不足、萌出方向异常、邻牙阻挡或发育位置异常有关。",
-            "symptom": "可能反复牙龈肿痛、食物嵌塞、张口不适、邻牙龋坏风险增加；也可能长期无症状。",
-            "action": "保持后牙区清洁，避免反复刺激肿痛部位；如果反复发炎，不要只靠止痛药拖延。",
-            "visit": "建议口腔医生评估阻生方向、邻牙关系和神经管风险，必要时结合 CBCT 制定处理方案。",
+            "location": "下颌第三磨牙最常见，也可见于上颌第三磨牙和尖牙",
+            "early": "可能长期无症状，不代表一定需要拔除",
+            "cause": "牙弓空间不足、萌出方向异常、邻牙或骨组织阻挡，以及牙齿发育位置异常，都可能造成部分或完全阻生。",
+            "image": "复核重点包括牙齿倾斜方向、埋伏深度、与邻牙和下颌神经管的关系，以及周围是否存在龋坏、骨吸收或囊性改变线索。",
+            "symptom": "可出现后牙区反复肿痛、食物嵌塞、口臭或异味、张口不适和邻牙敏感；也可能多年没有症状。",
+            "risk": "部分萌出的区域较难清洁，可能发生冠周炎、龋坏或牙周问题，并影响邻牙；但无病变、无症状的牙齿常可由医生定期监测。",
+            "myth": "发现阻生牙并不等于必须立即拔除。是否处理取决于症状、反复感染、邻牙损害、病理改变和手术相关解剖风险。",
+            "prevention": "重点清洁最后一颗磨牙及牙龈覆盖区域；反复肿痛时不要长期依赖止痛药，应接受口腔检查并讨论监测或处理方案。",
+            "visit": "出现反复冠周肿痛、张口受限、异味、邻牙龋坏或模型持续提示时应预约评估；若肿胀迅速扩大或伴发热，应及时就医。",
+            "review": "医生会结合口内检查和全景片评估萌出空间、邻牙损害及手术难度；当下颌神经管关系不清或存在复杂病变疑问时，才可能进一步评估三维影像。",
         },
     ]
     card_html = []
-    disease_keys = ("caries", "periapical", "impacted")
     for index, card in enumerate(cards, 1):
-        search_text = " ".join(str(card[key]) for key in ("title", "subtitle", "cause", "symptom", "action", "visit"))
+        search_text = " ".join(
+            str(card[key])
+            for key in ("title", "subtitle", "location", "early", "cause", "image", "symptom", "risk", "myth", "prevention", "visit", "review")
+        )
         card_html.append(
-            f"<article class='education-card' data-disease='{disease_keys[index - 1]}' data-search='{xml_escape(search_text)}'>"
+            f"<article class='education-card education-card--{card['tone']}' data-disease='{card['key']}' data-search='{xml_escape(search_text)}'>"
             "<div class='education-card-top'>"
             f"<div class='education-visual'>{card['svg']}</div>"
-            "<div>"
-            f"<span class='education-badge'>重点 {index:02d}</span>"
+            "<div class='education-card-heading'>"
+            f"<div class='education-card-kicker'><span class='education-badge'>类别 {index:02d}</span><span class='education-code'>{card['code']}</span></div>"
             f"<h3>{card['title']}</h3>"
             f"<div class='subtitle'>{card['subtitle']}</div>"
             "</div>"
             "</div>"
-            "<dl>"
-            f"<div><dt>常见成因</dt><dd>{card['cause']}</dd></div>"
-            f"<div><dt>可能症状</dt><dd>{card['symptom']}</dd></div>"
-            f"<div><dt>日常应对</dt><dd>{card['action']}</dd></div>"
-            f"<div><dt>就医建议</dt><dd>{card['visit']}</dd></div>"
-            "</dl>"
-            "<div class='education-card-note'>影像识别只负责提示疑似区域；症状、口内检查和原始影像复核同样关键。</div>"
+            "<div class='education-card-snapshot'>"
+            f"<div><span>常见部位</span><b>{card['location']}</b></div>"
+            f"<div><span>早期特点</span><b>{card['early']}</b></div>"
+            "</div>"
+            "<details class='education-detail' open>"
+            "<summary><span>01</span>模型提示与影像线索</summary>"
+            "<div class='education-detail-grid'>"
+            f"<div><b>相关因素</b><p>{card['cause']}</p></div>"
+            f"<div><b>影像复核</b><p>{card['image']}</p></div>"
+            "</div></details>"
+            "<details class='education-detail'>"
+            "<summary><span>02</span>症状、风险与常见误区</summary>"
+            "<div class='education-detail-grid'>"
+            f"<div><b>可能表现</b><p>{card['symptom']}</p></div>"
+            f"<div><b>需要关注</b><p>{card['risk']}</p></div>"
+            f"<div class='education-detail-wide education-myth'><b>避免误解</b><p>{card['myth']}</p></div>"
+            "</div></details>"
+            "<details class='education-detail'>"
+            "<summary><span>03</span>预防、就医与专业复核</summary>"
+            "<div class='education-detail-grid'>"
+            f"<div><b>日常预防</b><p>{card['prevention']}</p></div>"
+            f"<div><b>就医时机</b><p>{card['visit']}</p></div>"
+            f"<div class='education-detail-wide'><b>医生如何复核</b><p>{card['review']}</p></div>"
+            "</div></details>"
+            "<div class='education-card-note'><b>模型边界</b><span>检测框只代表需要查看的候选区域，不能单独确定病变性质、严重程度或治疗方案。</span></div>"
             "</article>"
         )
     insight_svg = """
@@ -6257,8 +6304,15 @@ def disease_education_html() -> str:
     return f"""
     <section class='education-shell'>
     <section class='education-toolbar' aria-label='牙病学习检索'>
-      <label for='disease-search-input'>关键词搜索</label>
-      <input id='disease-search-input' type='search' placeholder='搜索病变、症状或建议' autocomplete='off'>
+      <div class='education-search-label'>
+        <b>知识检索</b>
+        <span id='education-result-count' aria-live='polite'>显示 3 / 3 类</span>
+      </div>
+      <div class='education-search-box'>
+        <span aria-hidden='true'>⌕</span>
+        <input id='disease-search-input' type='search' placeholder='搜索病变、症状、影像线索或就医建议' autocomplete='off' aria-controls='education-disease-grid'>
+        <button id='disease-search-clear' type='button' aria-label='清除搜索内容' hidden>清除</button>
+      </div>
       <div class='education-directory' role='group' aria-label='类别目录'>
         <button type='button' class='active' data-disease-filter='all' aria-pressed='true'>全部</button>
         <button type='button' data-disease-filter='caries' aria-pressed='false'>龋坏</button>
@@ -6268,13 +6322,13 @@ def disease_education_html() -> str:
     </section>
     <section class='education-hero'>
       <div class='education-panel'>
-        <div class='education-eyebrow'>Dental Lesion Atlas</div>
-        <h2>牙齿病变介绍</h2>
-        <p class='education-lead'>用更清晰的影像复核思路理解模型检测覆盖的三类常见疑似病变：龋坏、根尖周异常、阻生/埋伏牙。先看疑似区域的位置和类别，再结合症状、置信度、邻近结构与就医风险进行判断。页面中的图示是科普示意图，真实结论仍需专业口腔医生结合原始影像和临床检查复核。</p>
+        <div class='education-eyebrow'>Dental Lesion Learning Center</div>
+        <h2>看懂牙齿病变线索，<br><span>更有依据地完成复核</span></h2>
+        <p class='education-lead'>本页围绕模型覆盖的龋坏、根尖周异常和阻生/埋伏牙三类候选区域，解释影像线索、可能症状、风险因素、常见误区和就医时机。阅读顺序建议从“模型提示什么”开始，再结合原始影像、症状变化和医生检查判断。</p>
         <div class='education-metrics'>
-          <div class='education-metric'><b>3 类</b><span>常见疑似病变</span></div>
-          <div class='education-metric'><b>4 步</b><span>从影像线索到人工复核</span></div>
-          <div class='education-metric'><b>安全边界</b><span>只做辅助提示，不替代诊断</span></div>
+          <div class='education-metric'><b>3 类</b><span>模型覆盖的候选病变</span></div>
+          <div class='education-metric'><b>9 维</b><span>从成因到专业复核</span></div>
+          <div class='education-metric'><b>分级指引</b><span>常规、尽快与紧急就医</span></div>
         </div>
       </div>
       <aside class='education-insight-panel'>
@@ -6285,33 +6339,66 @@ def disease_education_html() -> str:
             <li>检测框位置是否落在牙体、牙根或阻生牙相关区域附近</li>
             <li>类别含义是否与症状、原始影像细节相互印证</li>
             <li>低置信度和重叠结构区域需要更谨慎人工复核</li>
+            <li>模型未检出不等于排除病变，持续症状仍需口腔检查</li>
           </ul>
         </div>
       </aside>
     </section>
     <section class='education-review-strip'>
-      <div class='education-review-step'><b>01</b><div><span>定位疑似区域</span><small>先看检测框落点、邻近牙位和是否处在清洁盲区。</small></div></div>
-      <div class='education-review-step'><b>02</b><div><span>理解类别含义</span><small>区分龋坏、根尖周异常、阻生/埋伏牙这三类检测结果。</small></div></div>
-      <div class='education-review-step'><b>03</b><div><span>结合症状线索</span><small>把疼痛、肿胀、出血、敏感、口臭等症状与影像区域对应起来。</small></div></div>
-      <div class='education-review-step'><b>04</b><div><span>安排人工复核</span><small>把高风险或反复提示区域交给口腔医生结合原片判断。</small></div></div>
+      <div class='education-review-step'><b>01</b><div><span>定位</span><small>核对牙位、检测框落点和邻近解剖结构。</small></div></div>
+      <div class='education-review-step'><b>02</b><div><span>辨类</span><small>理解类别含义，但不把模型类别直接当作诊断。</small></div></div>
+      <div class='education-review-step'><b>03</b><div><span>对症</span><small>记录疼痛、肿胀、敏感和持续时间等真实表现。</small></div></div>
+      <div class='education-review-step'><b>04</b><div><span>复核</span><small>带原片和症状记录，由口腔医生决定下一步。</small></div></div>
     </section>
-    <section class='education-grid'>
+    <header class='education-section-heading'>
+      <div><span>病变知识卡</span><h3>三类候选区域逐项解读</h3></div>
+      <p>点击卡片内的小节可展开或收起详细内容；搜索会同时匹配隐藏的小节文字。</p>
+    </header>
+    <section id='education-disease-grid' class='education-grid'>
     {"".join(card_html)}
     </section>
     <p class='education-no-result' hidden>没有匹配的内容，请尝试其他关键词。</p>
-    <section class='education-footer-grid'>
-      <div class='education-tip'>
-        <b>需要尽快就医的信号</b>
-        <ul>
-          <li>持续疼痛、咬合痛、夜间痛或冷热刺激后长时间不缓解。</li>
-          <li>面部或牙龈肿胀、发热、流脓、张口受限。</li>
-          <li>外伤后牙齿变色、松动，或疑似区域反复出现在相近位置。</li>
-        </ul>
+    <section class='education-triage' aria-labelledby='education-triage-title'>
+      <header class='education-section-heading education-section-heading--inverse'>
+        <div><span>就医紧急度</span><h3 id='education-triage-title'>根据症状决定行动优先级</h3></div>
+        <p>以下仅作一般性分流提示；儿童、孕期、免疫功能受影响或有复杂基础疾病者，应更早咨询专业人员。</p>
+      </header>
+      <div class='education-triage-grid'>
+        <article class='education-triage-card education-triage-card--emergency'>
+          <span>立即处理</span><h4>前往急诊或呼叫当地急救</h4>
+          <ul><li>呼吸、吞咽或说话困难</li><li>口内或面部肿胀迅速扩大</li><li>眼周肿痛、视力异常或明显全身不适</li></ul>
+        </article>
+        <article class='education-triage-card education-triage-card--urgent'>
+          <span>尽快就诊</span><h4>联系口腔急诊或近期预约</h4>
+          <ul><li>持续或剧烈牙痛、夜间痛、咬合痛</li><li>发热、流脓、牙龈或面部肿胀</li><li>张口受限、反复冠周炎或外伤后异常</li></ul>
+        </article>
+        <article class='education-triage-card education-triage-card--routine'>
+          <span>常规复核</span><h4>安排口腔检查并持续观察</h4>
+          <ul><li>无症状但模型反复提示相近位置</li><li>偶发敏感、食物嵌塞或难清洁区域</li><li>无症状阻生牙或既往治疗牙定期复查</li></ul>
+        </article>
       </div>
-      <div class='education-tip'>
-        <b>重要声明</b>
-        <p>{FULL_DISCLAIMER}</p>
-      </div>
+    </section>
+    <section class='education-prep-grid'>
+      <article class='education-prep-card'>
+        <span class='education-prep-index'>A</span>
+        <div><h3>就诊前准备清单</h3><ul><li>保存原始影像，不要只带压缩截图或标注图。</li><li>记录疼痛起始时间、诱因、持续时长和是否影响睡眠。</li><li>说明既往补牙、根管治疗、外伤及用药情况。</li><li>准备过敏史、基础疾病和正在使用的药物信息。</li></ul></div>
+      </article>
+      <article class='education-prep-card education-prep-card--prevention'>
+        <span class='education-prep-index'>B</span>
+        <div><h3>日常口腔健康基础</h3><ul><li>每天使用含氟牙膏刷牙两次，并清洁牙缝。</li><li>减少含糖零食和饮料的摄入频率，饮水优先。</li><li>不自行抠挖病变，不用偏方替代专业检查。</li><li>根据个人风险安排定期口腔检查与洁治。</li></ul></div>
+      </article>
+    </section>
+    <section class='education-evidence'>
+      <div><span>资料核对</span><h3>中国权威口腔健康资料</h3><p>页面文案参考中国卫生健康主管部门、疾病预防控制机构及公立口腔专科医院发布的健康教育信息，并转换为适合本系统模型类别的复核提示。</p></div>
+      <nav aria-label='牙病科普资料来源'>
+        <a href='https://www.nhc.gov.cn/wjw/jkshfs/200909/058b3e9ade454a3f9f8bfe807ae78aaa.shtml' target='_blank' rel='noopener noreferrer'>国家卫生健康委：中国居民口腔健康指南</a>
+        <a href='https://www.chinacdc.cn/jkkp/mxfcrb/kqjk/202603/t20260323_315840.html' target='_blank' rel='noopener noreferrer'>中国疾控中心：口腔健康常见误区</a>
+        <a href='https://ss.bjmu.edu.cn/Html/News/Articles/1180.html' target='_blank' rel='noopener noreferrer'>北京大学口腔医院：龋齿与治疗</a>
+        <a href='https://hxkq.org/Html/Hospitals/Departments/Index37.html' target='_blank' rel='noopener noreferrer'>四川大学华西口腔医院：阻生牙</a>
+      </nav>
+    </section>
+    <section class='education-disclaimer'>
+      <b>重要声明</b><p>{FULL_DISCLAIMER}</p>
     </section>
     </section>
     """
