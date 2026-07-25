@@ -5994,7 +5994,7 @@ def dashboard_markdown(
 ) -> str:
     history = history if history is not None else load_history()
     stats = stats if stats is not None else dashboard_stats(history)
-    avg_conf = f"{stats['avg_confidence']:.3f}" if stats["avg_confidence"] else "-"
+    avg_conf = f"{stats['avg_confidence'] * 100:.1f}%" if stats["avg_confidence"] else "-"
     events = history.get("events", [])
     day_counts: dict[str, int] = {}
     for event in events:
@@ -6004,37 +6004,120 @@ def dashboard_markdown(
     recent_days = sorted(day_counts)[-7:]
     max_day = max((day_counts[day] for day in recent_days), default=1)
     trend = "".join(
-        f"<div class='dashboard-trend-bar' title='{day}：{day_counts[day]} 个任务'><i style='height:{max(8, int(day_counts[day] / max_day * 100))}%'></i><span>{day[5:]}</span></div>"
+        f"<div class='dashboard-trend-bar' title='{day}：{day_counts[day]} 个任务' aria-label='{day}，{day_counts[day]} 个任务'>"
+        f"<b>{day_counts[day]}</b><i style='height:{max(8, int(day_counts[day] / max_day * 100))}%'></i><span>{day[5:].replace('-', '/')}</span></div>"
         for day in recent_days
-    ) or "<p class='empty'>暂无趋势数据</p>"
+    ) or "<div class='dashboard-empty-state'><b>暂无趋势数据</b><span>完成检测后，这里会显示最近任务变化。</span></div>"
     anomalies = []
     rows = rows if rows is not None else history_event_rows(events)
     for row in reversed(rows):
         if str(row[8]) in {"强烈建议人工复核", "建议人工复核", "无法评估"}:
             anomalies.append(
                 f"<li><span class='status-dot {'status-failed' if row[8] == '无法评估' else 'status-review'}'></span>"
-                f"<b>{xml_escape(str(row[2]))}</b><small>{xml_escape(str(row[1]))} · {xml_escape(str(row[8]))}</small></li>"
+                f"<div><b>{xml_escape(str(row[2]))}</b><small>{xml_escape(str(row[1]))} · {xml_escape(str(row[0]))}</small></div>"
+                f"<em>{xml_escape(str(row[8]))}</em></li>"
             )
         if len(anomalies) >= 6:
             break
     storage_bytes = output_storage_bytes()
-    storage_text = f"{storage_bytes / 1024**2:.0f} MB" if storage_bytes is not None else "后台统计"
-    lines = [
-        "<div class='section-note compact-section-note'><b>首页 Dashboard</b><br>任务指标、近期趋势和待复核异常集中展示。</div>",
-        "<div class='metric-grid'>",
-        f"<div class='metric-card'><div class='metric-label'>检测任务</div><div class='metric-value'>{stats['image_tasks']}</div><div class='metric-sub'>累计图片</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>疑似区域</div><div class='metric-value'>{stats['target_count']}</div><div class='metric-sub'>YOLO 输出</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>重点复核</div><div class='metric-value'>{stats['high_review_count']}</div><div class='metric-sub'>建议复核及以上</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>平均置信度</div><div class='metric-value'>{avg_conf}</div><div class='metric-sub'>成功结果</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>失败任务</div><div class='metric-value'>{stats['failure_count']}</div><div class='metric-sub'>需检查</div></div>",
-        f"<div class='metric-card'><div class='metric-label'>产物空间</div><div class='metric-value'>{storage_text}</div><div class='metric-sub'>自动保留 {OUTPUT_RETENTION_DAYS} 天</div></div>",
-        "</div>",
-        "<div class='dashboard-operations-grid'>",
-        f"<section class='dashboard-compact-panel'><header><b>近期任务趋势</b><span>最近 7 个活跃日</span></header><div class='dashboard-trend'>{trend}</div></section>",
-        f"<section class='dashboard-compact-panel'><header><b>异常与复核任务</b><span>最近记录</span></header><ul class='dashboard-anomaly-list'>{''.join(anomalies) if anomalies else '<li class=empty>暂无异常任务</li>'}</ul></section>",
-        "</div>",
-    ]
-    return "\n".join(lines)
+    if storage_bytes is None:
+        storage_text = "统计中"
+    elif storage_bytes >= 1024**3:
+        storage_text = f"{storage_bytes / 1024**3:.1f} GB"
+    else:
+        storage_text = f"{storage_bytes / 1024**2:.0f} MB"
+    registry = get_registry()
+    ready_models = sum(1 for spec in MODEL_SPECS if (registry.get(spec.key) or {}).get("weight_path"))
+    latest_activity = (
+        xml_escape(str(events[-1].get("created_at", "未知时间"))[:16])
+        if events
+        else "尚无检测记录"
+    )
+    review_ratio = (
+        stats["high_review_count"] / stats["target_count"] * 100
+        if stats["target_count"]
+        else 0.0
+    )
+    overview_text = (
+        f"已累计处理 {stats['image_tasks']} 张影像，检出 {stats['target_count']} 个候选区域，"
+        f"其中 {stats['high_review_count']} 个需要重点人工复核。"
+        if stats["image_tasks"]
+        else "当前暂无检测记录。可从单图检测、多模型对比或批量检测开始新的分析任务。"
+    )
+    anomaly_html = (
+        "".join(anomalies)
+        if anomalies
+        else "<li class='dashboard-empty-row'><div><b>暂无待处理异常</b><small>需要复核或无法评估的任务会显示在这里。</small></div></li>"
+    )
+    return f"""
+    <div class='dashboard-shell'>
+      <section class='dashboard-overview' aria-labelledby='dashboard-title'>
+        <div class='dashboard-overview-copy'>
+          <div class='dashboard-eyebrow'><span aria-hidden='true'></span>影像分析工作台</div>
+          <h2 id='dashboard-title'>从检测任务到人工复核，<br><span>关键状态一屏掌握</span></h2>
+          <p>{overview_text}</p>
+          <div class='dashboard-quick-actions' aria-label='快速开始'>
+            <button type='button' class='dashboard-quick-link dental-page-nav-item' data-page='image'>
+              <span>01</span><b>单图检测</b><small>上传一张影像开始分析</small>
+            </button>
+            <button type='button' class='dashboard-quick-link dental-page-nav-item' data-page='compare'>
+              <span>02</span><b>多模型对比</b><small>对照三个模型的检测差异</small>
+            </button>
+            <button type='button' class='dashboard-quick-link dental-page-nav-item' data-page='batch'>
+              <span>03</span><b>批量检测</b><small>集中处理多张口腔影像</small>
+            </button>
+          </div>
+        </div>
+        <aside class='dashboard-runtime-card' aria-label='运行状态'>
+          <div class='dashboard-runtime-head'><span><i aria-hidden='true'></i>运行概况</span><b>本地工作区</b></div>
+          <dl>
+            <div><dt>模型权重</dt><dd>{ready_models} / {len(MODEL_SPECS)} 就绪</dd></div>
+            <div><dt>失败结果</dt><dd class='{'dashboard-runtime-alert' if stats['failure_count'] else ''}'>{stats['failure_count']} 个</dd></div>
+            <div><dt>产物空间</dt><dd>{storage_text}</dd></div>
+            <div><dt>自动保留</dt><dd>{OUTPUT_RETENTION_DAYS} 天</dd></div>
+          </dl>
+          <div class='dashboard-runtime-foot'>
+            <span>最近活动</span><b>{latest_activity}</b>
+            <button type='button' class='dashboard-history-link dental-page-nav-item' data-page='history'>查看完整历史记录 →</button>
+          </div>
+        </aside>
+      </section>
+
+      <header class='dashboard-section-title'>
+        <div><span>核心指标</span><h3>检测与复核概览</h3></div>
+        <p>数据根据本地检测历史自动汇总，刷新后可获取最新结果。</p>
+      </header>
+      <section class='dashboard-kpi-grid' aria-label='Dashboard 核心指标'>
+        <article class='dashboard-kpi-card dashboard-kpi-card--blue'>
+          <header><span>01</span><em>任务规模</em></header><strong>{stats['image_tasks']}</strong>
+          <h3>检测影像</h3><p>单图、对比和批量任务累计处理的图片数量</p>
+        </article>
+        <article class='dashboard-kpi-card dashboard-kpi-card--cyan'>
+          <header><span>02</span><em>模型输出</em></header><strong>{stats['target_count']}</strong>
+          <h3>疑似区域</h3><p>全部真实 YOLO 推理结果中的候选区域总数</p>
+        </article>
+        <article class='dashboard-kpi-card dashboard-kpi-card--amber'>
+          <header><span>03</span><em>复核队列</em></header><strong>{stats['high_review_count']}</strong>
+          <h3>重点复核</h3><p>占候选区域 {review_ratio:.1f}%，建议结合原始影像检查</p>
+        </article>
+        <article class='dashboard-kpi-card dashboard-kpi-card--teal'>
+          <header><span>04</span><em>结果概况</em></header><strong>{avg_conf}</strong>
+          <h3>平均置信度</h3><p>仅统计包含候选区域的成功检测结果</p>
+        </article>
+      </section>
+
+      <section class='dashboard-operations-grid'>
+        <section class='dashboard-compact-panel dashboard-trend-panel'>
+          <header><div><span>任务走势</span><b>近期检测趋势</b></div><em>最近 7 个有记录日期</em></header>
+          <div class='dashboard-trend'>{trend}</div>
+        </section>
+        <section class='dashboard-compact-panel dashboard-review-panel'>
+          <header><div><span>人工复核</span><b>异常与重点任务</b></div><em>最多显示 6 条</em></header>
+          <ul class='dashboard-anomaly-list'>{anomaly_html}</ul>
+        </section>
+      </section>
+    </div>
+    """
 
 
 def dashboard_chart_data(stats: dict[str, Any] | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -7999,18 +8082,30 @@ def build_app() -> gr.Blocks:
             gr.HTML(disease_education_html())
 
         with gr.Group(elem_id="page-dashboard", elem_classes=["dental-page"]):
-            dashboard = gr.Markdown(dashboard_initial)
+            dashboard = gr.HTML(dashboard_initial, elem_classes=["dashboard-overview-html"])
             with gr.Row(elem_classes="dashboard-actions-row"):
-                refresh_btn = gr.Button("刷新 Dashboard")
-                clear_history_btn = gr.Button("清空历史记录")
-            with gr.Row(elem_classes="dashboard-chart-row"):
-                kpi_chart = gr.BarPlot(kpi_initial, x="指标", y="数值", title="核心指标总览", y_title="数值", height=260, x_label_angle=-20)
-                risk_chart = gr.BarPlot(risk_initial, x="风险等级", y="数量", title="风险等级数量统计", y_title="数量", height=260)
-            with gr.Row(elem_classes="dashboard-chart-row"):
-                time_chart = gr.BarPlot(time_initial, x="模型", y="平均耗时(ms)", title="模型平均推理耗时", y_title="ms", height=280, x_label_angle=-20)
-                conf_chart = gr.BarPlot(conf_initial, x="模型", y="平均置信度(%)", title="模型平均置信度", y_title="%", height=280)
-            model_status = gr.Markdown(registry_status_markdown())
-            history_notice = gr.Markdown("暂无检测历史，请先上传图片并运行检测。" if not history_rows() else "以下为最近检测历史。")
+                refresh_btn = gr.Button("刷新 Dashboard", variant="primary", elem_classes=["dashboard-refresh-action"])
+                clear_history_btn = gr.Button("清空历史记录", elem_classes=["dashboard-clear-action"])
+            gr.HTML(
+                "<header class='dashboard-section-title dashboard-chart-heading'>"
+                "<div><span>统计分析</span><h3>任务与模型表现</h3></div>"
+                "<p>展开详细图表，查看风险等级、模型耗时和平均置信度分布。</p>"
+                "</header>"
+            )
+            with gr.Accordion("详细统计图表", open=True, elem_classes=["dashboard-analytics-panel"]):
+                with gr.Row(elem_classes="dashboard-chart-row"):
+                    kpi_chart = gr.BarPlot(kpi_initial, x="指标", y="数值", title="任务与结果总览", y_title="数值", height=250, x_label_angle=-20)
+                    risk_chart = gr.BarPlot(risk_initial, x="风险等级", y="数量", title="风险等级分布", y_title="数量", height=250)
+                with gr.Row(elem_classes="dashboard-chart-row"):
+                    time_chart = gr.BarPlot(time_initial, x="模型", y="平均耗时(ms)", title="模型平均推理耗时", y_title="ms", height=270, x_label_angle=-20)
+                    conf_chart = gr.BarPlot(conf_initial, x="模型", y="平均置信度(%)", title="模型平均置信度", y_title="%", height=270)
+            with gr.Accordion("模型权重与数据状态", open=False, elem_classes=["dashboard-status-panel"]):
+                model_status = gr.Markdown(registry_status_markdown())
+                history_notice = gr.Markdown(
+                    "暂无检测历史，请先上传图片并运行检测。"
+                    if not history_rows()
+                    else "Dashboard 数据已从最近检测历史完成汇总。"
+                )
 
         with gr.Group(elem_id="page-image", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>图像检测</b><br>按步骤完成单张口腔影像上传、模型选择、阈值设置、真实 YOLO 推理和人工复核建议查看。</div>")
