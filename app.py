@@ -53,6 +53,7 @@ from ui.empty_states import (
     build_detection_empty_state,
     compare_empty_state_for_upload,
     detection_empty_state_update,
+    detection_progress_complete,
     detection_progress_hide,
     detection_progress_update,
     single_empty_state_for_upload,
@@ -60,13 +61,35 @@ from ui.empty_states import (
 from ui.head import ASK_AI_HEAD
 from ui.styles import APP_CSS
 
-# Ollama Cloud does not require local Ollama installation, but it requires OLLAMA_API_KEY.
+# Cloud assistant provider. Google Gemini is the default; set
+# DENTAL_AI_PROVIDER=ollama to switch back without changing application code.
+AI_CLOUD_PROVIDER = os.getenv("DENTAL_AI_PROVIDER", "google").strip().lower()
+GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")).strip()
+GOOGLE_BASE_URL = os.getenv("GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").strip().rstrip("/")
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.6-flash").strip()
+GOOGLE_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv("GOOGLE_FALLBACK_MODELS", "gemini-3.5-flash-lite").split(",")
+    if model.strip()
+]
+GOOGLE_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TIMEOUT_SECONDS", "40"))
+GOOGLE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TOTAL_TIMEOUT_SECONDS", "55"))
+
+# Ollama Cloud remains available as a selectable provider.
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api/chat").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b").strip()
 OLLAMA_FALLBACK_MODELS = [m.strip() for m in os.getenv("OLLAMA_FALLBACK_MODELS", "qwen3.5:397b,deepseek-v4-flash").split(",") if m.strip()]
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "35"))
 OLLAMA_TOTAL_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TOTAL_TIMEOUT_SECONDS", "45"))
+
+
+def ollama_provider_label() -> str:
+    """Return the actual Ollama model name shown in the assistant switcher."""
+    model_name = OLLAMA_MODEL or "gpt-oss:20b"
+    if model_name.lower() == "gpt-oss:20b":
+        return "GPT-OSS 20B（Ollama）"
+    return f"Ollama · {model_name}"
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
@@ -1103,6 +1126,34 @@ def workflow_header(kind: str, active_step: int = 1) -> str:
     return f"<ol class='detection-workflow' data-workflow-kind='{xml_escape(kind)}' data-active-step='{active_step}' aria-label='检测工作流'>" + "".join(items) + "</ol>"
 
 
+def detection_page_intro(title: str, description: str, badges: tuple[str, ...]) -> str:
+    badge_html = "".join(f"<span>{xml_escape(item)}</span>" for item in badges)
+    return (
+        "<header class='detection-page-hero'>"
+        "<div class='detection-page-hero-copy'>"
+        "<small>影像辅助识别工作台</small>"
+        f"<h2>{xml_escape(title)}</h2>"
+        f"<p>{xml_escape(description)}</p>"
+        "</div>"
+        f"<div class='detection-page-badges' aria-label='{xml_escape(title)}特点'>{badge_html}</div>"
+        "</header>"
+    )
+
+
+def detection_result_tabs(kind: str, tabs: tuple[tuple[str, str], ...]) -> str:
+    buttons = "".join(
+        f"<button type='button' class='detection-result-tab' data-result-tab='{xml_escape(key)}' "
+        f"aria-selected='false' aria-expanded='false'>{xml_escape(label)}</button>"
+        for key, label in tabs
+    )
+    return (
+        f"<nav class='detection-result-tabs' data-result-tabs-kind='{xml_escape(kind)}' "
+        "aria-label='检测结果导航'>"
+        f"<div class='detection-result-tab-list'>{buttons}</div>"
+        "</nav>"
+    )
+
+
 def batch_task_list_html(items: list[dict[str, Any]] | None, total: int | None = None, active_index: int | None = None) -> str:
     records = list(items or [])
     total = max(int(total or len(records)), len(records))
@@ -1158,17 +1209,53 @@ def latest_single_compare_slider_update() -> Any:
     return single_compare_slider_update(get_latest_ai_context().get("detection"))
 
 
-def comparison_slider_outputs(results: list[dict[str, Any]] | None) -> tuple[Any, Any, Any]:
+def comparison_slider_updates(
+    results: list[dict[str, Any]] | None,
+    original_image: Any | None = None,
+    rendered_images: list[Any] | None = None,
+) -> tuple[Any, Any, Any]:
+    """Build up to three compare sliders, falling back to in-memory images.
+
+    Asset files are preferred for the settled result because they are smaller
+    and remain available to the browser after a streamed callback completes.
+    During the streamed comparison, however, an asset may not have been saved
+    yet (or a single model may fail while rendering).  Keeping the PIL fallback
+    here prevents the third slider from disappearing and makes progress visible
+    after every model.
+    """
     updates: list[Any] = []
-    for result in list(results or [])[:3]:
+    records = list(results or [])[:3]
+    rendered = list(rendered_images or [])
+    original_display = display_image(original_image)
+    record_count = min(3, max(len(records), len(rendered)))
+    for index in range(record_count):
+        result = records[index] if index < len(records) else {}
         assets = result.get("visual_assets") or {}
         original = assets.get("original")
         annotated = assets.get("result")
         available = bool(original and annotated and Path(original).exists() and Path(annotated).exists())
-        updates.append(gr.update(value=(original, annotated) if available else None, visible=available, slider_position=50))
+        if available:
+            updates.append(gr.update(value=(original, annotated), visible=True, slider_position=50))
+            continue
+
+        fallback_result = display_image(rendered[index]) if index < len(rendered) else None
+        if original_display is not None and fallback_result is not None:
+            updates.append(
+                gr.update(
+                    value=(original_display.copy(), fallback_result),
+                    visible=True,
+                    slider_position=50,
+                )
+            )
+        else:
+            updates.append(gr.update(value=None, visible=False))
     while len(updates) < 3:
         updates.append(gr.update(value=None, visible=False))
     return tuple(updates)
+
+
+def comparison_slider_outputs(results: list[dict[str, Any]] | None) -> tuple[Any, Any, Any]:
+    return comparison_slider_updates(results)
 
 
 def comparison_slider_output(results: list[dict[str, Any]] | None, index: int) -> Any:
@@ -2009,14 +2096,10 @@ def model_comparison_progress_outputs(
     original_image: Any | None = None,
 ) -> tuple[Any, ...]:
     rendered_images = rendered_images or []
-    try:
-        original = display_image(original_image) if original_image is not None else None
-    except Exception:
-        original = None
-    image_updates = (
-        [gr.update(value=None, visible=False) for _ in range(3)]
-        if not rendered_images
-        else [gr.skip(), gr.skip(), gr.skip()]
+    image_updates = comparison_slider_updates(
+        [],
+        original_image=original_image,
+        rendered_images=rendered_images,
     )
     return (
         detection_progress_update(percent, title, detail),
@@ -2037,7 +2120,7 @@ def model_comparison_progress_outputs(
     )
 
 
-@gated_inference_job(20, "compare", "多模型会诊")
+@gated_inference_job(17, "compare", "多模型会诊")
 def run_model_comparison(
     image: Any,
     conf: float,
@@ -2049,27 +2132,56 @@ def run_model_comparison(
     progress=gr.Progress(track_tqdm=False),
 ):
     yield model_comparison_progress_outputs(5, "多模型会诊准备中", "正在读取上传影像，并准备依次运行三个模型。", original_image=image)
-    with INFERENCE_JOB_LOCK:
-        results = []
-        rendered_images = []
-        shared_original_asset: str | None = None
-        for index, spec in enumerate(MODEL_SPECS, 1):
-            progress((index - 1) / max(1, len(MODEL_SPECS)), desc=f"正在运行模型对比：{spec.name}（{index}/{len(MODEL_SPECS)}）")
-            yield model_comparison_progress_outputs(
-                8 + (index - 1) * 27,
-                f"正在运行模型 {index}/{len(MODEL_SPECS)}",
-                f"{spec.name} 正在推理，请稍候。",
-                rendered_images,
-                image,
+    results = []
+    rendered_images = []
+    shared_original_asset: str | None = None
+    for index, spec in enumerate(MODEL_SPECS, 1):
+        progress((index - 1) / max(1, len(MODEL_SPECS)), desc=f"正在运行模型对比：{spec.name}（{index}/{len(MODEL_SPECS)}）")
+        yield model_comparison_progress_outputs(
+            8 + (index - 1) * 27,
+            f"正在运行模型 {index}/{len(MODEL_SPECS)}",
+            f"{spec.name} 正在推理，请稍候。",
+            rendered_images,
+            image,
+        )
+
+        # Keep the process lock around the actual model call only.  Holding it
+        # across streamed yields made the first comparison look frozen and
+        # blocked unrelated UI callbacks while the next model was preparing.
+        try:
+            with INFERENCE_JOB_LOCK:
+                result, rendered = run_detection_core(
+                    image,
+                    spec.key,
+                    conf,
+                    iou,
+                    show_label,
+                    show_confidence,
+                    line_width,
+                    color_mode,
+                )
+        except Exception:
+            try:
+                fallback_image = normalize_image(image)
+            except Exception:
+                fallback_image = None
+            result = empty_result(
+                spec.key,
+                "inference_failed",
+                fallback_image,
+                [],
+                f"{spec.name}推理未完成，已跳过该模型并继续其它模型。",
             )
-            result, rendered = run_detection_core(image, spec.key, conf, iou, show_label, show_confidence, line_width, color_mode)
-            result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
-            result["visual_options"] = {
-                "show_label": bool(show_label),
-                "show_confidence": bool(show_confidence),
-                "line_width": int(line_width),
-                "color_mode": color_mode,
-            }
+            rendered = fallback_image
+
+        result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
+        result["visual_options"] = {
+            "show_label": bool(show_label),
+            "show_confidence": bool(show_confidence),
+            "line_width": int(line_width),
+            "color_mode": color_mode,
+        }
+        try:
             attach_visual_assets(
                 image,
                 rendered,
@@ -2078,35 +2190,44 @@ def run_model_comparison(
                 original_asset_path=shared_original_asset,
             )
             shared_original_asset = (result.get("visual_assets") or {}).get("original") or shared_original_asset
+        except Exception:
+            # The result data is still useful when output storage is
+            # temporarily unavailable; the slider helper can use PIL images.
+            pass
+        try:
             attach_result_traceability(result)
-            results.append(result)
-            rendered_images.append(rendered)
-            yield model_comparison_progress_outputs(
-                min(86, 12 + index * 27),
-                f"模型 {index}/{len(MODEL_SPECS)} 已完成",
-                f"{spec.name} 已生成结果，继续处理后续模型。",
-                rendered_images,
-                image,
-            )
-        progress(0.9, desc="正在生成模型一致性分析…")
-        yield model_comparison_progress_outputs(92, "正在生成一致性分析", "正在整理三模型差异和复核提示。", rendered_images, image)
-        append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
-        update_latest_ai_context(comparison=results)
-        summary = compare_summary(results) + "\n\n" + system_recommendation(results)
-        linked_choices = comparison_region_choices(results)
-        slider_updates = comparison_slider_outputs(results)
-        progress(1.0, desc="多模型对比完成")
-        yield (
-            detection_progress_hide(),
-            detection_empty_state_update("compare", False),
-            *slider_updates,
-            gr.update(value=compare_rows(results), visible=True),
-            gr.update(value=consistency_rows(results), visible=True),
-            gr.update(value=summary, visible=True),
-            results,
-            gr.Dropdown(choices=linked_choices, value=linked_choices[0] if linked_choices else None),
-            *deferred_dashboard_outputs(),
+        except Exception:
+            result["traceability_error"] = "模型追溯信息暂不可用。"
+
+        results.append(result)
+        rendered_images.append(rendered)
+        yield model_comparison_progress_outputs(
+            min(86, 12 + index * 27),
+            f"模型 {index}/{len(MODEL_SPECS)} 已完成",
+            f"{spec.name} 已生成结果，继续处理后续模型。",
+            rendered_images,
+            image,
         )
+
+    progress(0.9, desc="正在生成模型一致性分析…")
+    yield model_comparison_progress_outputs(92, "正在生成一致性分析", "正在整理三模型差异和复核提示。", rendered_images, image)
+    append_history({"type": "model_comparison", "created_at": now_iso(), "results": results})
+    update_latest_ai_context(comparison=results)
+    summary = compare_summary(results) + "\n\n" + system_recommendation(results)
+    linked_choices = comparison_region_choices(results)
+    slider_updates = comparison_slider_updates(results, original_image=image, rendered_images=rendered_images)
+    progress(1.0, desc="多模型对比完成")
+    yield (
+        detection_progress_complete("compare"),
+        detection_empty_state_update("compare", False),
+        *slider_updates,
+        gr.update(value=compare_rows(results), visible=True),
+        gr.update(value=consistency_rows(results), visible=True),
+        gr.update(value=summary, visible=True),
+        results,
+        gr.Dropdown(choices=linked_choices, value=linked_choices[0] if linked_choices else None),
+        *deferred_dashboard_outputs(),
+    )
 
 
 def reset_model_comparison_outputs():
@@ -2635,7 +2756,7 @@ def run_batch_detection(
     linked_choices = batch_region_choices(items)
     image_choices = batch_image_choices(items)
     selected_image = batch_image_default_choice(items)
-    report_preview = "> 检测结果已显示，Markdown 与 CSV 报告正在后台生成。"
+    report_preview = "首次打开“批量报告”子栏时将自动生成报告。"
     report_gallery: list[Any] = []
     if result_errors:
         report_preview += "\n\n> " + "；".join(result_errors)
@@ -2677,6 +2798,27 @@ def reset_batch_detection_outputs():
         *dashboard_outputs(),
         registry_status_markdown(),
         history_rows(),
+    )
+
+
+def prepare_batch_detection_outputs(files: list[Any] | None):
+    """Invalidate an older batch result when a new upload selection is made."""
+    update_latest_ai_context(batch_items=[])
+    return (
+        detection_progress_hide(),
+        batch_empty_state_for_upload(files),
+        gr.update(value=[], visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, visible=False),
+        gr.update(value="运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。", visible=False),
+        gr.update(value=BATCH_KNOWLEDGE_PLACEHOLDER_HTML),
+        "尚未生成批量报告预览。",
+        gr.update(value=[], visible=False),
+        None,
+        None,
+        [],
+        gr.Dropdown(choices=[], value=None),
+        *deferred_dashboard_outputs(),
     )
 
 
@@ -3605,14 +3747,26 @@ def feedback_statistics(items: list[dict[str, Any]] | None = None) -> tuple[list
         return [], "暂无回答质量反馈。"
     counts: dict[tuple[str, str, str], int] = {}
     for item in data:
-        source = "Ollama AI" if any(tag in str(item.get("source_status", "")) for tag in ("Ollama AI", "云端 AI")) else "本地规则"
+        source_status = str(item.get("source_status", ""))
+        if "Google Gemini" in source_status or "Gemini" in source_status:
+            source = "Google Gemini"
+        elif "Ollama" in source_status:
+            source = "Ollama AI"
+        elif "云端 AI" in source_status:
+            source = "云端 AI"
+        else:
+            source = "本地规则"
         key = (str(item.get("rating", "未选择")), str(item.get("reason", "未说明")), source)
         counts[key] = counts.get(key, 0) + 1
     rows = [[rating, reason, source, count] for (rating, reason, source), count in sorted(counts.items(), key=lambda item: -item[1])]
     inaccurate = sum(1 for item in data if item.get("rating") == "不准确")
     complex_count = sum(1 for item in data if item.get("rating") == "太复杂")
-    cloud_count = sum(1 for item in data if any(tag in str(item.get("source_status", "")) for tag in ("Ollama AI", "云端 AI")))
-    return rows, f"累计反馈 {len(data)} 条｜Ollama AI {cloud_count} 条｜本地规则 {len(data) - cloud_count} 条｜不准确 {inaccurate} 条｜太复杂 {complex_count} 条。"
+    cloud_count = sum(
+        1
+        for item in data
+        if any(tag in str(item.get("source_status", "")) for tag in ("Google Gemini", "Gemini", "Ollama", "云端 AI"))
+    )
+    return rows, f"累计反馈 {len(data)} 条｜云端 AI {cloud_count} 条｜本地规则 {len(data) - cloud_count} 条｜不准确 {inaccurate} 条｜太复杂 {complex_count} 条。"
 
 
 def current_image_hash(image: Any) -> str:
@@ -4115,7 +4269,7 @@ def lifestyle_guidance_answer(
             if class_name and class_name not in detected_classes:
                 detected_classes.append(class_name)
 
-    lines = ["Ollama AI 暂不可用，已切换为本地规则分析。", ""]
+    lines = ["云端 AI 暂不可用，已切换为本地规则分析。", ""]
     if any(word in question for word in ("为什么", "原因", "好处")):
         lines.extend(
             [
@@ -4275,7 +4429,7 @@ def local_rule_answer(
         return no_detection_rule_answer(question)
     if not has_detected_targets(ok):
         return no_detected_targets_rule_answer(question, ok)
-    lines = ["Ollama AI 暂不可用，已切换为本地规则分析。"]
+    lines = ["云端 AI 暂不可用，已切换为本地规则分析。"]
     if is_treatment_question(question):
         return safe_treatment_answer(question, scope, detection, comparison, batch_items)
     elif is_lifestyle_question(question):
@@ -4330,6 +4484,35 @@ def local_rule_answer(
     return "\n".join(lines)
 
 
+def normalize_cloud_provider(provider: str | None = None) -> str:
+    value = str(provider or AI_CLOUD_PROVIDER or "google").strip().lower()
+    if value in {"ollama", "ollama cloud", "ollama_ai"}:
+        return "ollama"
+    return "google"
+
+
+def cloud_provider_display_name(provider: str | None = None) -> str:
+    return "Ollama AI" if normalize_cloud_provider(provider) == "ollama" else "Google Gemini"
+
+
+def cloud_source_display_name(source_note: str = "", provider: str | None = None) -> str:
+    note = str(source_note or "")
+    if "Google Gemini" in note or "Gemini" in note:
+        return "Google Gemini"
+    if "Ollama" in note:
+        return "Ollama AI"
+    return cloud_provider_display_name(provider)
+
+
+def google_model_candidates() -> list[str]:
+    candidates: list[str] = []
+    for model in [GOOGLE_MODEL, *GOOGLE_FALLBACK_MODELS]:
+        model = str(model or "").strip().removeprefix("models/")
+        if model and model not in candidates:
+            candidates.append(model)
+    return candidates or ["gemini-2.5-flash"]
+
+
 def ollama_model_candidates() -> list[str]:
     candidates: list[str] = []
     for model in [OLLAMA_MODEL, *OLLAMA_FALLBACK_MODELS]:
@@ -4345,6 +4528,8 @@ def cloud_error_detail(response: requests.Response) -> str:
     except Exception:
         text = (response.text or "").strip()
         return text[:300]
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        data = data[0]
     if isinstance(data, dict):
         error = data.get("error")
         if isinstance(error, dict):
@@ -4356,6 +4541,80 @@ def cloud_error_detail(response: requests.Response) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+def google_response_text(data: dict[str, Any]) -> str:
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return ""
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        content = message.get("content") if isinstance(message, dict) else ""
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            text_parts = [
+                str(part.get("text", "")).strip()
+                for part in content
+                if isinstance(part, dict) and str(part.get("text", "")).strip()
+            ]
+            if text_parts:
+                return "\n".join(text_parts)
+    return ""
+
+
+def google_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[str, bool, str, float]:
+    if not GOOGLE_API_KEY:
+        return "", False, "当前使用 Google Gemini，但未配置 GOOGLE_API_KEY，已自动使用本地规则模式。", 0.0
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + GOOGLE_API_KEY,
+    }
+    url = f"{GOOGLE_BASE_URL}/chat/completions"
+    failures: list[str] = []
+    for model in google_model_candidates():
+        remaining = float(GOOGLE_TOTAL_TIMEOUT_SECONDS) - (time.perf_counter() - started)
+        if remaining <= 0:
+            failures.append(f"已达到总超时 {GOOGLE_TOTAL_TIMEOUT_SECONDS:g} 秒")
+            break
+        request_timeout = max(3.0, min(float(GOOGLE_TIMEOUT_SECONDS), remaining))
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 4096,
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=request_timeout)
+        except requests.Timeout:
+            failures.append(f"{model}: 请求超过 {request_timeout:g} 秒")
+            continue
+        except requests.ConnectionError:
+            failures.append(f"{model}: 连接失败")
+            continue
+        except Exception as exc:
+            failures.append(f"{model}: 请求失败（{type(exc).__name__}）")
+            continue
+        if response.status_code in {400, 401, 403, 404, 429} or response.status_code >= 500:
+            detail = cloud_error_detail(response)
+            failures.append(f"{model}: HTTP {response.status_code}" + (f"：{detail}" if detail else ""))
+            continue
+        try:
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            failures.append(f"{model}: 响应解析失败（{type(exc).__name__}）")
+            continue
+        content = google_response_text(data)
+        if content:
+            note = f"Google Gemini 回答（{model}）"
+            if failures:
+                note += "；已跳过不可用模型：" + "；".join(failures)
+            return content, True, note, round((time.perf_counter() - started) * 1000, 1)
+        failures.append(f"{model}: 响应缺少有效内容")
+    detail = "；".join(failures) if failures else "未获得有效响应"
+    return "", False, f"Google Gemini 候选模型均不可用：{detail}，已自动使用本地规则模式。", round((time.perf_counter() - started) * 1000, 1)
 
 
 def cloud_chat(
@@ -4370,11 +4629,14 @@ def cloud_chat(
     preset: str = "",
     role: str = "患者易懂版",
     pending_feedback: dict[str, Any] | None = None,
+    provider: str | None = None,
 ) -> tuple[str, bool, str, float]:
     started = time.perf_counter()
+    selected_provider = normalize_cloud_provider(provider)
+    provider_name = cloud_provider_display_name(selected_provider)
     if not allow_cloud:
-        return "", False, "已选择仅本地规则模式，未调用 Ollama AI。", 0.0
-    if "ollama.com" in OLLAMA_BASE_URL.lower() and not OLLAMA_API_KEY:
+        return "", False, f"已选择仅本地规则模式，未调用{provider_name}。", 0.0
+    if selected_provider == "ollama" and "ollama.com" in OLLAMA_BASE_URL.lower() and not OLLAMA_API_KEY:
         return "", False, "当前使用 Ollama 云端接口，但未配置 OLLAMA_API_KEY，已自动使用本地规则模式。", 0.0
     question = chat_content_to_text(question)
     context = chat_context_payload(scope, detection, comparison, batch_items)
@@ -4405,6 +4667,8 @@ def cloud_chat(
     ]
     messages.extend(normalize_chat_history(history, limit=AI_CHAT_HISTORY_LIMIT, max_chars=AI_CHAT_HISTORY_MAX_CHARS))
     messages.append({"role": "user", "content": f"检测上下文 JSON：{json.dumps(context, ensure_ascii=False)}\n\n用户问题：{question}"})
+    if selected_provider == "google":
+        return google_cloud_chat(messages, started)
     try:
         headers = {"Content-Type": "application/json"}
         if OLLAMA_API_KEY:
@@ -4470,7 +4734,7 @@ def answer_question(
     detection: dict[str, Any],
     comparison: list[dict[str, Any]],
     batch_items: list[dict[str, Any]],
-    chat_mode: str = "Ollama AI",
+    chat_mode: str = "Google Gemini",
     cloud_consent: bool = False,
     image: Any = None,
     preset: str = "",
@@ -4483,7 +4747,7 @@ def answer_question(
     user_message = chat_content_to_text(message)
     feedback_state_before_answer = normalize_cloud_feedback_state(pending_feedback)
     scope = scope if scope in CHAT_SCOPE_OPTIONS else "全部最新结果"
-    allow_cloud = chat_mode in {"Ollama AI", "联网 AI"} and bool(cloud_consent)
+    allow_cloud = chat_mode in {"Google Gemini", "Ollama AI", "联网 AI"} and bool(cloud_consent)
     role = role if role in CHAT_ROLE_OPTIONS else "患者易懂版"
     context_signature, integrity_notice, stale = chat_context_integrity(
         scope, detection, comparison, batch_items, image, comparison_image, batch_files, previous_signature
@@ -4496,7 +4760,7 @@ def answer_question(
     has_targets = has_detected_targets(successful_context)
     if mismatch:
         content = "### 回答\n当前页面影像或文件列表与已保存检测结果不一致。为避免将旧结果用于新影像，请重新运行对应检测后再提问。"
-        ok, source_note, elapsed_ms = False, "结果一致性校验未通过，未调用 Ollama AI。", 0.0
+        ok, source_note, elapsed_ms = False, "结果一致性校验未通过，未调用云端 AI。", 0.0
     elif not has_detection_context:
         content = local_rule_answer(user_message, scope, detection, comparison, batch_items, image, preset)
         ok, source_note, elapsed_ms = False, "当前没有检测上下文，已使用本地快速规则回答。", 0.0
@@ -4508,8 +4772,8 @@ def answer_question(
         if not ok:
             content = local_rule_answer(user_message, scope, detection, comparison, batch_items, image, preset)
             if source_note:
-                fallback_prefix = "Ollama AI 暂不可用，已切换为本地规则分析。"
-                reason_prefix = f"Ollama AI 未启用或调用失败：{source_note}\n\n已切换为本地规则分析。"
+                fallback_prefix = "云端 AI 暂不可用，已切换为本地规则分析。"
+                reason_prefix = f"云端 AI 未启用或调用失败：{source_note}\n\n已切换为本地规则分析。"
                 if content.startswith(fallback_prefix):
                     content = content.replace(fallback_prefix, reason_prefix, 1)
                 else:
@@ -4523,7 +4787,7 @@ def answer_question(
     if user_message:
         normalized_history.append({"role": "user", "content": user_message})
     normalized_history.append({"role": "assistant", "content": content})
-    status = f"回答来源：{'Ollama AI' if ok else '本地规则'} · 用时 {thinking_seconds}s · {source_note}"
+    status = f"回答来源：{cloud_source_display_name(source_note) if ok else '本地规则'} · 用时 {thinking_seconds}s · {source_note}"
     copy_feedback, feedback_up, feedback_down, _feedback_reason, _feedback_notice, answer_feedback_state = feedback_ui_for_answer(ok, source_note)
     if ok:
         consumed_feedback_state = consume_cloud_feedback_state(feedback_state_before_answer)
@@ -4554,7 +4818,7 @@ def answer_quick_question(
     detection: dict[str, Any],
     comparison: list[dict[str, Any]],
     batch_items: list[dict[str, Any]],
-    chat_mode: str = "Ollama AI",
+    chat_mode: str = "Google Gemini",
     cloud_consent: bool = False,
     image: Any = None,
     preset: str = "",
@@ -4721,6 +4985,7 @@ class CloudChatRequest(BaseModel):
     scope: str = Field(default="全部最新结果")
     role: str = Field(default="患者易懂版")
     allow_cloud: bool = True
+    provider: str = Field(default=AI_CLOUD_PROVIDER)
 
 
 class AssistantSuggestionRequest(BaseModel):
@@ -4949,11 +5214,12 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
         "",
         role,
         pending_feedback,
+        payload.provider,
     )
     if not ok:
         fallback = local_rule_answer(user_message, scope, detection, comparison, batch_items, None, "")
         if source_note:
-            content = f"Ollama AI 暂不可用，已切换为本地规则分析。\n\n原因：{source_note}\n\n{fallback}"
+            content = f"云端 AI 暂不可用，已切换为本地规则分析。\n\n原因：{source_note}\n\n{fallback}"
         else:
             content = fallback
         elapsed_ms = elapsed_ms or round((time.perf_counter() - started) * 1000, 1)
@@ -5927,6 +6193,155 @@ def generate_model_comparison_tab_report(comparison: list[dict[str, Any]], repor
     return generate_report("多模型对比报告", {}, comparison, [], report_language)
 
 
+def report_source_error(
+    report_type: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+) -> str | None:
+    if report_type == "单图检测报告" and not detection:
+        return "当前暂无可生成报告的检测结果，请先完成单图检测。"
+    if report_type == "多模型对比报告" and not comparison:
+        return "当前暂无可生成报告的检测结果，请先完成多模型对比。"
+    if report_type == "批量检测报告" and not batch_items:
+        return "当前暂无可生成报告的检测结果，请先完成批量检测。"
+    return None
+
+
+def generate_report_with_progress(
+    report_type: str,
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+    report_language: str = "中文",
+):
+    """Stream real report-generation stages to the in-page progress bar."""
+    skipped = lambda: tuple(gr.skip() for _ in range(5))
+    yield (
+        detection_progress_update(6, "正在检查报告数据", "正在确认检测结果、报告类型和导出语言。"),
+        *skipped(),
+    )
+    source_error = report_source_error(report_type, detection, comparison, batch_items)
+    if source_error:
+        yield (
+            detection_progress_update(0, "暂时无法生成报告", source_error),
+            source_error,
+            gr.update(value=[], visible=False),
+            None,
+            None,
+            None,
+        )
+        return
+    try:
+        ensure_dirs()
+        yield (
+            detection_progress_update(22, "正在整理报告素材", "正在收集原图、检测结果图和区域级复核信息。"),
+            *skipped(),
+        )
+        gallery = report_visual_gallery(report_type, detection, comparison, batch_items)
+        yield (
+            detection_progress_update(42, "正在编排报告内容", "正在生成摘要、明细表、复核建议和模型追溯信息。"),
+            *skipped(),
+        )
+        markdown = make_report_markdown(detection, comparison, batch_items, report_type, report_language)
+        stem = f"dental_aux_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        md_path = REPORT_DIR / f"{stem}.md"
+        pdf_path = REPORT_DIR / f"{stem}.pdf"
+        docx_path = REPORT_DIR / f"{stem}.docx"
+        md_path.write_text(markdown, encoding="utf-8")
+        yield (
+            detection_progress_update(62, "正在生成 PDF 报告", "Markdown 报告已完成，正在排版并导出 PDF 文件。"),
+            *skipped(),
+        )
+        export_report_pdf(markdown, pdf_path)
+        yield (
+            detection_progress_update(84, "正在生成 Word 报告", "PDF 已完成，正在生成可编辑的 Word 报告。"),
+            *skipped(),
+        )
+        export_report_docx(markdown, docx_path)
+        yield (
+            detection_progress_hide(),
+            markdown_for_gradio_preview(markdown),
+            gr.update(value=gallery, visible=bool(gallery)),
+            str(md_path),
+            str(pdf_path),
+            str(docx_path),
+        )
+    except Exception as exc:
+        yield (
+            detection_progress_update(0, "报告生成失败", f"生成过程中出现错误：{exc}"),
+            f"> 报告生成失败：{exc}",
+            gr.update(value=[], visible=False),
+            None,
+            None,
+            None,
+        )
+
+
+def generate_single_detection_tab_report_with_progress(
+    detection: dict[str, Any],
+    report_language: str = "中文",
+):
+    yield from generate_report_with_progress("单图检测报告", detection, [], [], report_language)
+
+
+def generate_model_comparison_tab_report_with_progress(
+    comparison: list[dict[str, Any]],
+    report_language: str = "中文",
+):
+    yield from generate_report_with_progress("多模型对比报告", {}, comparison, [], report_language)
+
+
+def generate_batch_report_with_progress(items: list[dict[str, Any]] | None):
+    """Generate the batch Markdown/CSV pair while streaming visible stages."""
+    skipped = lambda: tuple(gr.skip() for _ in range(4))
+    yield (
+        detection_progress_update(8, "正在检查批量结果", "正在确认批量任务和可导出的汇总数据。"),
+        *skipped(),
+    )
+    records = list(items or [])
+    if not records:
+        message = "当前暂无可生成报告的检测结果，请先完成批量检测。"
+        yield (
+            detection_progress_update(0, "暂时无法生成报告", message),
+            message,
+            gr.update(value=[], visible=False),
+            None,
+            None,
+        )
+        return
+    try:
+        yield (
+            detection_progress_update(32, "正在整理批量明细", "正在汇总逐图状态、疑似区域和复核优先级。"),
+            *skipped(),
+        )
+        md_path, csv_path = export_batch_report(records)
+        yield (
+            detection_progress_update(86, "正在准备报告预览", "Markdown 与 CSV 文件已生成，正在加载页面预览。"),
+            *skipped(),
+        )
+        preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告未能生成。"
+        yield (
+            detection_progress_hide(),
+            markdown_for_gradio_preview(preview_raw),
+            gr.update(value=[], visible=False),
+            md_path,
+            csv_path,
+        )
+    except Exception as exc:
+        yield (
+            detection_progress_update(0, "批量报告生成失败", f"生成过程中出现错误：{exc}"),
+            f"> 批量报告生成失败：{exc}",
+            gr.update(value=[], visible=False),
+            None,
+            None,
+        )
+
+
+def latest_batch_report_with_progress():
+    yield from generate_batch_report_with_progress(get_latest_ai_context().get("batch_items") or [])
+
+
 def dashboard_stats(history: dict[str, Any] | None = None) -> dict[str, Any]:
     history = history if history is not None else load_history()
     events = history.get("events", [])
@@ -6494,6 +6909,11 @@ def native_ai_assistant_html() -> str:
     reasons = "".join(f"<button type='button' class='native-ai-reason' data-reason='{xml_escape(reason)}'>{xml_escape(reason)}</button>" for reason in CLOUD_FEEDBACK_REASONS)
     options_scope = "".join(f"<option value='{xml_escape(option)}'>{xml_escape(option)}</option>" for option in CHAT_SCOPE_OPTIONS)
     options_role = "".join(f"<option value='{xml_escape(option)}'>{xml_escape(option)}</option>" for option in CHAT_ROLE_OPTIONS)
+    default_provider = normalize_cloud_provider()
+    options_provider = "".join(
+        f"<option value='{value}'{' selected' if value == default_provider else ''}>{xml_escape(label)}</option>"
+        for value, label in (("google", "Google Gemini"), ("ollama", ollama_provider_label()))
+    )
     starters = "".join(
         f"<button type='button' class='native-ai-suggestion' title='{html_attr(question)}' aria-label='推荐追问：{html_attr(question)}'>{xml_escape(question)}</button>"
         for question in NO_DETECTION_FOLLOWUP_QUESTIONS[:6]
@@ -6583,14 +7003,15 @@ def native_ai_assistant_html() -> str:
         }}
         .native-ai-controls {{
           display: grid;
-          grid-template-columns: repeat(3, minmax(128px, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 11px;
           align-content: start;
-          min-width: min(520px, 48vw);
+          min-width: min(720px, 62vw);
         }}
         .native-ai-control {{
           display: grid;
           gap: 7px;
+          min-width: 0;
           padding: 11px 12px;
           border-radius: 16px;
           border: 1px solid rgba(226, 232, 240, 0.82);
@@ -6617,6 +7038,10 @@ def native_ai_assistant_html() -> str:
           padding: 0 10px;
           font-size: 13px;
           outline: none;
+        }}
+        .native-ai-control select {{
+          width: 100%;
+          min-width: 0;
         }}
         .native-ai-cloud-toggle {{
           display: inline-flex;
@@ -6742,7 +7167,10 @@ def native_ai_assistant_html() -> str:
         }}
         .native-ai-md h1,
         .native-ai-md h2,
-        .native-ai-md h3 {{
+        .native-ai-md h3,
+        .native-ai-md h4,
+        .native-ai-md h5,
+        .native-ai-md h6 {{
           margin: 14px 0 8px;
           line-height: 1.28;
           letter-spacing: 0;
@@ -6750,6 +7178,9 @@ def native_ai_assistant_html() -> str:
         .native-ai-md h1 {{ font-size: 21px; }}
         .native-ai-md h2 {{ font-size: 18px; }}
         .native-ai-md h3 {{ font-size: 16px; }}
+        .native-ai-md h4 {{ font-size: 15px; }}
+        .native-ai-md h5 {{ font-size: 14px; }}
+        .native-ai-md h6 {{ font-size: 13px; }}
         .native-ai-md p {{ margin: 9px 0; }}
         .native-ai-md hr {{
           border: 0;
@@ -7331,6 +7762,10 @@ def native_ai_assistant_html() -> str:
             <select id="native-ai-role">{options_role}</select>
           </label>
           <label class="native-ai-control">
+            <span class="native-ai-control-label">AI 服务 <span class="native-ai-control-hint">可随时切换</span></span>
+            <select id="native-ai-provider">{options_provider}</select>
+          </label>
+          <label class="native-ai-control">
             <span class="native-ai-control-label">AI 状态 <span class="native-ai-control-hint">已启用</span></span>
             <span class="native-ai-cloud-toggle">
               <input id="native-ai-allow-cloud" type="checkbox" checked>
@@ -7392,9 +7827,11 @@ def native_ai_assistant_js() -> str:
   const statusEl = root.querySelector("#native-ai-status");
   const scopeSelect = root.querySelector("#native-ai-scope");
   const roleSelect = root.querySelector("#native-ai-role");
+  const providerSelect = root.querySelector("#native-ai-provider");
   const allowCloud = root.querySelector("#native-ai-allow-cloud");
   const reasonTemplate = root.querySelector("#native-ai-reason-template");
   const sessionKey = "dental-native-ai-session-id";
+  const providerKey = "dental-native-ai-provider";
   const defaultSuggestions = __DEFAULT_SUGGESTIONS__;
   const inputMinHeight = 92;
   const inputMaxHeight = 152;
@@ -7419,6 +7856,12 @@ def native_ai_assistant_js() -> str:
   }
 
   sessionId = makeSessionId();
+  try {
+    const savedProvider = window.localStorage.getItem(providerKey);
+    if (providerSelect && ["google", "ollama"].includes(savedProvider)) {
+      providerSelect.value = savedProvider;
+    }
+  } catch (_) {}
 
   function syncInputHeight() {
     if (!input) return;
@@ -7482,6 +7925,10 @@ def native_ai_assistant_js() -> str:
     };
   }
 
+  function headingKind(heading) {
+    return /结论/.test(heading) ? "conclusion" : (/依据|检测/.test(heading) ? "evidence" : (/风险|注意/.test(heading) ? "risk" : (/建议|下一步/.test(heading) ? "next" : "general")));
+  }
+
   function renderMarkdown(markdown) {
     const lines = String(markdown || "")
       .replace(/\r\n/g, "\n")
@@ -7527,19 +7974,13 @@ def native_ai_assistant_js() -> str:
         const table = renderTable(lines, i);
         out.push(table.html);
         i = table.nextIndex - 1;
-      } else if (/^###\s+/.test(trimmed)) {
+      } else if (/^#{1,6}\s+/.test(trimmed)) {
         closeList();
-        const heading = trimmed.replace(/^###\s+/, "");
-        const kind = /结论/.test(heading) ? "conclusion" : (/依据|检测/.test(heading) ? "evidence" : (/风险|注意/.test(heading) ? "risk" : (/建议|下一步/.test(heading) ? "next" : "general")));
-        out.push("<h3 class=\"native-ai-heading native-ai-heading-" + kind + "\">" + inlineMarkdown(heading) + "</h3>");
-      } else if (/^##\s+/.test(trimmed)) {
-        closeList();
-        const heading = trimmed.replace(/^##\s+/, "");
-        const kind = /结论/.test(heading) ? "conclusion" : (/依据|检测/.test(heading) ? "evidence" : (/风险|注意/.test(heading) ? "risk" : (/建议|下一步/.test(heading) ? "next" : "general")));
-        out.push("<h2 class=\"native-ai-heading native-ai-heading-" + kind + "\">" + inlineMarkdown(heading) + "</h2>");
-      } else if (/^#\s+/.test(trimmed)) {
-        closeList();
-        out.push("<h1>" + inlineMarkdown(trimmed.replace(/^#\s+/, "")) + "</h1>");
+        const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+        const level = headingMatch ? headingMatch[1].length : 1;
+        const heading = headingMatch ? headingMatch[2] : trimmed.replace(/^#+\s+/, "");
+        const kind = headingKind(heading);
+        out.push("<h" + level + " class=\"native-ai-heading native-ai-heading-level-" + level + " native-ai-heading-" + kind + "\">" + inlineMarkdown(heading) + "</h" + level + ">");
       } else if (/^>\s?/.test(trimmed)) {
         closeList();
         out.push("<blockquote>" + inlineMarkdown(trimmed.replace(/^>\s?/, "")) + "</blockquote>");
@@ -7580,6 +8021,12 @@ def native_ai_assistant_js() -> str:
 
   function setStatus(text) {
     statusEl.textContent = text || "";
+  }
+
+  function currentProviderName() {
+    if (!providerSelect) return "Google Gemini";
+    const selected = providerSelect.options[providerSelect.selectedIndex];
+    return (selected && selected.textContent ? selected.textContent.trim() : "") || providerSelect.value;
   }
 
   function setSending(value) {
@@ -7937,7 +8384,8 @@ def native_ai_assistant_js() -> str:
         history: outgoingHistory,
         scope: scopeSelect.value,
         role: roleSelect.value,
-        allow_cloud: allowCloud.checked
+        allow_cloud: allowCloud.checked,
+        provider: providerSelect ? providerSelect.value : "google"
       });
       loading.remove();
       addAssistantMessage(data.answer || "未获得有效回复。", {
@@ -7949,7 +8397,8 @@ def native_ai_assistant_js() -> str:
       if (data.context_updated_at) lastSuggestionContextAt = data.context_updated_at;
       lastSuggestionSignature = JSON.stringify((data.suggested_questions || []).slice(0, 6));
       renderSuggestions(data.suggested_questions);
-      setStatus(data.ok ? "回答已生成，你可以继续追问。" : "已切换为基础分析，你可以继续提问。");
+      const providerName = currentProviderName();
+      setStatus(data.ok ? providerName + " 回答已生成，你可以继续追问。" : "已切换为基础分析，你可以继续提问。");
     } catch (error) {
       loading.remove();
       const answer = "### 请求失败\n智诊管家暂时无法完成回答。\n\n你可以稍后重试，或先查看检测结果与报告。";
@@ -8016,6 +8465,10 @@ def native_ai_assistant_js() -> str:
     }
   });
   scopeSelect.addEventListener("change", () => refreshSuggestions("scope", {force: true}));
+  providerSelect?.addEventListener("change", () => {
+    try { window.localStorage.setItem(providerKey, providerSelect.value); } catch (_) {}
+    setStatus(currentProviderName() + " 已设为当前 AI 服务。");
+  });
   document.addEventListener("dental-page-change", event => {
     if (event.detail && event.detail.page === "assistant") {
       refreshSuggestions("page", {force: true});
@@ -8108,138 +8561,291 @@ def build_app() -> gr.Blocks:
                 )
 
         with gr.Group(elem_id="page-image", elem_classes=["dental-page"]):
-            gr.HTML("<div class='section-note'><b>图像检测</b><br>按步骤完成单张口腔影像上传、模型选择、阈值设置、真实 YOLO 推理和人工复核建议查看。</div>")
-            gr.HTML(workflow_header("single"), elem_classes="workflow-header")
-            with gr.Row(equal_height=False, elem_classes=["det-input-row", "detection-setup-grid"]):
-                with gr.Column(scale=1, elem_classes="detection-upload-panel"):
-                    gr.Markdown("### 第 1 步：上传口腔或牙齿影像")
+            gr.HTML(
+                detection_page_intro(
+                    "单图精检",
+                    "面向单张口腔或牙齿影像的快速定位与细致复核，在一个工作区内完成上传、参数调整、检测和结果解读。",
+                    ("单张影像", "三种模型可选", "结构化结果", "报告导出"),
+                )
+            )
+            with gr.Group(elem_classes="detection-workflow-shell"):
+                gr.HTML(workflow_header("single"), elem_classes="workflow-header")
+            with gr.Row(equal_height=False, elem_classes=["det-input-row", "detection-setup-grid", "detection-workbench"]):
+                with gr.Column(scale=5, elem_classes="detection-upload-panel"):
+                    gr.Markdown("### 第 1 步：上传口腔或牙齿影像", elem_classes="detection-panel-heading")
                     det_image = gr.Image(type="pil", label="上传牙齿或口腔图像", height=260, elem_classes="det-upload", elem_id="single-upload")
                     gr.Markdown("建议上传清晰的口腔全景片或牙齿相关影像。本系统仅用于科研演示和辅助识别。")
                     det_quality = gr.HTML(image_quality_precheck(None), label="影像质量预检")
-                with gr.Column(scale=1, elem_classes="detection-parameter-panel"):
-                    gr.Markdown("### 第 2 步：选择模型和阈值")
+                with gr.Column(scale=7, elem_classes="detection-parameter-panel"):
+                    gr.Markdown("### 第 2 步：选择模型和阈值", elem_classes="detection-panel-heading")
                     with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"]):
-                        det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
-                        det_preset = gr.Radio(
-                            ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.70）", "高精度复核（0.50 / 0.60）"],
-                            value="均衡推荐（0.25 / 0.70）",
-                            label="阈值预设",
-                        )
-                        det_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                        det_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                        with gr.Row(equal_height=False, elem_classes="detection-model-preset-row"):
+                            det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
+                            det_preset = gr.Radio(
+                                ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.70）", "高精度复核（0.50 / 0.60）"],
+                                value="均衡推荐（0.25 / 0.70）",
+                                label="阈值预设",
+                                elem_classes="threshold-preset-control",
+                            )
+                        with gr.Row(elem_classes="detection-threshold-row"):
+                            det_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
+                            det_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
                         det_threshold_hint = gr.Markdown(threshold_hint(0.25, 0.70))
-                        with gr.Accordion("检测框可视化选项", open=False):
-                            det_show_label = gr.Checkbox(value=True, label="显示类别名称")
-                            det_show_conf = gr.Checkbox(value=True, label="显示置信度")
-                            det_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
-                            det_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                        with gr.Accordion("检测框可视化选项", open=True):
+                            with gr.Row(elem_classes="visual-option-grid"):
+                                det_show_label = gr.Checkbox(
+                                    value=True,
+                                    label="显示类别名称",
+                                    elem_classes=["visual-option-control", "visual-option-toggle"],
+                                )
+                                det_show_conf = gr.Checkbox(
+                                    value=True,
+                                    label="显示置信度",
+                                    elem_classes=["visual-option-control", "visual-option-toggle"],
+                                )
+                                det_line_width = gr.Slider(
+                                    1,
+                                    8,
+                                    value=3,
+                                    step=1,
+                                    label="检测框线宽",
+                                    elem_classes=["visual-option-control", "visual-option-line-width"],
+                                )
+                                det_color_mode = gr.Dropdown(
+                                    ["按目标编号配色", "按类别配色", "按置信度配色"],
+                                    value="按目标编号配色",
+                                    label="检测框配色方式",
+                                    elem_classes=["visual-option-control", "visual-option-color-mode"],
+                                )
                         det_btn = gr.Button("运行单模型检测", variant="primary", elem_classes="solid-primary-action", elem_id="single-run")
-            gr.Markdown("### 第 3 步：查看检测结果和复核建议")
-            det_progress = gr.HTML("", visible=False, elem_id="single-progress")
-            det_empty_state = gr.HTML(build_detection_empty_state("single"))
-            det_summary = gr.HTML(detection_summary_cards(None), visible=False)
-            with gr.Group(elem_classes="detection-result-stack"):
-                det_compare_slider = gr.ImageSlider(label="原图 / 检测结果滑动对比", visible=False, elem_classes="result-compare-slider", elem_id="single-result-slider")
-                det_output = gr.Image(type="pil", label="检测结果图数据", elem_classes="det-output-data", visible=False)
-                det_explain = gr.Markdown("等待检测。", elem_classes="det-explain", visible=False)
-            with gr.Row(elem_classes="result-filter-bar"):
-                det_search = gr.Textbox(label="搜索结果", placeholder="搜索类别、风险或建议", lines=1)
-                det_class_filter = gr.Dropdown(["全部类别", *CLASS_KNOWLEDGE.keys()], value="全部类别", label="类别筛选")
-                det_risk_filter = gr.Dropdown(["全部风险", "强烈建议人工复核", "建议人工复核", "可信度较高"], value="全部风险", label="风险筛选")
-                det_sort = gr.Dropdown(["按区域编号", "风险优先", "置信度从高到低", "置信度从低到高"], value="按区域编号", label="排序")
-            det_table = gr.Dataframe(
-                headers=["编号", "类别", "置信度", "坐标 x1", "坐标 y1", "坐标 x2", "坐标 y2", "风险等级", "复核建议"],
-                label="结构化检测结果",
-                wrap=True,
-                visible=False,
-            )
-            det_knowledge = gr.HTML(class_knowledge_cards(None), visible=False)
-            with gr.Accordion("原图—结果图联动放大镜", open=True):
-                gr.Markdown("选择一个结构化检测区域，左侧显示原图局部，右侧显示同一位置的模型标注；检测结果图最大化不便查看局部时，可用这里逐区复核。")
-                det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True, elem_id="det-region-selector")
-                with gr.Row(elem_classes="linked-region-row"):
-                    det_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
-                    det_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
-                det_region_note = gr.Markdown("运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。")
-            with gr.Accordion("单图检测报告", open=False):
-                gr.Markdown("报告包含模型与权重版本、逐区域明细、复核优先级和可追溯性信息。")
-                single_report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
-                single_report_btn = gr.Button("生成单图检测报告", variant="primary", elem_classes="solid-primary-action")
-                single_report_gallery = gr.Gallery(label="单图报告图片预览", columns=3, height=320, visible=False)
-                single_report_preview = gr.Markdown("尚未生成单图检测报告。")
-                with gr.Row(elem_classes="report-download-row"):
-                    single_report_md = gr.DownloadButton("下载单图 Markdown 报告", elem_classes="report-download-action")
-                    single_report_pdf = gr.DownloadButton("下载单图 PDF 报告", elem_classes="report-download-action")
-                    single_report_docx = gr.DownloadButton("下载单图 Word 报告", elem_classes="report-download-action")
+            with gr.Group(elem_classes=["detection-results-shell", "single-results-shell"]):
+                gr.Markdown("### 查看检测结果和复核建议", elem_classes="detection-stage-heading")
+                gr.HTML(
+                    detection_result_tabs(
+                        "single",
+                        (
+                            ("overview", "结果总览"),
+                            ("structured", "结构化结果"),
+                            ("review", "联动复核"),
+                            ("report", "检测报告"),
+                        ),
+                    )
+                )
+                det_progress = gr.HTML("", visible=False, elem_id="single-progress")
+                det_empty_state = gr.HTML(build_detection_empty_state("single"))
+                with gr.Row(equal_height=False, elem_classes=["single-result-overview", "detection-result-overview"]):
+                    with gr.Column(scale=8, elem_classes="single-result-visual"):
+                        with gr.Group(elem_classes="detection-result-stack"):
+                            det_compare_slider = gr.ImageSlider(label="原图 / 检测结果滑动对比", visible=False, elem_classes="result-compare-slider", elem_id="single-result-slider")
+                            det_output = gr.Image(type="pil", label="检测结果图数据", elem_classes="det-output-data", visible=False)
+                    with gr.Column(scale=4, elem_classes="single-result-insights"):
+                        det_summary = gr.HTML(
+                            detection_summary_cards(None),
+                            visible=False,
+                            elem_id="single-result-summary",
+                        )
+                        det_explain = gr.Markdown("等待检测。", elem_classes="det-explain", visible=False)
+                with gr.Group(elem_classes="structured-result-panel"):
+                    with gr.Row(elem_classes="result-filter-bar"):
+                        det_search = gr.Textbox(label="搜索结果", placeholder="搜索类别、风险或建议", lines=1)
+                        det_class_filter = gr.Dropdown(["全部类别", *CLASS_KNOWLEDGE.keys()], value="全部类别", label="类别筛选")
+                        det_risk_filter = gr.Dropdown(["全部风险", "强烈建议人工复核", "建议人工复核", "可信度较高"], value="全部风险", label="风险筛选")
+                        det_sort = gr.Dropdown(["按区域编号", "风险优先", "置信度从高到低", "置信度从低到高"], value="按区域编号", label="排序")
+                    det_table = gr.Dataframe(
+                        headers=["编号", "类别", "置信度", "坐标 x1", "坐标 y1", "坐标 x2", "坐标 y2", "风险等级", "复核建议"],
+                        label="结构化检测结果",
+                        wrap=True,
+                        visible=False,
+                    )
+                    det_knowledge = gr.HTML(class_knowledge_cards(None), visible=False)
+                with gr.Row(
+                    equal_height=False,
+                    elem_classes=["detection-support-grid", "detection-support-review-only"],
+                ):
+                    with gr.Column(scale=7, elem_classes="detection-support-primary"):
+                        with gr.Group(elem_classes="linked-review-box"):
+                            gr.Markdown("#### 原图—结果图联动放大镜", elem_classes="linked-review-heading")
+                            gr.Markdown("选择一个结构化检测区域，左侧显示原图局部，右侧显示同一位置的模型标注；检测结果图最大化不便查看局部时，可用这里逐区复核。")
+                            det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True, elem_id="det-region-selector")
+                            with gr.Row(elem_classes="linked-region-row"):
+                                det_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
+                                det_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
+                            det_region_note = gr.Markdown("运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。")
+                with gr.Group(elem_classes=["detection-report-panel", "single-report-panel"]):
+                    gr.Markdown("#### 单图检测报告")
+                    gr.Markdown("报告包含模型与权重版本、逐区域明细、复核优先级和可追溯性信息。")
+                    with gr.Group(elem_classes="auto-report-controls"):
+                        single_report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
+                        single_report_btn = gr.Button(
+                            "生成单图检测报告",
+                            variant="primary",
+                            elem_classes="auto-report-trigger",
+                            elem_id="single-report-trigger",
+                        )
+                    single_report_progress = gr.HTML("", visible=False, elem_id="single-report-progress")
+                    with gr.Group(elem_classes="detection-report-display"):
+                        single_report_preview = gr.Markdown(
+                            "尚未生成单图检测报告。",
+                            elem_classes="detection-report-preview",
+                        )
+                        single_report_gallery = gr.Gallery(label="单图报告图片预览", columns=3, height=320, visible=False)
+                    with gr.Row(elem_classes="report-download-row"):
+                        single_report_md = gr.DownloadButton("下载单图 Markdown 报告", elem_classes="report-download-action")
+                        single_report_pdf = gr.DownloadButton("下载单图 PDF 报告", elem_classes="report-download-action")
+                        single_report_docx = gr.DownloadButton("下载单图 Word 报告", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-compare", elem_classes=["dental-page"]):
-            gr.HTML("<div class='section-note'><b>多模型对比</b><br>多模型对比用于观察不同 YOLO 模型在同一影像上的检测差异，辅助判断疑似区域的稳定性。</div>")
-            gr.HTML(workflow_header("compare"), elem_classes="workflow-header")
-            with gr.Row(equal_height=False, elem_classes="detection-setup-grid"):
-                with gr.Column(scale=1, elem_classes="detection-upload-panel"):
-                    gr.Markdown("### 上传同一张口腔影像")
+            gr.HTML(
+                detection_page_intro(
+                    "多模型会诊",
+                    "让三个 YOLO 模型在同一张影像上独立推理，以并列视图观察定位差异、一致性区域和各模型的使用倾向。",
+                    ("三模型并行对照", "统一阈值", "一致性分析", "差异报告"),
+                )
+            )
+            with gr.Group(elem_classes="detection-workflow-shell"):
+                gr.HTML(workflow_header("compare"), elem_classes="workflow-header")
+            with gr.Row(equal_height=False, elem_classes=["detection-setup-grid", "detection-workbench"]):
+                with gr.Column(scale=5, elem_classes="detection-upload-panel"):
+                    gr.Markdown("### 第 1 步：上传同一张口腔影像", elem_classes="detection-panel-heading")
                     cmp_image = gr.Image(type="pil", label="上传同一张图像", height=300, elem_classes="det-upload", elem_id="compare-upload")
-                with gr.Column(scale=1, elem_classes="detection-parameter-panel"):
-                    gr.Markdown("### 设置统一检测参数")
+                with gr.Column(scale=7, elem_classes="detection-parameter-panel"):
+                    gr.Markdown("### 第 2 步：设置统一检测参数", elem_classes="detection-panel-heading")
                     with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"], elem_id="compare-controls"):
-                        with gr.Row(elem_classes="compare-threshold-row", elem_id="compare-threshold-row"):
+                        with gr.Row(elem_classes=["compare-threshold-row", "detection-threshold-row"], elem_id="compare-threshold-row"):
                             cmp_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
                             cmp_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-                        with gr.Accordion("检测框可视化选项", open=False):
-                            with gr.Row():
-                                cmp_show_label = gr.Checkbox(value=True, label="显示类别名称")
-                                cmp_show_conf = gr.Checkbox(value=True, label="显示置信度")
-                                cmp_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
-                                cmp_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                        with gr.Accordion("检测框可视化选项", open=True):
+                            with gr.Row(elem_classes="visual-option-grid"):
+                                cmp_show_label = gr.Checkbox(
+                                    value=True,
+                                    label="显示类别名称",
+                                    elem_classes=["visual-option-control", "visual-option-toggle"],
+                                )
+                                cmp_show_conf = gr.Checkbox(
+                                    value=True,
+                                    label="显示置信度",
+                                    elem_classes=["visual-option-control", "visual-option-toggle"],
+                                )
+                                cmp_line_width = gr.Slider(
+                                    1,
+                                    8,
+                                    value=3,
+                                    step=1,
+                                    label="检测框线宽",
+                                    elem_classes=["visual-option-control", "visual-option-line-width"],
+                                )
+                                cmp_color_mode = gr.Dropdown(
+                                    ["按目标编号配色", "按类别配色", "按置信度配色"],
+                                    value="按目标编号配色",
+                                    label="检测框配色方式",
+                                    elem_classes=["visual-option-control", "visual-option-color-mode"],
+                                )
                         cmp_btn = gr.Button("一键运行三个模型", variant="primary", elem_classes="solid-primary-action", elem_id="compare-run")
-            cmp_progress = gr.HTML("", visible=False, elem_id="compare-progress")
-            cmp_empty_state = gr.HTML(build_detection_empty_state("compare"))
-            with gr.Row(elem_classes=["compare-model-row", "compare-slider-row"], elem_id="compare-results"):
-                with gr.Column():
-                    gr.HTML("<div class='model-tag'>均衡型基线模型：速度优先、默认基线</div>")
-                    cmp_img1 = gr.ImageSlider(label="均衡型基线模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
-                with gr.Column():
-                    gr.HTML("<div class='model-tag'>高精度牙齿病变定位模型：定位稳定性优先</div>")
-                    cmp_img2 = gr.ImageSlider(label="高精度模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
-                with gr.Column():
-                    gr.HTML("<div class='model-tag'>高召回牙齿病变检测模型：减少漏检优先</div>")
-                    cmp_img3 = gr.ImageSlider(label="高召回模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
-            cmp_table = gr.Dataframe(
-                headers=["模型名称", "模型类型", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议数量", "推荐使用场景", "失败原因"],
-                label="多模型对比表",
-                wrap=True,
-                visible=False,
-            )
-            consistency_table = gr.Dataframe(
-                headers=["区域编号", "涉及模型", "最高置信度", "平均置信度", "一致性等级", "复核建议"],
-                label="多模型一致性分析",
-                wrap=True,
-                visible=False,
-            )
-            cmp_summary = gr.Markdown("等待对比。", visible=False)
-            with gr.Accordion("多模型原图—结果图联动放大镜", open=False):
-                gr.Markdown("按模型编号和区域编号查看局部细节，区域标签会包含模型名称，便于区分不同模型的检测结果。")
-                cmp_region_selector = gr.Dropdown(choices=[], label="选择模型与疑似区域", interactive=True, elem_id="cmp-region-selector")
-                with gr.Row(elem_classes="linked-region-row"):
-                    cmp_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
-                    cmp_region_annotated = gr.Image(type="pil", label="对应模型结果图局部", interactive=False, buttons=["fullscreen", "download"])
-                cmp_region_note = gr.Markdown("运行多模型对比后，可选择模型和区域查看联动放大结果。")
-            with gr.Accordion("多模型对比报告", open=False):
-                gr.Markdown("报告包含三模型结果表、一致性区域、差异归因和完整可追溯性信息。")
-                comparison_report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
-                comparison_report_btn = gr.Button("生成多模型对比报告", variant="primary", elem_classes="solid-primary-action")
-                comparison_report_gallery = gr.Gallery(label="多模型报告图片预览", columns=3, height=320, visible=False)
-                comparison_report_preview = gr.Markdown("尚未生成多模型对比报告。")
-                with gr.Row(elem_classes="report-download-row"):
-                    comparison_report_md = gr.DownloadButton("下载对比 Markdown 报告", elem_classes="report-download-action")
-                    comparison_report_pdf = gr.DownloadButton("下载对比 PDF 报告", elem_classes="report-download-action")
-                    comparison_report_docx = gr.DownloadButton("下载对比 Word 报告", elem_classes="report-download-action")
+            with gr.Group(elem_classes=["detection-results-shell", "compare-results-shell"]):
+                gr.Markdown("### 查看三模型对比结果", elem_classes="detection-stage-heading")
+                gr.HTML(
+                    detection_result_tabs(
+                        "compare",
+                        (
+                            ("models", "三模型结果"),
+                            ("analysis", "一致性分析"),
+                            ("review", "联动复核"),
+                            ("report", "对比报告"),
+                        ),
+                    )
+                )
+                cmp_progress = gr.HTML("", visible=False, elem_id="compare-progress")
+                cmp_empty_state = gr.HTML(build_detection_empty_state("compare"))
+                with gr.Row(
+                    elem_classes=[
+                        "compare-model-row",
+                        "compare-slider-row",
+                        "compare-model-grid",
+                        "compare-result-models-panel",
+                    ],
+                    elem_id="compare-results",
+                ):
+                    with gr.Column(elem_classes=["compare-model-card", "compare-model-baseline"]):
+                        gr.HTML("<div class='model-tag'><b>01 均衡型基线模型</b><span>速度优先 · 默认基线</span></div>")
+                        cmp_img1 = gr.ImageSlider(label="均衡型基线模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
+                    with gr.Column(elem_classes=["compare-model-card", "compare-model-precision"]):
+                        gr.HTML("<div class='model-tag'><b>02 高精度定位模型</b><span>定位稳定性优先</span></div>")
+                        cmp_img2 = gr.ImageSlider(label="高精度模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
+                    with gr.Column(elem_classes=["compare-model-card", "compare-model-recall"]):
+                        gr.HTML("<div class='model-tag'><b>03 高召回检测模型</b><span>减少漏检优先</span></div>")
+                        cmp_img3 = gr.ImageSlider(label="高召回模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
+                with gr.Group(elem_classes=["compare-analysis-panel", "compare-result-analysis-panel"]):
+                    cmp_table = gr.Dataframe(
+                        headers=["模型名称", "模型类型", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议数量", "推荐使用场景", "失败原因"],
+                        label="多模型对比表",
+                        wrap=True,
+                        visible=False,
+                    )
+                    consistency_table = gr.Dataframe(
+                        headers=["区域编号", "涉及模型", "最高置信度", "平均置信度", "一致性等级", "复核建议"],
+                        label="多模型一致性分析",
+                        wrap=True,
+                        visible=False,
+                    )
+                    cmp_summary = gr.Markdown(
+                        "等待对比。",
+                        visible=False,
+                        elem_classes="compare-summary-panel",
+                        elem_id="compare-result-summary",
+                    )
+                with gr.Row(
+                    equal_height=False,
+                    elem_classes=[
+                        "detection-support-grid",
+                        "detection-support-review-only",
+                        "compare-result-review-panel",
+                    ],
+                ):
+                    with gr.Column(scale=7, elem_classes="detection-support-primary"):
+                        with gr.Group(elem_classes="linked-review-box"):
+                            gr.Markdown("#### 多模型原图—结果图联动放大镜", elem_classes="linked-review-heading")
+                            gr.Markdown("按模型编号和区域编号查看局部细节，区域标签会包含模型名称，便于区分不同模型的检测结果。")
+                            cmp_region_selector = gr.Dropdown(choices=[], label="选择模型与疑似区域", interactive=True, elem_id="cmp-region-selector")
+                            with gr.Row(elem_classes="linked-region-row"):
+                                cmp_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
+                                cmp_region_annotated = gr.Image(type="pil", label="对应模型结果图局部", interactive=False, buttons=["fullscreen", "download"])
+                            cmp_region_note = gr.Markdown("运行多模型对比后，可选择模型和区域查看联动放大结果。")
+                with gr.Group(elem_classes=["detection-report-panel", "compare-report-panel"]):
+                    gr.Markdown("#### 多模型对比报告")
+                    gr.Markdown("报告包含三模型结果表、一致性区域、差异归因和完整可追溯性信息。")
+                    with gr.Group(elem_classes="auto-report-controls"):
+                        comparison_report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
+                        comparison_report_btn = gr.Button(
+                            "生成多模型对比报告",
+                            variant="primary",
+                            elem_classes="auto-report-trigger",
+                            elem_id="comparison-report-trigger",
+                        )
+                    comparison_report_progress = gr.HTML("", visible=False, elem_id="comparison-report-progress")
+                    with gr.Group(elem_classes="detection-report-display"):
+                        comparison_report_preview = gr.Markdown(
+                            "尚未生成多模型对比报告。",
+                            elem_classes="detection-report-preview",
+                        )
+                        comparison_report_gallery = gr.Gallery(label="多模型报告图片预览", columns=3, height=320, visible=False)
+                    with gr.Row(elem_classes="report-download-row"):
+                        comparison_report_md = gr.DownloadButton("下载对比 Markdown 报告", elem_classes="report-download-action")
+                        comparison_report_pdf = gr.DownloadButton("下载对比 PDF 报告", elem_classes="report-download-action")
+                        comparison_report_docx = gr.DownloadButton("下载对比 Word 报告", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-batch", elem_classes=["dental-page"]):
-            gr.HTML("<div class='section-note'><b>批量检测</b><br>一次上传多张图片，系统逐张运行 YOLO CPU 推理，并生成批量汇总表和报告。</div>")
-            gr.HTML(workflow_header("batch"), elem_classes="workflow-header")
-            with gr.Row(equal_height=False, elem_classes=["batch-work-row", "batch-setup-row", "detection-setup-grid"]):
-                with gr.Column(scale=1, elem_classes=["batch-upload-column", "detection-upload-panel"]):
+            gr.HTML(
+                detection_page_intro(
+                    "批量筛查",
+                    "一次导入多张口腔影像，按队列逐张完成检测，并在同一结果工作区中快速切换图片、复核重点和导出汇总。",
+                    (f"最多 {BATCH_MAX_IMAGES} 张", "队列进度", "逐图复核", "批量导出"),
+                )
+            )
+            with gr.Group(elem_classes="detection-workflow-shell"):
+                gr.HTML(workflow_header("batch"), elem_classes="workflow-header")
+            with gr.Row(equal_height=False, elem_classes=["batch-work-row", "batch-setup-row", "detection-setup-grid", "detection-workbench"]):
+                with gr.Column(scale=5, elem_classes=["batch-upload-column", "detection-upload-panel"]):
+                    gr.Markdown("### 第 1 步：上传多张口腔影像", elem_classes="detection-panel-heading")
                     with gr.Group(elem_classes="batch-upload-composite"):
                         batch_files = gr.File(label="上传多张图片", file_count="multiple", file_types=["image"], height=300, elem_id="batch-upload")
                         batch_upload_preview = gr.Gallery(
@@ -8255,74 +8861,134 @@ def build_app() -> gr.Blocks:
                             elem_id="batch-upload-preview",
                         )
                     gr.Markdown(f"单批建议不超过 {BATCH_MAX_IMAGES} 张，以保证实时检测速度。")
-                with gr.Column(scale=1, elem_classes=["batch-params-column", "detection-parameter-panel"]):
+                with gr.Column(scale=7, elem_classes=["batch-params-column", "detection-parameter-panel"]):
+                    gr.Markdown("### 第 2 步：设置批量检测参数", elem_classes="detection-panel-heading")
                     with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"]):
                         batch_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
-                        batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                        batch_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-                        with gr.Accordion("检测框可视化选项", open=False):
-                            batch_show_label = gr.Checkbox(value=True, label="显示类别名称")
-                            batch_show_conf = gr.Checkbox(value=True, label="显示置信度")
-                            batch_line_width = gr.Slider(1, 8, value=3, step=1, label="检测框线宽")
-                            batch_color_mode = gr.Dropdown(["按目标编号配色", "按类别配色", "按置信度配色"], value="按目标编号配色", label="检测框配色方式")
+                        with gr.Row(elem_classes="detection-threshold-row"):
+                            batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
+                            batch_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                        with gr.Accordion("检测框可视化选项", open=True):
+                            with gr.Row(elem_classes="visual-option-grid"):
+                                batch_show_label = gr.Checkbox(
+                                    value=True,
+                                    label="显示类别名称",
+                                    elem_classes=["visual-option-control", "visual-option-toggle"],
+                                )
+                                batch_show_conf = gr.Checkbox(
+                                    value=True,
+                                    label="显示置信度",
+                                    elem_classes=["visual-option-control", "visual-option-toggle"],
+                                )
+                                batch_line_width = gr.Slider(
+                                    1,
+                                    8,
+                                    value=3,
+                                    step=1,
+                                    label="检测框线宽",
+                                    elem_classes=["visual-option-control", "visual-option-line-width"],
+                                )
+                                batch_color_mode = gr.Dropdown(
+                                    ["按目标编号配色", "按类别配色", "按置信度配色"],
+                                    value="按目标编号配色",
+                                    label="检测框配色方式",
+                                    elem_classes=["visual-option-control", "visual-option-color-mode"],
+                                )
                         batch_btn = gr.Button("开始批量检测", variant="primary", elem_classes="solid-primary-action", elem_id="batch-run")
-            batch_progress = gr.HTML("", visible=False, elem_id="batch-progress")
-            batch_tasks = gr.HTML("", visible=False, elem_classes="batch-task-panel")
-            batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
-            batch_preview_page = gr.Dropdown(["第 1 / 1 页"], value="第 1 / 1 页", label="结果预览分页", interactive=False, visible=False)
-            batch_preview = gr.Gallery(
-                label="批量检测结果预览",
-                columns=3,
-                height=360,
-                visible=False,
-                elem_id="batch-result-preview-gallery",
-            )
-            with gr.Row(elem_classes="batch-item-actions"):
-                batch_image_selector = gr.Dropdown(choices=[], label="选择图片查看检测结果", interactive=True, visible=False, elem_id="batch-image-selector")
-            batch_compare_slider = gr.ImageSlider(
-                label="所选图片：原图 / 检测结果滑动对比",
-                show_label=False,
-                visible=False,
-                slider_position=50,
-                max_height=620,
-                buttons=["fullscreen", "download"],
-                elem_classes="result-compare-slider",
-                elem_id="batch-result-slider",
-            )
-            with gr.Group(elem_classes="batch-retry-panel", visible=False) as batch_retry_panel:
-                gr.Markdown("#### 失败任务重试")
-                with gr.Row(elem_classes="batch-retry-actions"):
-                    batch_retry_selector = gr.Dropdown(choices=[], label="选择失败图片", interactive=True, visible=False)
-                    batch_retry_btn = gr.Button("重新检测", visible=False)
-            batch_explain = gr.Markdown(
-                "运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。",
-                elem_classes="det-explain",
-                visible=False,
-            )
-            with gr.Accordion("牙病类别说明", open=False):
-                batch_knowledge = gr.HTML(
-                    BATCH_KNOWLEDGE_PLACEHOLDER_HTML,
-                    elem_classes="batch-knowledge-panel",
+            with gr.Group(elem_classes=["detection-results-shell", "batch-results-shell"]):
+                gr.Markdown("### 查看批量检测结果", elem_classes="detection-stage-heading")
+                gr.HTML(
+                    detection_result_tabs(
+                        "batch",
+                        (
+                            ("review", "任务与逐图复核"),
+                            ("table", "批量汇总"),
+                            ("support", "类别说明与联动复核"),
+                            ("report", "批量报告"),
+                        ),
+                    )
                 )
-            batch_table = gr.Dataframe(
-                headers=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
-                label="批量检测汇总表",
-                wrap=True,
-                visible=False,
-            )
-            with gr.Row(elem_classes=["batch-download-row", "report-download-row"]):
-                batch_md_file = gr.DownloadButton("下载批量 Markdown 报告", elem_classes="report-download-action")
-                batch_csv_file = gr.DownloadButton("下载批量 CSV 报告", elem_classes="report-download-action")
-            with gr.Accordion("批量检测报告预览", open=False):
-                batch_report_gallery = gr.Gallery(label="批量报告图片预览", columns=3, height=320, visible=False)
-                batch_report_preview = gr.Markdown("尚未生成批量报告预览。")
-            with gr.Accordion("批量原图—结果图联动放大镜", open=False):
-                gr.Markdown("按图片编号和区域编号查看局部细节，区域标签会包含图片名称，便于批量任务中快速定位。")
-                batch_region_selector = gr.Dropdown(choices=[], label="选择图片与疑似区域", interactive=True, elem_id="batch-region-selector")
-                with gr.Row(elem_classes="linked-region-row"):
-                    batch_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
-                    batch_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
-                batch_region_note = gr.Markdown("运行批量检测后，可选择图片和区域查看联动放大结果。")
+                batch_progress = gr.HTML("", visible=False, elem_id="batch-progress")
+                batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
+                with gr.Row(equal_height=False, elem_classes=["batch-review-grid", "detection-result-overview"]):
+                    with gr.Column(scale=4, elem_classes="batch-result-sidebar"):
+                        batch_tasks = gr.HTML("", visible=False, elem_classes="batch-task-panel")
+                        batch_preview_page = gr.Dropdown(["第 1 / 1 页"], value="第 1 / 1 页", label="结果预览分页", interactive=False, visible=False)
+                        batch_preview = gr.Gallery(
+                            label="批量检测结果预览",
+                            columns=2,
+                            height=360,
+                            visible=False,
+                            elem_id="batch-result-preview-gallery",
+                        )
+                        with gr.Row(elem_classes="batch-item-actions"):
+                            batch_image_selector = gr.Dropdown(choices=[], label="选择图片查看检测结果", interactive=True, visible=False, elem_id="batch-image-selector")
+                        with gr.Group(elem_classes="batch-retry-panel", visible=False) as batch_retry_panel:
+                            gr.Markdown("#### 失败任务重试")
+                            with gr.Row(elem_classes="batch-retry-actions"):
+                                batch_retry_selector = gr.Dropdown(choices=[], label="选择失败图片", interactive=True, visible=False)
+                                batch_retry_btn = gr.Button("重新检测", visible=False)
+                    with gr.Column(scale=8, elem_classes="batch-result-main"):
+                        batch_compare_slider = gr.ImageSlider(
+                            label="所选图片：原图 / 检测结果滑动对比",
+                            show_label=False,
+                            visible=False,
+                            slider_position=50,
+                            max_height=620,
+                            buttons=["fullscreen", "download"],
+                            elem_classes="result-compare-slider",
+                            elem_id="batch-result-slider",
+                        )
+                        batch_explain = gr.Markdown(
+                            "运行批量检测后，可在这里按图片编号查看该图片的检测结果解释。",
+                            elem_classes="det-explain",
+                            visible=False,
+                        )
+                        with gr.Accordion("牙病类别说明", open=False):
+                            batch_knowledge = gr.HTML(
+                                BATCH_KNOWLEDGE_PLACEHOLDER_HTML,
+                                elem_classes="batch-knowledge-panel",
+                            )
+                with gr.Group(elem_classes="structured-result-panel"):
+                    batch_table = gr.Dataframe(
+                        headers=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
+                        label="批量检测汇总表",
+                        wrap=True,
+                        visible=False,
+                    )
+                with gr.Row(
+                    equal_height=False,
+                    elem_classes=["detection-support-grid", "detection-support-review-only"],
+                ):
+                    with gr.Column(scale=7, elem_classes="detection-support-primary"):
+                        with gr.Group(elem_classes="linked-review-box"):
+                            gr.Markdown("#### 批量原图—结果图联动放大镜", elem_classes="linked-review-heading")
+                            gr.Markdown("按图片编号和区域编号查看局部细节，区域标签会包含图片名称，便于批量任务中快速定位。")
+                            batch_region_selector = gr.Dropdown(choices=[], label="选择图片与疑似区域", interactive=True, elem_id="batch-region-selector")
+                            with gr.Row(elem_classes="linked-region-row"):
+                                batch_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
+                                batch_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
+                            batch_region_note = gr.Markdown("运行批量检测后，可选择图片和区域查看联动放大结果。")
+                with gr.Group(elem_classes=["detection-report-panel", "batch-report-panel"]):
+                    gr.Markdown("#### 批量检测报告")
+                    gr.Markdown("报告汇总逐图检测状态、疑似区域、复核优先级及模型追溯信息。")
+                    with gr.Group(elem_classes="auto-report-controls"):
+                        batch_report_btn = gr.Button(
+                            "生成批量检测报告",
+                            variant="primary",
+                            elem_classes="auto-report-trigger",
+                            elem_id="batch-report-trigger",
+                        )
+                    batch_report_progress = gr.HTML("", visible=False, elem_id="batch-report-progress")
+                    with gr.Group(elem_classes="detection-report-display"):
+                        batch_report_preview = gr.Markdown(
+                            "尚未生成批量报告预览。",
+                            elem_classes="detection-report-preview",
+                        )
+                        batch_report_gallery = gr.Gallery(label="批量报告图片预览", columns=3, height=320, visible=False)
+                    with gr.Row(elem_classes=["batch-download-row", "report-download-row"]):
+                        batch_md_file = gr.DownloadButton("下载批量 Markdown 报告", elem_classes="report-download-action")
+                        batch_csv_file = gr.DownloadButton("下载批量 CSV 报告", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-history", elem_classes=["dental-page"]):
             gr.HTML("<div class='section-note'><b>历史记录</b><br>记录单模型检测、多模型对比和批量检测任务，Dashboard 统计优先基于这些历史记录计算。</div>")
@@ -8466,8 +9132,43 @@ def build_app() -> gr.Blocks:
             reset_batch_detection_outputs,
             outputs=[batch_progress, batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
-        batch_files.change(batch_empty_state_for_upload, inputs=batch_files, outputs=batch_empty_state)
+        batch_files.change(
+            prepare_batch_detection_outputs,
+            inputs=batch_files,
+            outputs=[
+                batch_progress,
+                batch_empty_state,
+                batch_table,
+                batch_preview,
+                batch_image_selector,
+                batch_explain,
+                batch_knowledge,
+                batch_report_preview,
+                batch_report_gallery,
+                batch_md_file,
+                batch_csv_file,
+                current_batch,
+                batch_region_selector,
+                dashboard,
+                kpi_chart,
+                risk_chart,
+                time_chart,
+                conf_chart,
+                model_status,
+                history_table,
+            ],
+        )
         batch_files.change(uploaded_batch_preview, inputs=batch_files, outputs=batch_upload_preview)
+        batch_files.change(lambda: ("", gr.update(visible=False)), outputs=[batch_tasks, batch_preview_page])
+        batch_files.change(lambda: gr.update(value=None, visible=False), outputs=batch_compare_slider)
+        batch_files.change(
+            lambda: (gr.update(visible=False), gr.update(choices=[], value=None, visible=False), gr.update(visible=False)),
+            outputs=[batch_retry_panel, batch_retry_selector, batch_retry_btn],
+        )
+        batch_files.change(
+            lambda: (None, None, "运行批量检测后，可选择图片和区域查看联动放大结果。"),
+            outputs=[batch_region_original, batch_region_annotated, batch_region_note],
+        )
         batch_files.clear(lambda: gr.update(value=[], visible=False), outputs=batch_upload_preview)
         batch_files.clear(lambda: ("", gr.update(visible=False)), outputs=[batch_tasks, batch_preview_page])
         batch_files.clear(lambda: gr.update(value=None, visible=False), outputs=batch_compare_slider)
@@ -8480,12 +9181,7 @@ def build_app() -> gr.Blocks:
             outputs=batch_image_selector,
             show_progress="hidden",
         )
-        batch_slider_event = batch_selector_event.then(latest_batch_slider_output, outputs=batch_compare_slider)
-        batch_slider_event.then(
-            latest_batch_report_outputs,
-            outputs=[batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file],
-            show_progress="hidden",
-        )
+        batch_selector_event.then(latest_batch_slider_output, outputs=batch_compare_slider)
         batch_event.then(
             render_batch_linked_region_view,
             inputs=[current_batch, batch_region_selector],
@@ -8523,20 +9219,43 @@ def build_app() -> gr.Blocks:
         batch_retry_event.then(batch_selected_compare_update, inputs=[current_batch, batch_image_selector], outputs=batch_compare_slider)
 
         single_report_event = single_report_btn.click(
-            generate_single_detection_tab_report,
+            generate_single_detection_tab_report_with_progress,
             inputs=[current_detection, single_report_language],
-            outputs=[single_report_preview, single_report_gallery, single_report_md, single_report_pdf, single_report_docx],
+            outputs=[
+                single_report_progress,
+                single_report_preview,
+                single_report_gallery,
+                single_report_md,
+                single_report_pdf,
+                single_report_docx,
+            ],
+            show_progress="hidden",
         )
         comparison_report_event = comparison_report_btn.click(
-            generate_model_comparison_tab_report,
+            generate_model_comparison_tab_report_with_progress,
             inputs=[current_comparison, comparison_report_language],
-            outputs=[comparison_report_preview, comparison_report_gallery, comparison_report_md, comparison_report_pdf, comparison_report_docx],
+            outputs=[
+                comparison_report_progress,
+                comparison_report_preview,
+                comparison_report_gallery,
+                comparison_report_md,
+                comparison_report_pdf,
+                comparison_report_docx,
+            ],
+            show_progress="hidden",
+        )
+        batch_report_event = batch_report_btn.click(
+            generate_batch_report_with_progress,
+            inputs=current_batch,
+            outputs=[batch_report_progress, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file],
+            show_progress="hidden",
         )
 
         report_event = report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch, report_language], outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file])
         report_event.then(recent_reports_html, outputs=recent_reports)
         single_report_event.then(recent_reports_html, outputs=recent_reports)
         comparison_report_event.then(recent_reports_html, outputs=recent_reports)
+        batch_report_event.then(recent_reports_html, outputs=recent_reports)
 
         history_page.change(
             paged_history_view,
@@ -8581,11 +9300,18 @@ def schedule_output_cleanup() -> None:
 if __name__ == "__main__":
     import uvicorn
 
-    # Load weights before serving requests without retaining large warm-up tensors.
+    # Load and warm weights before serving requests so the first comparison
+    # does not pay the one-time Ultralytics/PyTorch initialization cost.
     for spec in MODEL_SPECS:
         try:
             load_model(spec.key)
         except Exception:
             continue
+    try:
+        warm_detection_models()
+    except Exception:
+        # A failed warm-up must never prevent the web UI from starting; the
+        # per-model inference path still reports a readable failure state.
+        pass
     schedule_output_cleanup()
     uvicorn.run(app, host="127.0.0.1", port=find_free_port())

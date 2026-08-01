@@ -107,6 +107,17 @@ def build_detection_ready_state(kind: str) -> str:
 def detection_progress_update(percent: float, title: str, detail: str) -> Any:
     return gr.update(value=build_detection_progress_state(percent, title, detail), visible=True)
 
+
+def detection_progress_complete(kind: str) -> Any:
+    """Leave a non-visual completion sentinel in the streamed progress output."""
+    safe_kind = xml_escape(str(kind or "detection"))
+    marker = (
+        f"<span class='detection-completion-marker' "
+        f"data-detection-complete='{safe_kind}' hidden></span>"
+    )
+    return gr.update(value=marker, visible=True)
+
+
 def detection_progress_hide() -> Any:
     return gr.update(value="", visible=False)
 
