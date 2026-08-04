@@ -1140,6 +1140,28 @@ def detection_page_intro(title: str, description: str, badges: tuple[str, ...]) 
     )
 
 
+def workspace_page_intro(
+    eyebrow: str,
+    title: str,
+    description: str,
+    badges: tuple[str, ...],
+    index: str,
+) -> str:
+    """Render a shared page header without changing any Gradio component flow."""
+    badge_html = "".join(f"<span>{xml_escape(item)}</span>" for item in badges)
+    return (
+        "<header class='workspace-page-hero'>"
+        f"<div class='workspace-page-index' aria-hidden='true'>{xml_escape(index)}</div>"
+        "<div class='workspace-page-copy'>"
+        f"<small>{xml_escape(eyebrow)}</small>"
+        f"<h2>{xml_escape(title)}</h2>"
+        f"<p>{xml_escape(description)}</p>"
+        "</div>"
+        f"<div class='workspace-page-badges' aria-label='{xml_escape(title)}页面特点'>{badge_html}</div>"
+        "</header>"
+    )
+
+
 def detection_result_tabs(kind: str, tabs: tuple[tuple[str, str], ...]) -> str:
     buttons = "".join(
         f"<button type='button' class='detection-result-tab' data-result-tab='{xml_escape(key)}' "
@@ -8501,30 +8523,47 @@ def build_app() -> gr.Blocks:
         current_batch = gr.State([])
 
         gr.HTML(
-            """
-            <div class="app-hero">
+            f"""
+            <header class="app-hero">
               <div class="app-hero-top">
-                <div class="app-hero-copy">
-                  <h1 data-i18n="app_title">牙齿病变目标区域识别与辅助分析平台</h1>
-                  <p data-i18n="app_subtitle">面向口腔影像的疑似牙齿病变区域辅助识别、模型对比与报告生成系统。</p>
+                <div class="app-brand-lockup">
+                  <span class="app-brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 48 48" role="img">
+                      <path d="M13.2 8.8c3.1-2.5 6.6-2 10.8-.5 4.2-1.5 7.7-2 10.8.5 4 3.2 4.3 9.2 2.2 14.1-1.5 3.5-3.2 5.7-4.1 10.7-.8 4.7-2.1 7.4-4.2 7.4-2.4 0-2.6-3.3-3.3-6.7-.3-1.8-.7-3.3-1.4-4.2-.7.9-1.1 2.4-1.4 4.2-.7 3.4-.9 6.7-3.3 6.7-2.1 0-3.4-2.7-4.2-7.4-.9-5-2.6-7.2-4.1-10.7-2.1-4.9-1.8-10.9 2.2-14.1Z"/>
+                      <path d="M17 15.5h14M24 10v11"/>
+                    </svg>
+                  </span>
+                  <div class="app-hero-copy">
+                    <span class="app-hero-kicker">DENTAL VISION WORKSPACE</span>
+                    <h1 data-i18n="app_title">牙齿病变目标区域识别与辅助分析平台</h1>
+                    <p data-i18n="app_subtitle">从影像识别、模型复核到报告归档的一体化口腔科研工作台。</p>
+                  </div>
+                </div>
+                <div class="app-hero-status" aria-label="平台概况">
+                  <div class="app-live-status"><i aria-hidden="true"></i><span><b>本地运行环境</b><small>分析与导出工作区</small></span></div>
+                  <div class="app-hero-facts">
+                    <span><b>{len(MODEL_SPECS)}</b><small>检测模型</small></span>
+                    <span><b>8</b><small>功能工作区</small></span>
+                    <span><b>LOCAL</b><small>数据处理</small></span>
+                  </div>
                 </div>
               </div>
-            </div>
+            </header>
             """
         )
         gr.HTML(
             f"""
             <nav class="dental-page-nav" aria-label="平台导航">
-              <button type="button" class="dental-nav-toggle" aria-expanded="false" aria-controls="dental-nav-items"><span>功能导航</span><b>☰</b></button>
+              <button type="button" class="dental-nav-toggle" aria-expanded="false" aria-controls="dental-nav-items"><span><b>功能导航</b><small>选择工作区</small></span><strong>☰</strong></button>
               <div id="dental-nav-items" class="dental-nav-items">
-                <button type="button" class="dental-page-nav-item" data-page="learn">牙病学习</button>
-                <button type="button" class="dental-page-nav-item" data-page="dashboard">首页 Dashboard</button>
-                <button type="button" class="dental-page-nav-item" data-page="image">图像检测</button>
-                <button type="button" class="dental-page-nav-item" data-page="compare">多模型对比</button>
-                <button type="button" class="dental-page-nav-item" data-page="batch">批量检测</button>
-                <button type="button" class="dental-page-nav-item" data-page="history">历史记录</button>
-                <button type="button" class="dental-page-nav-item" data-page="assistant">{AI_ASSISTANT_DISPLAY_NAME}</button>
-                <button type="button" class="dental-page-nav-item" data-page="report">报告中心</button>
+                <button type="button" class="dental-page-nav-item" data-page="learn"><span class="dental-nav-icon">01</span><span class="dental-nav-copy"><b>牙病学习</b><small>知识图谱</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="dashboard"><span class="dental-nav-icon">02</span><span class="dental-nav-copy"><b>首页概览</b><small>运行态势</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="image"><span class="dental-nav-icon">03</span><span class="dental-nav-copy"><b>图像检测</b><small>单图精检</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="compare"><span class="dental-nav-icon">04</span><span class="dental-nav-copy"><b>多模型对比</b><small>三模复核</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="batch"><span class="dental-nav-icon">05</span><span class="dental-nav-copy"><b>批量检测</b><small>队列筛查</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="history"><span class="dental-nav-icon">06</span><span class="dental-nav-copy"><b>历史记录</b><small>任务追溯</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="assistant"><span class="dental-nav-icon">07</span><span class="dental-nav-copy"><b>{AI_ASSISTANT_DISPLAY_NAME}</b><small>智能协作</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="report"><span class="dental-nav-icon">08</span><span class="dental-nav-copy"><b>报告中心</b><small>导出归档</small></span></button>
               </div>
             </nav>
             """
@@ -8991,46 +9030,81 @@ def build_app() -> gr.Blocks:
                         batch_csv_file = gr.DownloadButton("下载批量 CSV 报告", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-history", elem_classes=["dental-page"]):
-            gr.HTML("<div class='section-note'><b>历史记录</b><br>记录单模型检测、多模型对比和批量检测任务，Dashboard 统计优先基于这些历史记录计算。</div>")
-            history_summary_cards = gr.HTML(history_summary_markdown())
-            history_gallery = gr.Gallery(value=history_thumbnail_gallery(), label="最近检测缩略图", columns=6, rows=2, height=260, elem_classes="history-thumbnail-gallery")
-            with gr.Row(elem_classes="history-action-row"):
-                refresh_history_btn = gr.Button("刷新历史记录")
-                clear_history_page_btn = gr.Button("清空历史记录")
-                export_history_btn = gr.Button("导出历史 CSV")
-            with gr.Row(elem_classes="history-filter-row"):
-                history_task_filter = gr.Dropdown(["全部任务", "单模型检测", "多模型对比", "批量检测"], value="全部任务", label="按任务类型筛选")
-                history_review_filter = gr.Dropdown(["全部复核等级", "强烈建议人工复核", "建议人工复核", "常规人工复核", "当前阈值下无疑似区域", "无法评估"], value="全部复核等级", label="按复核等级筛选")
-                history_initial_pages = max(1, (len(history_rows()) + 19) // 20)
-                history_initial_choices = [f"第 {index} / {history_initial_pages} 页" for index in range(1, history_initial_pages + 1)]
-                history_page = gr.Dropdown(history_initial_choices, value=history_initial_choices[0], label="分页", interactive=history_initial_pages > 1)
-            history_table = gr.Dataframe(
-                value=list(reversed(history_rows()))[:20],
-                headers=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级"],
-                label="检测历史",
-                wrap=True,
+            gr.HTML(
+                workspace_page_intro(
+                    "任务档案与结果追踪",
+                    "历史记录",
+                    "集中浏览单图检测、多模型对比和批量筛查任务，并按任务类型与复核等级快速定位关键结果。",
+                    ("本地留存", "条件筛选", "详情回看", "CSV 导出"),
+                    "06",
+                )
             )
-            with gr.Row(elem_classes="history-detail-row"):
-                history_detail_selector = gr.Dropdown(history_detail_options(), label="选择历史记录查看详情", interactive=True)
-                history_export_file = gr.File(label="下载历史 CSV")
-            history_detail = gr.Markdown(history_detail_markdown(history_detail_options()[-1] if history_detail_options() else None))
+            history_summary_cards = gr.HTML(history_summary_markdown())
+            with gr.Row(equal_height=False, elem_classes=["history-command-deck"]):
+                with gr.Column(scale=8, elem_classes=["history-visual-panel"]):
+                    gr.HTML("<div class='workspace-panel-heading'><span>最近结果</span><div><h3>影像缩略图时间线</h3><p>快速回看最近完成的检测任务及输出影像。</p></div></div>")
+                    history_gallery = gr.Gallery(value=history_thumbnail_gallery(), label="最近检测缩略图", columns=6, rows=2, height=260, elem_classes="history-thumbnail-gallery")
+                with gr.Column(scale=4, elem_classes=["history-control-panel"]):
+                    gr.HTML("<div class='workspace-panel-heading'><span>任务工具</span><div><h3>筛选与管理</h3><p>组合筛选条件，快速定位需要复核的记录。</p></div></div>")
+                    with gr.Row(elem_classes="history-action-row"):
+                        refresh_history_btn = gr.Button("刷新记录", variant="primary")
+                        clear_history_page_btn = gr.Button("清空记录")
+                        export_history_btn = gr.Button("导出 CSV")
+                    with gr.Group(elem_classes="history-filter-stack"):
+                        history_task_filter = gr.Dropdown(["全部任务", "单模型检测", "多模型对比", "批量检测"], value="全部任务", label="任务类型")
+                        history_review_filter = gr.Dropdown(["全部复核等级", "强烈建议人工复核", "建议人工复核", "常规人工复核", "当前阈值下无疑似区域", "无法评估"], value="全部复核等级", label="复核等级")
+                        history_initial_pages = max(1, (len(history_rows()) + 19) // 20)
+                        history_initial_choices = [f"第 {index} / {history_initial_pages} 页" for index in range(1, history_initial_pages + 1)]
+                        history_page = gr.Dropdown(history_initial_choices, value=history_initial_choices[0], label="结果分页", interactive=history_initial_pages > 1)
+            with gr.Group(elem_classes=["history-table-panel"]):
+                gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>任务明细</span><div><h3>检测历史列表</h3><p>表格字段与原有统计口径保持一致。</p></div></div>")
+                history_table = gr.Dataframe(
+                    value=list(reversed(history_rows()))[:20],
+                    headers=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级"],
+                    label="检测历史",
+                    wrap=True,
+                )
+            with gr.Row(equal_height=False, elem_classes=["history-detail-workspace"]):
+                with gr.Column(scale=4, elem_classes=["history-detail-controls"]):
+                    gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>记录定位</span><div><h3>选择任务</h3><p>选中记录后在右侧查看完整信息。</p></div></div>")
+                    history_detail_selector = gr.Dropdown(history_detail_options(), label="历史记录", interactive=True)
+                    history_export_file = gr.File(label="下载历史 CSV")
+                with gr.Column(scale=8, elem_classes=["history-detail-preview"]):
+                    gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>任务回看</span><div><h3>记录详情</h3><p>展示任务参数、模型输出和复核提示。</p></div></div>")
+                    history_detail = gr.Markdown(history_detail_markdown(history_detail_options()[-1] if history_detail_options() else None))
 
         with gr.Group(elem_id="page-assistant", elem_classes=["dental-page"]):
             gr.HTML(native_ai_assistant_html(), js_on_load=native_ai_assistant_js(), container=False, padding=False)
 
         with gr.Group(elem_id="page-report", elem_classes=["dental-page"]):
-            gr.HTML("<div class='section-note'><b>报告中心</b><br>根据当前检测、对比或批量结果生成可下载 Markdown 报告。</div>")
-            with gr.Row(elem_classes="report-controls-row"):
-                report_type = gr.Dropdown(["单图检测报告", "多模型对比报告", "批量检测报告", "综合报告"], value="综合报告", label="报告类型")
-                report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
-                report_btn = gr.Button("生成检测报告")
-            report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
-            report_preview = gr.Markdown("尚未生成报告。", elem_classes="report-preview-panel")
-            with gr.Row(elem_classes="report-download-row"):
-                report_file = gr.DownloadButton("下载 Markdown 报告", elem_classes="report-download-action")
-                report_pdf_file = gr.DownloadButton("下载 PDF 报告", elem_classes="report-download-action")
-                report_docx_file = gr.DownloadButton("下载 Word 报告", elem_classes="report-download-action")
-            recent_reports = gr.HTML(recent_reports_html(), elem_classes="recent-reports-panel")
+            gr.HTML(
+                workspace_page_intro(
+                    "结果编排与多格式交付",
+                    "报告中心",
+                    "将当前单图、多模型或批量任务整理为结构化报告，在同一工作区中预览、导出并回看最近产物。",
+                    ("中英双语", "图文预览", "三种格式", "本地归档"),
+                    "08",
+                )
+            )
+            with gr.Row(equal_height=False, elem_classes=["report-workspace-grid"]):
+                with gr.Column(scale=4, elem_classes=["report-command-column"]):
+                    with gr.Group(elem_classes=["report-command-panel"]):
+                        gr.HTML("<div class='workspace-panel-heading'><span>生成设置</span><div><h3>创建检测报告</h3><p>选择数据范围与语言后生成当前报告。</p></div></div>")
+                        with gr.Group(elem_classes="report-controls-row"):
+                            report_type = gr.Dropdown(["单图检测报告", "多模型对比报告", "批量检测报告", "综合报告"], value="综合报告", label="报告类型")
+                            report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
+                            report_btn = gr.Button("生成检测报告", variant="primary", elem_classes=["report-generate-action"])
+                with gr.Column(scale=8, elem_classes=["report-preview-column"]):
+                    gr.HTML("<div class='workspace-panel-heading'><span>文档画布</span><div><h3>报告内容预览</h3><p>生成后可检查正文与图片，再选择所需格式下载。</p></div></div>")
+                    report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
+                    report_preview = gr.Markdown("尚未生成报告。", elem_classes="report-preview-panel")
+                    with gr.Row(elem_classes="report-download-row"):
+                        report_file = gr.DownloadButton("下载 Markdown 报告", elem_classes="report-download-action")
+                        report_pdf_file = gr.DownloadButton("下载 PDF 报告", elem_classes="report-download-action")
+                        report_docx_file = gr.DownloadButton("下载 Word 报告", elem_classes="report-download-action")
+            with gr.Group(elem_classes=["report-recent-panel"]):
+                gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>本地归档</span><div><h3>最近生成</h3><p>回看已生成的报告文件。</p></div></div>")
+                recent_reports = gr.HTML(recent_reports_html(), elem_classes="recent-reports-panel")
 
         refresh_btn.click(lambda: (*dashboard_outputs(), registry_status_markdown()), outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status])
         clear_outputs = [dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, current_detection, current_comparison, current_batch, history_summary_cards, history_table, history_detail_selector, history_detail, history_notice]
