@@ -9068,7 +9068,11 @@ def build_app() -> gr.Blocks:
                 with gr.Column(scale=4, elem_classes=["history-detail-controls"]):
                     gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>记录定位</span><div><h3>选择任务</h3><p>选中记录后在右侧查看完整信息。</p></div></div>")
                     history_detail_selector = gr.Dropdown(history_detail_options(), label="历史记录", interactive=True)
-                    history_export_file = gr.File(label="下载历史 CSV")
+                    history_export_file = gr.DownloadButton(
+                        "下载历史 CSV",
+                        elem_id="history-export-download",
+                        elem_classes=["history-export-download", "report-download-action"],
+                    )
                 with gr.Column(scale=8, elem_classes=["history-detail-preview"]):
                     gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>任务回看</span><div><h3>记录详情</h3><p>展示任务参数、模型输出和复核提示。</p></div></div>")
                     history_detail = gr.Markdown(history_detail_markdown(history_detail_options()[-1] if history_detail_options() else None))

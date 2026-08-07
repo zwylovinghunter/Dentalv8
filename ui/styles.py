@@ -6226,7 +6226,66 @@ button.solid-primary-action:hover,
   border: 0 !important;
   background: transparent !important;
 }
-#page-history .history-action-row button { min-width: 0 !important; padding-inline: 7px !important; font-size: 11px !important; }
+#page-history .history-action-row button {
+  min-width: 0 !important;
+  min-height: 44px !important;
+  padding-inline: 7px !important;
+  border: 1px solid #b9cede !important;
+  border-radius: 9px !important;
+  background: #fff !important;
+  color: #24435e !important;
+  font-size: 11px !important;
+  font-weight: 800 !important;
+  text-align: center !important;
+}
+#page-history .history-action-row button.primary,
+#page-history .history-action-row button[variant="primary"] {
+  border-color: #174d78 !important;
+  background: linear-gradient(135deg, var(--dv-navy-900), #174d78) !important;
+  color: #fff !important;
+  box-shadow: 0 7px 16px rgba(11, 34, 57, .16) !important;
+}
+#page-history .history-action-row button:hover {
+  border-color: #0c6683 !important;
+  background: var(--dv-blue-soft) !important;
+  color: var(--dv-navy-900) !important;
+}
+#page-history .history-action-row button.primary:hover,
+#page-history .history-action-row button[variant="primary"]:hover {
+  background: linear-gradient(135deg, #123654, #0c6683) !important;
+  color: #fff !important;
+}
+#page-history .history-export-download {
+  display: block !important;
+  width: 100% !important;
+  min-height: 44px !important;
+  margin-top: 12px !important;
+}
+#page-history button.history-export-download,
+#page-history a.history-export-download,
+#page-history .history-export-download a,
+#page-history .history-export-download button {
+  width: 100% !important;
+  min-height: 44px !important;
+  justify-content: center !important;
+  border: 1px solid #174d78 !important;
+  border-radius: 9px !important;
+  background: linear-gradient(135deg, var(--dv-navy-900), #174d78) !important;
+  color: #fff !important;
+  font-size: 13px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 7px 16px rgba(11, 34, 57, .16) !important;
+}
+#page-history button.history-export-download:hover,
+#page-history a.history-export-download:hover,
+#page-history .history-export-download a:hover,
+#page-history .history-export-download button:hover {
+  background: linear-gradient(135deg, #123654, #0c6683) !important;
+  color: #fff !important;
+}
+#page-history .history-export-download [data-testid="file"] {
+  min-height: 0 !important;
+}
 #page-history .history-filter-stack,
 #page-history .history-filter-stack > .styler { display: grid !important; gap: 8px !important; padding: 0 !important; border: 0 !important; background: transparent !important; }
 #page-history .history-thumbnail-gallery { overflow: hidden !important; border: 1px solid #e3eaf1 !important; border-radius: 11px !important; background: var(--dv-panel-soft) !important; }
