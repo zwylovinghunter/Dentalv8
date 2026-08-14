@@ -3,7 +3,10 @@ from __future__ import annotations
 ASK_AI_HEAD = r"""
 <script>
 (function () {
-  if (window.__dentalAskAiInstalledV6) return;
+  if (window.__dentalAskAiInstalledV9) return;
+  window.__dentalAskAiInstalledV9 = true;
+  window.__dentalAskAiInstalledV8 = true;
+  window.__dentalAskAiInstalledV7 = true;
   window.__dentalAskAiInstalledV6 = true;
   window.__dentalAskAiInstalledV5 = true;
   window.__dentalAskAiInstalledV4 = true;
@@ -17,6 +20,12 @@ ASK_AI_HEAD = r"""
   }
 
   const DENTAL_PAGES = new Set(["learn", "dashboard", "image", "compare", "batch", "history", "assistant", "report"]);
+  let activeSelectionText = "";
+  let activeSelectionAnchor = null;
+  let activeSelectionRange = null;
+  let selectionMouseGesture = null;
+  const pendingAssistantQuestions = [];
+  let assistantDeliveryBusy = false;
 
   function activateDentalPage(page, shouldScroll = true) {
     const nextPage = DENTAL_PAGES.has(page) ? page : "learn";
@@ -366,38 +375,124 @@ ASK_AI_HEAD = r"""
   }
 
   function findAiTabButton() {
+    const pageNavButton = document.querySelector('.dental-page-nav-item[data-page="assistant"]');
+    if (pageNavButton) return pageNavButton;
+    const isExcluded = el => Boolean(el?.closest?.('#ask-ai-floating-button, #ask-ai-selection-popover'));
     const roleTabs = Array.from(document.querySelectorAll('[role="tab"]'));
-    const roleByText = roleTabs.find(el => (el.textContent || '').replace(/\s+/g, '').includes('智诊管家'));
+    const roleByText = roleTabs.find(el => !isExcluded(el) && (el.textContent || '').replace(/\s+/g, '').includes('智诊管家'));
     if (roleByText) return roleByText;
     const direct = document.querySelector('[aria-controls*="ai-assistant-tab"], [id*="ai-assistant-tab"] button');
-    if (direct) return direct;
+    if (direct && !isExcluded(direct)) return direct;
     const tabButtons = Array.from(document.querySelectorAll('[role="tab"], button[aria-selected]'));
-    const tabButtonByText = tabButtons.find(el => (el.textContent || '').replace(/\s+/g, '').includes('智诊管家'));
+    const tabButtonByText = tabButtons.find(el => !isExcluded(el) && (el.textContent || '').replace(/\s+/g, '').includes('智诊管家'));
     if (tabButtonByText) return tabButtonByText;
     const candidates = Array.from(document.querySelectorAll('button, [role="tab"]'));
-    const byText = candidates.find(el => (el.textContent || '').replace(/\s+/g, '').includes('智诊管家'));
+    const byText = candidates.find(el => !isExcluded(el) && (el.textContent || '').replace(/\s+/g, '').includes('智诊管家'));
     if (byText) return byText.closest('button, [role="tab"]') || byText;
     const xpath = document.evaluate("//*[contains(normalize-space(.), '智诊管家')]", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
     for (let i = 0; i < xpath.snapshotLength; i++) {
       const node = xpath.snapshotItem(i);
       const clickable = node.closest && node.closest('button, [role="tab"]');
-      if (clickable) return clickable;
+      if (clickable && !isExcluded(clickable)) return clickable;
     }
     return null;
   }
 
-  function findInput() {
-    return document.querySelector('#ask-ai-input textarea, #ask-ai-input input, textarea[aria-label="问题"], input[aria-label="问题"]');
+  function findAssistantRoot() {
+    return document.querySelector('#native-ai-assistant[data-installed="true"]')
+      || document.querySelector('#native-ai-assistant');
   }
 
-  function findSendButton() {
-    return document.querySelector('#ask-ai-send button, #ask-ai-send');
+  function findInput(root = findAssistantRoot()) {
+    return root?.querySelector('#ask-ai-input textarea, #ask-ai-input input') || null;
+  }
+
+  function findSendButton(root = findAssistantRoot()) {
+    const target = root?.querySelector('#ask-ai-send');
+    if (!target) return null;
+    return target.matches('button') ? target : target.querySelector('button');
   }
 
   function writeAssistantInput(el, value) {
     el.value = value;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function closeSelectionPopover(clearSelection = false) {
+    const pop = document.getElementById('ask-ai-selection-popover');
+    if (!pop) return;
+    pop.classList.remove('visible', 'has-error');
+    pop.style.visibility = '';
+    const input = pop.querySelector('#ask-ai-selection-question');
+    const feedback = pop.querySelector('#ask-ai-selection-feedback');
+    if (input) {
+      input.value = '';
+      input.removeAttribute('aria-invalid');
+    }
+    if (feedback) feedback.textContent = '';
+    const send = pop.querySelector('#ask-ai-selection-send');
+    if (send) send.disabled = true;
+    if (clearSelection) {
+      activeSelectionText = '';
+      activeSelectionAnchor = null;
+      activeSelectionRange = null;
+      pop.dataset.text = '';
+      const context = pop.querySelector('.ask-ai-selection-context p');
+      if (context) {
+        context.textContent = '';
+        context.removeAttribute('title');
+      }
+      try { window.getSelection()?.removeAllRanges(); } catch (_) {}
+    }
+  }
+
+  function assistantSendReady(root, input, send) {
+    return Boolean(
+      root?.dataset.installed === 'true'
+      && input
+      && send
+      && !send.disabled
+      && send.getAttribute('aria-disabled') !== 'true'
+    );
+  }
+
+  function assistantIsVisible(root) {
+    if (!root) return false;
+    const style = window.getComputedStyle(root);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  function flushAssistantQuestions() {
+    if (!pendingAssistantQuestions.length) {
+      assistantDeliveryBusy = false;
+      return;
+    }
+    assistantDeliveryBusy = true;
+    const root = findAssistantRoot();
+    const input = findInput(root);
+    const send = findSendButton(root);
+    if (!assistantSendReady(root, input, send) || !assistantIsVisible(root)) {
+      setTimeout(flushAssistantQuestions, 250);
+      return;
+    }
+    const question = pendingAssistantQuestions[0];
+    const accepted = !root.dispatchEvent(new CustomEvent('dental-ai-submit', {
+      bubbles: false,
+      cancelable: true,
+      detail: { message: question, source: 'selection-popover' }
+    }));
+    if (accepted) {
+      pendingAssistantQuestions.shift();
+    }
+    setTimeout(flushAssistantQuestions, 250);
+  }
+
+  function deliverAssistantQuestion(question) {
+    const normalized = String(question || '').trim();
+    if (!normalized) return;
+    pendingAssistantQuestions.push(normalized);
+    if (!assistantDeliveryBusy) flushAssistantQuestions();
   }
 
   function jumpToAssistant() {
@@ -422,18 +517,38 @@ ASK_AI_HEAD = r"""
     }, 420);
   }
 
-  function askAi(text) {
+  function askAi(text, specificQuestion = '') {
     const picked = (text || selectedText()).trim();
     jumpToAssistant();
     if (!picked) return;
-    const question = `请解释我在页面上选中的这段内容，并在需要时结合当前检测结果、多模型对比、批量检测和报告上下文回答：\n\n「${picked}」`;
-    setTimeout(() => {
-      const input = findInput();
-      const send = findSendButton();
-      if (!input || !send) return;
-      writeAssistantInput(input, question);
-      setTimeout(() => send.click(), 120);
-    }, 650);
+    const custom = String(specificQuestion || '').trim().slice(0, 360);
+    const question = custom
+      ? `请结合当前检测结果、多模型对比、批量检测和报告上下文，根据下面的页面高亮内容回答用户的具体问题。不要脱离高亮内容，也不要把辅助识别结果表述为临床诊断。\n\n页面高亮内容：\n「${picked}」\n\n用户具体问题：\n${custom}`
+      : `请解释我在页面上选中的这段内容，并在需要时结合当前检测结果、多模型对比、批量检测和报告上下文回答：\n\n「${picked}」`;
+    setTimeout(() => deliverAssistantQuestion(question), 260);
+  }
+
+  function submitSelectionQuestion(pop) {
+    if (!pop) return;
+    const input = pop.querySelector('#ask-ai-selection-question');
+    const feedback = pop.querySelector('#ask-ai-selection-feedback');
+    const picked = String(pop.dataset.text || activeSelectionText || '').trim();
+    const question = String(input?.value || '').trim();
+    if (!question) {
+      pop.classList.remove('has-error');
+      void pop.offsetWidth;
+      pop.classList.add('has-error');
+      input?.setAttribute('aria-invalid', 'true');
+      if (feedback) feedback.textContent = '请输入关于高亮内容的具体问题';
+      input?.focus({ preventScroll: true });
+      return;
+    }
+    if (!picked) {
+      closeSelectionPopover(true);
+      return;
+    }
+    askAi(picked, question);
+    closeSelectionPopover(true);
   }
 
   function ensureUi() {
@@ -465,32 +580,216 @@ ASK_AI_HEAD = r"""
       });
       document.body.appendChild(btn);
     }
+    const legacyPopover = document.getElementById('ask-ai-selection-popover');
+    if (legacyPopover && legacyPopover.tagName === 'BUTTON') legacyPopover.remove();
     if (!document.getElementById('ask-ai-selection-popover')) {
-      const pop = document.createElement('button');
+      const pop = document.createElement('section');
       pop.id = 'ask-ai-selection-popover';
-      pop.type = 'button';
-      pop.textContent = '问问智诊管家';
-      pop.addEventListener('click', () => askAi(pop.dataset.text || selectedText()));
+      pop.setAttribute('role', 'dialog');
+      pop.setAttribute('aria-modal', 'false');
+      pop.setAttribute('aria-label', '针对高亮内容向智诊管家提问');
+      pop.innerHTML = `
+        <div class="ask-ai-selection-brand">
+          <span class="ask-ai-selection-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 3.5v2.2M7.5 7.1 6 5.6m10.5 1.5L18 5.6M6.8 11.5h10.4a2 2 0 0 1 2 2v4.1a2 2 0 0 1-2 2H6.8a2 2 0 0 1-2-2v-4.1a2 2 0 0 1 2-2Z"/><circle cx="9" cy="15.5" r="1"/><circle cx="15" cy="15.5" r="1"/></svg>
+          </span>
+          <span class="ask-ai-selection-brand-copy"><strong>问问智诊管家</strong><small>针对高亮内容提问</small></span>
+        </div>
+        <form class="ask-ai-selection-form" autocomplete="off">
+          <input id="ask-ai-selection-question" type="text" maxlength="360" aria-label="关于高亮内容的具体问题" aria-describedby="ask-ai-selection-highlight ask-ai-selection-feedback" placeholder="输入具体问题，例如：这项指标代表什么？" />
+          <button id="ask-ai-selection-send" type="submit" disabled aria-label="发送关于高亮内容的问题">
+            <span>发送</span>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6M13 10H3"/></svg>
+          </button>
+        </form>
+        <div class="ask-ai-selection-context">
+          <span class="ask-ai-selection-context-label">已高亮</span>
+          <p id="ask-ai-selection-highlight"></p>
+          <span id="ask-ai-selection-feedback" role="status" aria-live="polite"></span>
+          <button class="ask-ai-selection-close" type="button" aria-label="关闭高亮提问">×</button>
+        </div>`;
+      const form = pop.querySelector('.ask-ai-selection-form');
+      const input = pop.querySelector('#ask-ai-selection-question');
+      const send = pop.querySelector('#ask-ai-selection-send');
+      const close = pop.querySelector('.ask-ai-selection-close');
+      let composing = false;
+      let compositionJustEnded = false;
+      let compositionResetTimer = 0;
+      input?.addEventListener('compositionstart', () => {
+        composing = true;
+        compositionJustEnded = false;
+        window.clearTimeout(compositionResetTimer);
+      });
+      input?.addEventListener('compositionend', () => {
+        composing = false;
+        compositionJustEnded = true;
+        compositionResetTimer = window.setTimeout(() => { compositionJustEnded = false; }, 120);
+      });
+      form?.addEventListener('submit', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (composing || compositionJustEnded) return;
+        submitSelectionQuestion(pop);
+      });
+      input?.addEventListener('input', () => {
+        const hasQuestion = Boolean(input.value.trim());
+        if (send) send.disabled = !hasQuestion;
+        input.removeAttribute('aria-invalid');
+        pop.classList.remove('has-error');
+        const feedback = pop.querySelector('#ask-ai-selection-feedback');
+        if (feedback) feedback.textContent = '';
+      });
+      input?.addEventListener('keydown', event => {
+        if (composing || event.isComposing || event.keyCode === 229) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeSelectionPopover(true);
+          return;
+        }
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          form?.requestSubmit();
+        }
+      });
+      close?.addEventListener('click', event => {
+        event.preventDefault();
+        closeSelectionPopover(true);
+      });
+      ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchend'].forEach(type => {
+        pop.addEventListener(type, event => event.stopPropagation());
+      });
       document.body.appendChild(pop);
     }
   }
 
+  function positionSelectionPopover(pop, rect, shouldFocus = true) {
+    const margin = 12;
+    const gap = 10;
+    pop.style.visibility = 'hidden';
+    pop.classList.add('visible');
+    requestAnimationFrame(() => {
+      if (!pop.classList.contains('visible')) return;
+      const viewport = window.visualViewport;
+      const viewportLeft = viewport?.offsetLeft || 0;
+      const viewportTop = viewport?.offsetTop || 0;
+      const viewportWidth = viewport?.width || window.innerWidth;
+      const viewportHeight = viewport?.height || window.innerHeight;
+      const width = Math.min(pop.offsetWidth || 680, viewportWidth - margin * 2);
+      const height = pop.offsetHeight || 116;
+      const preferredLeft = rect.left + Math.min(rect.width * 0.18, 72);
+      const left = Math.min(viewportLeft + viewportWidth - width - margin, Math.max(viewportLeft + margin, preferredLeft));
+      const below = rect.bottom + gap;
+      const top = below + height <= viewportTop + viewportHeight - margin
+        ? below
+        : Math.max(viewportTop + margin, rect.top - height - gap);
+      pop.style.left = `${Math.round(left)}px`;
+      pop.style.top = `${Math.round(top)}px`;
+      pop.style.visibility = 'visible';
+      if (shouldFocus && window.matchMedia?.('(pointer: fine)').matches) {
+        pop.querySelector('#ask-ai-selection-question')?.focus({ preventScroll: true });
+      }
+    });
+  }
+
   function showSelectionPopover() {
     ensureUi();
-    const text = selectedText();
     const pop = document.getElementById('ask-ai-selection-popover');
-    if (!text || text.length < 3) {
+    if (!pop || pop.contains(document.activeElement)) return;
+    const selection = window.getSelection();
+    const anchorElement = selection?.anchorNode?.nodeType === Node.ELEMENT_NODE
+      ? selection.anchorNode
+      : selection?.anchorNode?.parentElement;
+    if (anchorElement && pop.contains(anchorElement)) return;
+    const text = selectedText();
+    if (!text || text.length < 2) {
       pop.classList.remove('visible');
       return;
     }
-    const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
-    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
     if (!rect || (!rect.width && !rect.height)) return;
+    activeSelectionText = text;
+    try { activeSelectionRange = range.cloneRange(); } catch (_) { activeSelectionRange = null; }
+    activeSelectionAnchor = {
+      left: rect.left + window.scrollX,
+      right: rect.right + window.scrollX,
+      top: rect.top + window.scrollY,
+      bottom: rect.bottom + window.scrollY,
+      width: rect.width,
+      height: rect.height
+    };
     pop.dataset.text = text;
-    pop.style.left = `${Math.min(window.innerWidth - 150, Math.max(12, rect.right + window.scrollX + 8))}px`;
-    pop.style.top = `${Math.max(12, rect.top + window.scrollY - 8)}px`;
-    pop.classList.add('visible');
+    const context = pop.querySelector('.ask-ai-selection-context p');
+    if (context) {
+      context.textContent = text;
+      context.title = text;
+    }
+    const input = pop.querySelector('#ask-ai-selection-question');
+    const send = pop.querySelector('#ask-ai-selection-send');
+    if (input) input.value = '';
+    if (send) send.disabled = true;
+    positionSelectionPopover(pop, rect);
+  }
+
+  function selectionGestureExcludedTarget(target) {
+    return Boolean(target?.closest?.(
+      '#ask-ai-selection-popover, #ask-ai-floating-button, input, textarea, select, button, [contenteditable="true"]'
+    ));
+  }
+
+  function startSelectionMouseGesture(event) {
+    selectionMouseGesture = null;
+    if (event.pointerType !== 'mouse' || event.button !== 0) return;
+    if (selectionGestureExcludedTarget(event.target)) return;
+    selectionMouseGesture = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragged: false
+    };
+  }
+
+  function trackSelectionMouseGesture(event) {
+    const gesture = selectionMouseGesture;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (!(event.buttons & 1)) {
+      selectionMouseGesture = null;
+      return;
+    }
+    if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) >= 3) {
+      gesture.dragged = true;
+    }
+  }
+
+  function finishSelectionMouseGesture(event) {
+    const gesture = selectionMouseGesture;
+    selectionMouseGesture = null;
+    if (
+      !gesture
+      || !gesture.dragged
+      || event.pointerType !== 'mouse'
+      || event.button !== 0
+      || event.pointerId !== gesture.pointerId
+    ) return;
+    showSelectionPopover();
+  }
+
+  function repositionSelectionPopover() {
+    const pop = document.getElementById('ask-ai-selection-popover');
+    if (!pop?.classList.contains('visible') || !activeSelectionAnchor) return;
+    let liveRect = null;
+    try { liveRect = activeSelectionRange?.getBoundingClientRect() || null; } catch (_) {}
+    const fallbackRect = {
+      left: activeSelectionAnchor.left - window.scrollX,
+      right: activeSelectionAnchor.right - window.scrollX,
+      top: activeSelectionAnchor.top - window.scrollY,
+      bottom: activeSelectionAnchor.bottom - window.scrollY,
+      width: activeSelectionAnchor.width,
+      height: activeSelectionAnchor.height
+    };
+    const rect = liveRect && (liveRect.width || liveRect.height) ? liveRect : fallbackRect;
+    positionSelectionPopover(pop, rect, false);
   }
 
   function installSynchronizedComparisonViewer() {
@@ -955,10 +1254,22 @@ ASK_AI_HEAD = r"""
     installDetectionWorkflowState();
     installDetectionResultTabs();
     ensureUi();
-    document.addEventListener('mouseup', () => setTimeout(showSelectionPopover, 60));
-    document.addEventListener('touchend', () => setTimeout(showSelectionPopover, 180));
-    document.addEventListener('selectionchange', () => setTimeout(showSelectionPopover, 80));
+    document.addEventListener('pointerdown', startSelectionMouseGesture, true);
+    document.addEventListener('pointermove', trackSelectionMouseGesture, true);
+    document.addEventListener('pointerup', finishSelectionMouseGesture, true);
+    document.addEventListener('pointercancel', () => { selectionMouseGesture = null; }, true);
+    window.addEventListener('blur', () => { selectionMouseGesture = null; });
+    document.addEventListener('scroll', repositionSelectionPopover, true);
+    window.addEventListener('scroll', repositionSelectionPopover, { passive: true });
+    window.addEventListener('resize', repositionSelectionPopover, { passive: true });
+    window.visualViewport?.addEventListener('resize', repositionSelectionPopover, { passive: true });
+    window.visualViewport?.addEventListener('scroll', repositionSelectionPopover, { passive: true });
+    document.addEventListener('pointerdown', event => {
+      const pop = document.getElementById('ask-ai-selection-popover');
+      if (pop?.classList.contains('visible') && !pop.contains(event.target)) closeSelectionPopover(true);
+    }, true);
     document.addEventListener('dragstart', e => {
+      selectionMouseGesture = null;
       const text = selectedText();
       if (text && e.dataTransfer) {
         e.dataTransfer.setData('text/plain', text);
@@ -966,6 +1277,8 @@ ASK_AI_HEAD = r"""
       }
     }, true);
     document.addEventListener('keydown', e => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') closeSelectionPopover(true);
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
         e.preventDefault();
         askAi(selectedText());

@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import base64
 import copy
+from difflib import SequenceMatcher
 import hashlib
+import math
 import os
 import re
 import socket
@@ -813,9 +815,18 @@ def save_image_asset(image: Image.Image, prefix: str, suffix: str) -> str:
     ensure_dirs()
     cleanup_output_artifacts()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = REPORT_ASSET_DIR / f"{safe_asset_stem(prefix)}_{suffix}_{stamp}.jpg"
-    quality = 87 if suffix == "result" else 86
-    display_image(image, 1280).convert("RGB").save(path, format="JPEG", quality=quality, subsampling=2, optimize=True)
+    is_annotated = suffix in {"result", "crop_result"}
+    extension = "png" if is_annotated else "jpg"
+    path = REPORT_ASSET_DIR / f"{safe_asset_stem(prefix)}_{suffix}_{stamp}.{extension}"
+    browser_asset = display_image(image, 4096)
+    if browser_asset is None:
+        raise ValueError("无法生成浏览器显示图像。")
+    if is_annotated:
+        # Detection labels and thin box edges must stay lossless when the user
+        # opens the full-screen viewer or zooms a large panoramic image.
+        browser_asset.convert("RGB").save(path, format="PNG", optimize=True, compress_level=5)
+    else:
+        browser_asset.convert("RGB").save(path, format="JPEG", quality=94, subsampling=0, optimize=True)
     try:
         cached_size = OUTPUT_STORAGE_CACHE.get("value")
         if cached_size is not None:
@@ -1022,17 +1033,39 @@ def draw_boxes(
     show_confidence: bool = True,
     line_width: int = 3,
     color_mode: str = "按目标编号配色",
+    minimum_font_size: int = 18,
 ) -> Image.Image:
     out = image.copy().convert("RGB")
     draw = ImageDraw.Draw(out)
-    font = ImageFont.load_default()
-    line_width = max(1, int(line_width or 3))
+    longest_side = max(out.size)
+    font_size = max(max(12, int(minimum_font_size or 18)), min(44, int(round(longest_side / 86))))
+    font = None
+    for font_path in (
+        Path("C:/Windows/Fonts/msyhbd.ttc"),
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    ):
+        try:
+            if font_path.exists():
+                font = ImageFont.truetype(str(font_path), font_size)
+                break
+        except (OSError, ValueError):
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    requested_line_width = max(1, int(line_width or 3))
+    line_width = max(requested_line_width, int(round(requested_line_width * max(1.0, longest_side / 1280))))
+    label_pad_x = max(6, int(round(font_size * 0.32)))
+    label_pad_y = max(4, int(round(font_size * 0.2)))
     labels: list[tuple[list[float], str, tuple[int, int, int]]] = []
     for idx, box in enumerate(boxes):
         x1, y1, x2, y2 = box["bbox_xyxy"]
-        color = box_color(box, idx, color_mode)
+        color_index = int(box.get("_color_index", idx))
+        display_index = int(box.get("_display_index", idx + 1))
+        color = box_color(box, color_index, color_mode)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
-        label_parts = [f"{idx + 1}."]
+        label_parts = [f"{display_index}."]
         if show_label:
             label_parts.append(str(box["class_name"]))
         if show_confidence:
@@ -1043,11 +1076,25 @@ def draw_boxes(
     occupied_labels: list[tuple[int, int, int, int]] = []
     for bbox, label, color in labels:
         text_bbox = draw.textbbox((0, 0), label, font=font)
-        label_width = max(48, text_bbox[2] - text_bbox[0] + 8)
-        label_height = max(18, text_bbox[3] - text_bbox[1] + 6)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        label_width = max(font_size * 4, text_width + label_pad_x * 2)
+        label_height = max(font_size + label_pad_y * 2, text_height + label_pad_y * 2)
         label_rect = place_detection_label(bbox, (label_width, label_height), out.size, occupied_labels)
-        draw.rounded_rectangle(label_rect, radius=3, fill=color)
-        draw.text((label_rect[0] + 4, label_rect[1] + 3), label, fill=(0, 0, 0), font=font)
+        draw.rounded_rectangle(label_rect, radius=max(4, font_size // 4), fill=color)
+        luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+        text_color = (15, 23, 42) if luminance >= 156 else (255, 255, 255)
+        stroke_color = (255, 255, 255) if text_color[0] < 128 else (15, 23, 42)
+        text_x = label_rect[0] + label_pad_x - text_bbox[0]
+        text_y = label_rect[1] + label_pad_y - text_bbox[1]
+        draw.text(
+            (text_x, text_y),
+            label,
+            fill=text_color,
+            font=font,
+            stroke_width=max(1, font_size // 18),
+            stroke_fill=stroke_color,
+        )
         occupied_labels.append(label_rect)
     return out
 
@@ -1446,38 +1493,121 @@ def crop_region_pair(
     box: dict[str, Any],
     pad_ratio: float = 0.35,
     source_size: tuple[int, int] | None = None,
+    *,
+    redraw_selected: bool = False,
+    display_index: int = 1,
+    visual_options: dict[str, Any] | None = None,
+    minimum_output_long_side: int = 0,
 ) -> tuple[Image.Image | None, Image.Image | None]:
-    """Crop the same detection region from display assets of any resolution.
+    """Build matching, context-rich crops from display assets of any resolution.
 
     Detection boxes use the uploaded image coordinates, while persisted browser
-    assets may be resized for faster display. Scale one padded source-space crop
-    into each asset so the selected box cannot drift or become pinned to an edge.
+    assets may be resized for faster display. A stable context window is shifted
+    back inside the source at image edges instead of being shortened. Linked
+    review views can redraw only the selected box after cropping so its complete
+    label is always placed inside the resulting image.
     """
     try:
         source_width, source_height = source_size or original.size
         source_width, source_height = int(source_width), int(source_height)
         if source_width <= 0 or source_height <= 0:
             return None, None
-        x1, y1, x2, y2 = [float(value) for value in box["bbox_xyxy"]]
-        pad = max(25, int(max(x2 - x1, y2 - y1) * pad_ratio))
-        source_left, source_top = max(0, int(x1) - pad), max(0, int(y1) - pad)
-        source_right = min(source_width, int(x2) + pad)
-        source_bottom = min(source_height, int(y2) + pad)
-        if source_right <= source_left or source_bottom <= source_top:
+        coordinates = [float(value) for value in box["bbox_xyxy"]]
+        if len(coordinates) != 4 or not all(math.isfinite(value) for value in coordinates):
+            return None, None
+        x1, x2 = sorted((coordinates[0], coordinates[2]))
+        y1, y2 = sorted((coordinates[1], coordinates[3]))
+        x1, x2 = max(0.0, min(float(source_width), x1)), max(0.0, min(float(source_width), x2))
+        y1, y2 = max(0.0, min(float(source_height), y1)), max(0.0, min(float(source_height), y2))
+        if x2 <= x1 or y2 <= y1:
             return None, None
 
-        def scaled_crop(image: Image.Image) -> Image.Image | None:
+        box_width = max(1.0, x2 - x1)
+        box_height = max(1.0, y2 - y1)
+        context_factor = max(3.0, 1.0 + max(0.0, float(pad_ratio)) * 2.0)
+        width_floor = min(float(source_width), max(320.0, min(520.0, source_width * 0.18)))
+        height_floor = min(float(source_height), max(260.0, min(420.0, source_height * 0.24)))
+        target_width = min(float(source_width), max(box_width * context_factor, width_floor))
+        target_height = min(float(source_height), max(box_height * context_factor, height_floor))
+
+        # Keep a useful landscape review window without ever cutting the box.
+        if target_width / max(1.0, target_height) < 4.0 / 3.0:
+            target_width = min(float(source_width), target_height * 4.0 / 3.0)
+        elif target_width / max(1.0, target_height) > 16.0 / 9.0:
+            target_height = min(float(source_height), target_width / (16.0 / 9.0))
+
+        def centered_window(center: float, extent: float, limit: int) -> tuple[int, int]:
+            span = min(limit, max(1, int(math.ceil(extent))))
+            start = int(math.floor(center - span / 2.0))
+            start = max(0, min(start, limit - span))
+            return start, start + span
+
+        source_left, source_right = centered_window((x1 + x2) / 2.0, target_width, source_width)
+        source_top, source_bottom = centered_window((y1 + y2) / 2.0, target_height, source_height)
+
+        def scaled_crop(image: Image.Image) -> tuple[Image.Image | None, tuple[int, int, int, int] | None]:
             scale_x = image.width / source_width
             scale_y = image.height / source_height
-            left = max(0, min(image.width, int(source_left * scale_x)))
-            top = max(0, min(image.height, int(source_top * scale_y)))
+            left = max(0, min(image.width, int(math.floor(source_left * scale_x))))
+            top = max(0, min(image.height, int(math.floor(source_top * scale_y))))
             right = max(0, min(image.width, int(np.ceil(source_right * scale_x))))
             bottom = max(0, min(image.height, int(np.ceil(source_bottom * scale_y))))
             if right <= left or bottom <= top:
-                return None
-            return image.crop((left, top, right, bottom))
+                return None, None
+            return image.crop((left, top, right, bottom)), (left, top, right, bottom)
 
-        return scaled_crop(original), scaled_crop(annotated)
+        def enlarge_small_crop(image: Image.Image) -> Image.Image:
+            requested_long_side = max(0, int(minimum_output_long_side or 0))
+            current_long_side = max(image.size)
+            if requested_long_side <= 0 or current_long_side >= requested_long_side:
+                return image
+            scale = requested_long_side / current_long_side
+            target_size = (
+                max(1, int(round(image.width * scale))),
+                max(1, int(round(image.height * scale))),
+            )
+            return image.resize(target_size, Image.Resampling.LANCZOS)
+
+        original_raw, original_bounds = scaled_crop(original)
+        if original_raw is None or original_bounds is None:
+            return None, None
+        original_crop = enlarge_small_crop(original_raw)
+
+        if redraw_selected:
+            left, top, _, _ = original_bounds
+            source_to_asset_x = original.width / source_width
+            source_to_asset_y = original.height / source_height
+            raw_to_output_x = original_crop.width / original_raw.width
+            raw_to_output_y = original_crop.height / original_raw.height
+            focused_box = copy.deepcopy(box)
+            focused_box["bbox_xyxy"] = [
+                max(0.0, min(float(original_crop.width), (x1 * source_to_asset_x - left) * raw_to_output_x)),
+                max(0.0, min(float(original_crop.height), (y1 * source_to_asset_y - top) * raw_to_output_y)),
+                max(0.0, min(float(original_crop.width), (x2 * source_to_asset_x - left) * raw_to_output_x)),
+                max(0.0, min(float(original_crop.height), (y2 * source_to_asset_y - top) * raw_to_output_y)),
+            ]
+            focused_box["_display_index"] = max(1, int(display_index or 1))
+            focused_box["_color_index"] = focused_box["_display_index"] - 1
+            options = visual_options or {}
+            annotated_crop = draw_boxes(
+                original_crop,
+                [focused_box],
+                show_label=bool(options.get("show_label", True)),
+                show_confidence=bool(options.get("show_confidence", True)),
+                line_width=int(options.get("line_width", 3)),
+                color_mode=str(options.get("color_mode", "按目标编号配色")),
+                minimum_font_size=26,
+            )
+            return original_crop, annotated_crop
+
+        annotated_raw, _ = scaled_crop(annotated)
+        if annotated_raw is None:
+            return None, None
+        annotated_crop = enlarge_small_crop(annotated_raw)
+        if annotated_crop.size != original_crop.size:
+            annotated_crop = annotated_crop.resize(original_crop.size, Image.Resampling.LANCZOS)
+
+        return original_crop, annotated_crop
     except Exception:
         return None, None
 
@@ -1531,7 +1661,13 @@ def render_linked_region_view(image: Any, result: dict[str, Any] | None, selecte
             annotated,
             box,
             source_size=result_source_size(result, original),
+            redraw_selected=True,
+            display_index=index + 1,
+            visual_options=result.get("visual_options"),
+            minimum_output_long_side=960,
         )
+        if original_crop is None or annotated_crop is None:
+            return None, None, "所选区域的坐标无效或超出图片范围，无法生成联动放大图。"
         note = f"已联动定位区域 {index + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。左侧保留原始细节，右侧显示同一位置的模型框。"
         return original_crop, annotated_crop, note
     except Exception as exc:
@@ -1577,7 +1713,13 @@ def render_comparison_linked_region_view(image: Any, results: list[dict[str, Any
             annotated,
             box,
             source_size=result_source_size(result, original),
+            redraw_selected=True,
+            display_index=region_idx + 1,
+            visual_options=result.get("visual_options"),
+            minimum_output_long_side=960,
         )
+        if original_crop is None or annotated_crop is None:
+            return None, None, "所选模型区域的坐标无效或超出图片范围，无法生成联动放大图。"
         note = f"已定位模型{model_idx + 1}｜{result.get('model_name', '-')}｜区域 {region_idx + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。"
         return original_crop, annotated_crop, note
     except Exception as exc:
@@ -1605,7 +1747,13 @@ def render_batch_linked_region_view(items: list[dict[str, Any]] | None, selected
             annotated,
             box,
             source_size=result_source_size(result, original),
+            redraw_selected=True,
+            display_index=region_idx + 1,
+            visual_options=result.get("visual_options"),
+            minimum_output_long_side=960,
         )
+        if original_crop is None or annotated_crop is None:
+            return None, None, "所选批量区域的坐标无效或超出图片范围，无法生成联动放大图。"
         image_name = item.get("image_name") or result.get("image_name") or f"图片{image_idx + 1}"
         note = f"已定位图片{image_idx + 1}｜{image_name}｜区域 {region_idx + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。"
         return original_crop, annotated_crop, note
@@ -3015,25 +3163,125 @@ def history_detail_markdown(selected: str | None) -> str:
     )
 
 
-def refresh_history_view(task_filter: str = "全部任务", review_filter: str = "全部复核等级") -> tuple[str, list[list[Any]], Any, str, str]:
+HISTORY_PAGE_SIZE = 20
+
+
+def history_page_total_html(total_pages: int) -> str:
+    return f"<span aria-live='polite'>页&nbsp;&nbsp;共 <b>{max(1, total_pages)}</b> 页</span>"
+
+
+def normalized_history_page(value: Any, total_pages: int) -> int:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 1
+    if not math.isfinite(numeric_value) or not numeric_value.is_integer():
+        return 1
+    return min(max(1, int(numeric_value)), max(1, total_pages))
+
+
+def history_page_payload(
+    rows: list[list[Any]],
+    requested_page: Any = 1,
+    feedback: str | None = None,
+) -> tuple[list[list[Any]], int, Any, str, Any, Any, str]:
+    total_pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    page = normalized_history_page(requested_page, total_pages)
+    visible_rows = rows[(page - 1) * HISTORY_PAGE_SIZE : page * HISTORY_PAGE_SIZE]
+    page_feedback = feedback or f"共 {len(rows)} 条记录"
+    return (
+        visible_rows,
+        page,
+        gr.Number(value=page, step=1),
+        history_page_total_html(total_pages),
+        gr.Button("‹ 上一页", interactive=page > 1),
+        gr.Button("下一页 ›", interactive=page < total_pages),
+        page_feedback,
+    )
+
+
+def refresh_history_view(task_filter: str = "全部任务", review_filter: str = "全部复核等级"):
     rows = filter_history_rows(task_filter, review_filter)
     options = history_detail_options(rows)
-    visible_rows = list(reversed(rows))[:20]
-    pages = max(1, (len(rows) + 19) // 20)
+    page_result = history_page_payload(list(reversed(rows)), 1)
+    pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
     notice = "暂无检测历史，请先上传图片并运行检测。" if not rows else f"当前筛选后共 {len(rows)} 条记录，第 1/{pages} 页。"
     detail = history_detail_markdown(options[-1] if options else None)
-    return history_summary_markdown(rows), visible_rows, gr.Dropdown(choices=options, value=options[-1] if options else None), detail, notice
+    return (
+        history_summary_markdown(rows),
+        page_result[0],
+        gr.Dropdown(choices=options, value=options[-1] if options else None),
+        detail,
+        notice,
+        *page_result[1:],
+    )
 
 
-def paged_history_view(task_filter: str = "全部任务", review_filter: str = "全部复核等级", page_label: str = "第 1 页"):
+def paged_history_view(
+    task_filter: str = "全部任务",
+    review_filter: str = "全部复核等级",
+    requested_page: Any = 1,
+):
     rows = list(reversed(filter_history_rows(task_filter, review_filter)))
-    page_size = 20
-    pages = max(1, (len(rows) + page_size - 1) // page_size)
-    match = re.search(r"(\d+)", str(page_label or "1"))
-    page = min(pages, max(1, int(match.group(1)) if match else 1))
-    visible_rows = rows[(page - 1) * page_size : page * page_size]
-    choices = [f"第 {index} / {pages} 页" for index in range(1, pages + 1)]
-    return visible_rows, gr.Dropdown(choices=choices, value=choices[page - 1], interactive=pages > 1), f"当前筛选共 {len(rows)} 条，第 {page}/{pages} 页。"
+    return history_page_payload(rows, requested_page)
+
+
+def turn_history_page(
+    task_filter: str,
+    review_filter: str,
+    current_page: Any,
+    direction: int,
+):
+    rows = list(reversed(filter_history_rows(task_filter, review_filter)))
+    total_pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    page = normalized_history_page(current_page, total_pages) + direction
+    return history_page_payload(rows, page)
+
+
+def previous_history_page(task_filter: str, review_filter: str, current_page: Any):
+    return turn_history_page(task_filter, review_filter, current_page, -1)
+
+
+def next_history_page(task_filter: str, review_filter: str, current_page: Any):
+    return turn_history_page(task_filter, review_filter, current_page, 1)
+
+
+def jump_history_page(task_filter: str, review_filter: str, requested_page: Any, current_page: Any):
+    rows = list(reversed(filter_history_rows(task_filter, review_filter)))
+    total_pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    current = normalized_history_page(current_page, total_pages)
+
+    if requested_page is None or (isinstance(requested_page, str) and not requested_page.strip()):
+        feedback = f"请输入页码后再跳转，当前仍为第 {current}/{total_pages} 页。"
+        return history_page_payload(rows, current, feedback)
+    if isinstance(requested_page, bool):
+        feedback = f"页码必须是整数，当前仍为第 {current}/{total_pages} 页。"
+        return history_page_payload(rows, current, feedback)
+    try:
+        numeric_page = float(requested_page)
+    except (TypeError, ValueError, OverflowError):
+        feedback = f"页码只能填写数字，当前仍为第 {current}/{total_pages} 页。"
+        return history_page_payload(rows, current, feedback)
+    if not math.isfinite(numeric_page) or not numeric_page.is_integer():
+        feedback = f"页码必须是整数，当前仍为第 {current}/{total_pages} 页。"
+        return history_page_payload(rows, current, feedback)
+
+    page = int(numeric_page)
+    if page < 1 or page > total_pages:
+        feedback = f"页码超出范围，请输入 1 至 {total_pages}，当前仍为第 {current}/{total_pages} 页。"
+        return history_page_payload(rows, current, feedback)
+    return history_page_payload(rows, page, f"已跳转到第 {page}/{total_pages} 页，共 {len(rows)} 条记录。")
+
+
+def reset_history_pagination():
+    return (
+        1,
+        gr.Number(value=1, step=1),
+        history_page_total_html(1),
+        gr.Button("‹ 上一页", interactive=False),
+        gr.Button("下一页 ›", interactive=False),
+        "共 0 条记录",
+    )
 
 
 def history_thumbnail_gallery(limit: int = 12) -> list[tuple[str, str]]:
@@ -3079,6 +3327,204 @@ def recent_reports_html(limit: int = 10) -> str:
         )
     rows.append("</section>")
     return "".join(rows)
+
+
+def report_source_overview_html(
+    detection: dict[str, Any] | None = None,
+    comparison: list[dict[str, Any]] | None = None,
+    batch_items: list[dict[str, Any]] | None = None,
+) -> str:
+    detection = detection if isinstance(detection, dict) else {}
+    comparison = comparison if isinstance(comparison, list) else []
+    batch_items = batch_items if isinstance(batch_items, list) else []
+    single_ready = bool(detection)
+    comparison_ready = bool(comparison)
+    batch_ready = bool(batch_items)
+    ready_count = sum((single_ready, comparison_ready, batch_ready))
+
+    single_detail = (
+        f"{xml_escape(str(detection.get('model_name') or '当前模型'))} · {int(detection.get('box_count', 0) or 0)} 个疑似区域"
+        if single_ready else "完成单图检测后自动纳入"
+    )
+    comparison_success = len(successful_results(comparison))
+    comparison_detail = (
+        f"{comparison_success}/{len(comparison)} 个模型结果有效"
+        if comparison_ready else "完成多模型对比后自动纳入"
+    )
+    batch_success = sum(
+        1
+        for item in batch_items
+        if isinstance(item, dict)
+        and isinstance(item.get("result"), dict)
+        and item["result"].get("status") == "success"
+    )
+    batch_detail = (
+        f"{batch_success}/{len(batch_items)} 张图片检测完成"
+        if batch_ready else "完成批量检测后自动纳入"
+    )
+
+    def source_card(title: str, detail: str, ready: bool, index: str) -> str:
+        state = "ready" if ready else "empty"
+        status = "已纳入" if ready else "待生成"
+        return (
+            f"<article class='report-source-card is-{state}'>"
+            f"<span class='report-source-index'>{index}</span>"
+            f"<div><b>{xml_escape(title)}</b><small>{xml_escape(detail)}</small></div>"
+            f"<strong>{status}</strong></article>"
+        )
+
+    summary = "当前没有可汇总的数据" if ready_count == 0 else f"已自动纳入 {ready_count}/3 类检测数据"
+    return (
+        "<section class='report-source-overview' aria-label='综合报告数据来源'>"
+        "<div class='report-source-overview-head'>"
+        f"<div><b>综合数据来源</b><span>{xml_escape(summary)}</span></div>"
+        "<em>自动汇总</em></div>"
+        "<div class='report-source-grid'>"
+        + source_card("当前单图", single_detail, single_ready, "01")
+        + source_card("多模型对比", comparison_detail, comparison_ready, "02")
+        + source_card("批量任务", batch_detail, batch_ready, "03")
+        + "</div>"
+        "<p class='report-source-note'>单项报告继续在各检测页面生成；报告中心只负责跨任务综合编排。</p>"
+        "</section>"
+    )
+
+
+def report_archive_records(limit: int = 30) -> list[dict[str, Any]]:
+    ensure_dirs()
+    grouped: dict[str, dict[str, Any]] = {}
+    allowed_extensions = {".md", ".pdf", ".docx", ".csv"}
+    for path in REPORT_DIR.glob("*"):
+        try:
+            if not path.is_file() or path.suffix.lower() not in allowed_extensions:
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        record = grouped.setdefault(
+            path.stem,
+            {"stem": path.stem, "mtime": stat.st_mtime, "size": 0, "files": {}},
+        )
+        record["mtime"] = max(float(record["mtime"]), stat.st_mtime)
+        record["size"] = int(record["size"]) + stat.st_size
+        record["files"][path.suffix.lower()] = str(path)
+
+    records = [record for record in grouped.values() if ".md" in record["files"] or ".pdf" in record["files"] or ".docx" in record["files"]]
+    records.sort(key=lambda item: float(item["mtime"]), reverse=True)
+    records = records[:limit]
+    for record in records:
+        markdown = ""
+        md_path = record["files"].get(".md")
+        if md_path:
+            try:
+                markdown = Path(md_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                markdown = ""
+        report_type_match = re.search(r"\|\s*(?:报告类型|Report type)\s*\|\s*([^|\n]+)", markdown, re.IGNORECASE)
+        if report_type_match:
+            report_type = report_type_match.group(1).strip()
+        elif "batch" in str(record["stem"]).lower():
+            report_type = "批量检测报告"
+        else:
+            report_type = "检测报告"
+        formats = [extension[1:].upper() for extension in (".md", ".pdf", ".docx", ".csv") if extension in record["files"]]
+        created_at = datetime.fromtimestamp(float(record["mtime"])).strftime("%Y-%m-%d %H:%M")
+        record.update(
+            {
+                "markdown": markdown,
+                "report_type": report_type,
+                "formats": formats,
+                "created_at": created_at,
+                "choice": f"{created_at}｜{report_type}｜{' / '.join(formats)}｜{record['stem']}",
+            }
+        )
+    return records
+
+
+def report_archive_choices() -> list[str]:
+    return [str(record["choice"]) for record in report_archive_records()]
+
+
+def report_archive_record(choice: str | None) -> dict[str, Any] | None:
+    records = report_archive_records()
+    if not records:
+        return None
+    selected = str(choice or "").strip()
+    return next((record for record in records if record["choice"] == selected), records[0])
+
+
+def report_archive_summary_html(record: dict[str, Any] | None) -> str:
+    if not record:
+        return (
+            "<section class='report-archive-empty'><b>暂无可用报告归档</b>"
+            "<span>生成综合报告后，可在这里重新预览和下载。</span></section>"
+        )
+    size = int(record.get("size", 0) or 0)
+    size_text = f"{size / 1024:.1f} KB" if size < 1024**2 else f"{size / 1024**2:.1f} MB"
+    format_tags = "".join(f"<span>{xml_escape(item)}</span>" for item in record.get("formats", []))
+    return (
+        "<section class='report-archive-summary'>"
+        f"<div><small>报告类型</small><b>{xml_escape(str(record.get('report_type') or '检测报告'))}</b></div>"
+        f"<div><small>生成时间</small><b>{xml_escape(str(record.get('created_at') or '-'))}</b></div>"
+        f"<div><small>文件总大小</small><b>{size_text}</b></div>"
+        f"<div class='report-archive-formats'><small>可用格式</small><p>{format_tags}</p></div>"
+        "</section>"
+    )
+
+
+def report_archive_gallery(markdown: str, limit: int = 8) -> list[tuple[str, str]]:
+    gallery: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in str(markdown or "").splitlines():
+        image_ref = parse_markdown_image(line)
+        if not image_ref:
+            continue
+        alt, path = image_ref
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        gallery.append((str(path), alt))
+        if len(gallery) >= limit:
+            break
+    return gallery
+
+
+def load_report_archive(choice: str | None) -> tuple[Any, ...]:
+    record = report_archive_record(choice)
+    if not record:
+        return (
+            report_archive_summary_html(None),
+            gr.update(value=[], visible=False),
+            report_empty_state_markup("生成综合报告后，可从左侧归档列表重新打开。", "暂无报告归档"),
+            gr.update(visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+        )
+    files = record.get("files", {})
+    markdown = str(record.get("markdown") or "")
+    gallery = report_archive_gallery(markdown)
+    preview = (
+        markdown_for_gradio_preview(markdown, max_inline_images=3)
+        if markdown else report_empty_state_markup("该归档没有可预览的 Markdown 正文，可直接下载已有文件。", "正文预览不可用")
+    )
+    return (
+        report_archive_summary_html(record),
+        gr.update(value=gallery, visible=bool(gallery)),
+        preview,
+        gr.update(visible=bool(files)),
+        gr.update(value=files.get(".md"), visible=bool(files.get(".md"))),
+        gr.update(value=files.get(".pdf"), visible=bool(files.get(".pdf"))),
+        gr.update(value=files.get(".docx"), visible=bool(files.get(".docx"))),
+        gr.update(value=files.get(".csv"), visible=bool(files.get(".csv"))),
+    )
+
+
+def refresh_report_archive() -> tuple[Any, ...]:
+    choices = report_archive_choices()
+    selected = choices[0] if choices else None
+    return (gr.update(choices=choices, value=selected, interactive=bool(choices)), *load_report_archive(selected))
 
 
 def export_history_csv() -> str | None:
@@ -3881,7 +4327,7 @@ def retrieve_project_knowledge(question: str) -> list[dict[str, str]]:
     if any(word in text for word in ("阈值", "iou", "置信度")):
         entries.append({"topic": "阈值说明", "meaning": "较低置信度阈值会保留更多疑似区域，较高阈值更保守。", "review": "IoU 阈值用于处理重叠框，二者均不等同于临床风险。", "note": "最终应结合原始影像人工复核。"})
     if any(word in text for word in ("报告", "导出")):
-        entries.append({"topic": "报告中心", "meaning": "支持单图、多模型对比、批量及综合报告。", "review": "报告记录模型、阈值、结构化结果与复核建议。", "note": "报告不构成临床诊断。"})
+        entries.append({"topic": "报告中心", "meaning": "自动汇总单图、多模型对比与批量结果，生成综合报告。", "review": "单项报告在各检测页面生成；报告中心负责跨任务编排、预览与归档。", "note": "报告不构成临床诊断。"})
     return entries[:6]
 
 
@@ -4017,6 +4463,177 @@ def apply_role_view(content: str, role: str, results: list[dict[str, Any]], comp
     return strip_internal_answer_sections(content)
 
 
+def followup_short_text(value: Any, limit: int = 22) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def followup_region_label(result: dict[str, Any], region_index: int, scope: str) -> str:
+    source = str(result.get("_chat_source") or "")
+    if source.startswith("批量任务·"):
+        image_name = followup_short_text(source.removeprefix("批量任务·"), 16)
+        return f"“{image_name}”的区域 {region_index}"
+    if source.startswith("多模型对比") or scope == "当前多模型对比":
+        model_name = followup_short_text(result.get("model_name") or source or "当前模型", 16)
+        return f"{model_name}的区域 {region_index}"
+    if scope == "全部最新结果" and source:
+        source_name = followup_short_text(source, 16)
+        return f"{source_name}中的区域 {region_index}"
+    return f"区域 {region_index}"
+
+
+def contextual_followup_questions(
+    scope: str,
+    detection: dict[str, Any] | None,
+    comparison: list[dict[str, Any]] | None,
+    batch_items: list[dict[str, Any]] | None,
+    image: Any = None,
+    preset: str = "",
+) -> list[str]:
+    results = successful_results(selected_chat_results(scope, detection, comparison, batch_items))
+    has_any_context = bool(results or comparison or batch_items or detection)
+    if not has_any_context:
+        return NO_DETECTION_FOLLOWUP_QUESTIONS[:6]
+
+    questions: list[str] = []
+
+    def add(*items: str) -> None:
+        for item in items:
+            text = str(item or "").strip()
+            if text and text not in questions:
+                questions.append(text)
+
+    box_rows: list[dict[str, Any]] = []
+    for result in results:
+        for region_index, box in enumerate(result.get("boxes", []) or [], 1):
+            try:
+                confidence = float(box.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                confidence = 0.0
+            box_rows.append(
+                {
+                    "result": result,
+                    "region_index": region_index,
+                    "region_label": followup_region_label(result, region_index, scope),
+                    "class_name": followup_short_text(box.get("class_name") or "未知类别", 18),
+                    "confidence": confidence,
+                    "risk_level": str(box.get("risk_level") or ""),
+                }
+            )
+
+    if box_rows:
+        strongest = max(box_rows, key=lambda row: row["confidence"])
+        weakest = min(box_rows, key=lambda row: row["confidence"])
+        add(
+            f"为什么 {strongest['region_label']} 被判断为“{strongest['class_name']}”（置信度 {strongest['confidence']:.2f}）？"
+        )
+        if len(box_rows) > 1:
+            add(
+                f"为什么 {weakest['region_label']} 是当前最低置信度（{weakest['confidence']:.2f}），应怎样复核？"
+            )
+        else:
+            add(f"当前只有这一个疑似区域，人工复核时还应重点看什么？")
+
+    valid_comparison = successful_results(comparison or [])
+    if len(valid_comparison) >= 2 and scope in {"当前多模型对比", "全部最新结果"}:
+        differences = model_difference_attribution(valid_comparison)
+        if differences:
+            first_difference = differences[0]
+            difference_location = followup_short_text(first_difference.get("模型/区域") or "相近区域", 34)
+            add(f"{difference_location}为什么会出现“{first_difference.get('类型', '模型差异')}”？")
+
+        model_counts = [
+            (
+                followup_short_text(result.get("model_name") or f"模型 {index}", 16),
+                int(result.get("box_count", 0) or 0),
+            )
+            for index, result in enumerate(valid_comparison, 1)
+        ]
+        most = max(model_counts, key=lambda item: item[1])
+        least = min(model_counts, key=lambda item: item[1])
+        if most[1] != least[1]:
+            add(f"{most[0]}检出 {most[1]} 个、{least[0]}检出 {least[1]} 个，数量差异来自哪里？")
+
+        consistency = analyze_model_consistency(valid_comparison)
+        high_consistency = next((item for item in consistency if item.get("一致性等级") == "高一致性疑似区域"), None)
+        if high_consistency:
+            class_name = followup_short_text(high_consistency.get("类别") or "该类别", 16)
+            model_names = followup_short_text(high_consistency.get("涉及模型") or "多个模型", 28)
+            add(f"“{class_name}”在{model_names}中一致检出，为什么仍需人工复核？")
+
+    if batch_items and scope in {"当前批量任务", "全部最新结果"}:
+        ranked_batch: list[tuple[int, float, int, str, dict[str, Any]]] = []
+        for index, item in enumerate(batch_items, 1):
+            if not isinstance(item, dict) or not isinstance(item.get("result"), dict):
+                continue
+            result = item["result"]
+            if result.get("status") != "success" or result.get("runtime_mode") != "real_yolo_cpu":
+                continue
+            boxes = result.get("boxes", []) or []
+            confidences = []
+            review_count = 0
+            for box in boxes:
+                try:
+                    confidence = float(box.get("confidence", 0.0) or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    confidence = 0.0
+                confidences.append(confidence)
+                if confidence < 0.6 or str(box.get("risk_level") or "") not in {"", "可信度较高"}:
+                    review_count += 1
+            lowest_confidence = min(confidences) if confidences else 1.0
+            image_name = followup_short_text(item.get("image_name") or result.get("image_name") or f"图片 {index}", 18)
+            ranked_batch.append((review_count, -lowest_confidence, len(boxes), image_name, result))
+        if ranked_batch:
+            priority = max(ranked_batch, key=lambda row: (row[0], row[1], row[2]))
+            add(f"为什么“{priority[3]}”应优先人工复核，关键依据是什么？")
+        if len(ranked_batch) > 1:
+            add("批量任务中各图片的复核顺序应如何安排？")
+
+    if box_rows:
+        class_counts: dict[str, int] = {}
+        for row in box_rows:
+            class_counts[row["class_name"]] = class_counts.get(row["class_name"], 0) + 1
+        ranked_classes = sorted(class_counts.items(), key=lambda item: (-item[1], item[0]))
+        if len(ranked_classes) >= 2:
+            add(f"“{ranked_classes[0][0]}”和“{ranked_classes[1][0]}”的疑似区域应怎样区分复核？")
+        elif ranked_classes and ranked_classes[0][1] > 1:
+            add(f"同为“{ranked_classes[0][0]}”的 {ranked_classes[0][1]} 个区域，应按什么顺序复核？")
+
+        review_rows = [
+            row for row in box_rows
+            if row["confidence"] < 0.6 or row["risk_level"] not in {"", "可信度较高"}
+        ]
+        if review_rows:
+            add(f"当前 {len(review_rows)} 个需关注区域中，哪些更可能受影像质量或阈值影响？")
+    else:
+        add("当前检测未保留疑似区域，是否就代表影像中一定没有异常？")
+
+    threshold_values = []
+    for result in results:
+        thresholds = result.get("thresholds") if isinstance(result.get("thresholds"), dict) else {}
+        try:
+            threshold_values.append(float(thresholds.get("conf")))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if threshold_values:
+        current_threshold = threshold_values[0]
+        add(f"当前置信度阈值为 {current_threshold:.2f}，调高或调低会怎样影响这些结果？")
+    if image is not None:
+        add("图片质量会如何影响当前这些疑似区域？")
+    if preset:
+        add(f"当前“{followup_short_text(preset, 16)}”阈值预设会怎样影响漏检与误检？")
+
+    scope_fallbacks = {
+        "当前单图": ["当前检测结果中哪些区域最需要人工复核？", "怎样结合原始影像逐个复核这些疑似区域？"],
+        "当前多模型对比": ["当前多模型结果有哪些一致点和分歧点？", "哪个模型的哪些区域更需要人工复核？"],
+        "当前批量任务": ["批量任务中哪些图片最需要优先复核？", "批量结果中是否存在明显异常的图片？"],
+        "全部最新结果": ["全部最新结果中最值得优先关注的发现是什么？", "单图、对比和批量结果之间有哪些共同发现？"],
+    }
+    return compact_unique_questions(questions, scope_fallbacks.get(scope, DEFAULT_FOLLOWUP_QUESTIONS))
+
+
 def generate_followup_questions(
     scope: str,
     detection: dict[str, Any] | None,
@@ -4025,40 +4642,9 @@ def generate_followup_questions(
     image: Any = None,
     preset: str = "",
 ) -> tuple[Any, ...]:
-    results = successful_results(selected_chat_results(scope, detection, comparison, batch_items))
-    has_any_context = bool(results or comparison or batch_items or detection)
-    if not has_any_context:
-        updates = tuple(gr.Button(value=question, visible=True) for question in NO_DETECTION_FOLLOWUP_QUESTIONS)
-        return (*updates, NO_DETECTION_FOLLOWUP_QUESTIONS)
-    questions: list[str] = []
-    for result in results:
-        for index, box in enumerate(result.get("boxes", []), 1):
-            if float(box.get("confidence", 0)) < 0.45:
-                questions.append(f"为什么区域 {index} 的置信度较低，应如何人工复核？")
-                break
-    if comparison:
-        consistency = analyze_model_consistency(comparison)
-        if any(item["一致性等级"] == "高一致性疑似区域" for item in consistency):
-            questions.append("哪些区域跨模型一致，为什么值得重点复核？")
-        if model_difference_attribution(comparison):
-            questions.append("不同模型有哪些具体差异、类别冲突或仅单模型检出区域？")
-    if batch_items:
-        questions.append("批量任务中哪些图片应优先人工复核，依据是什么？")
-    if image is not None:
-        questions.append("图片质量会如何影响当前检测结果？")
-    if preset:
-        questions.append("当前阈值预设会怎样影响漏检与误检？")
-    questions.extend(DEFAULT_FOLLOWUP_QUESTIONS)
-    unique: list[str] = []
-    for question in questions:
-        if question not in unique:
-            unique.append(question)
-        if len(unique) == 6:
-            break
-    while len(unique) < 6:
-        unique.append(DEFAULT_FOLLOWUP_QUESTIONS[len(unique)])
-    updates = tuple(gr.Button(value=question, visible=True) for question in unique)
-    return (*updates, unique)
+    questions = contextual_followup_questions(scope, detection, comparison, batch_items, image, preset)
+    updates = tuple(gr.Button(value=question, visible=True) for question in questions)
+    return (*updates, questions)
 
 
 def answer_recommended_question(
@@ -4368,8 +4954,8 @@ def no_detection_rule_answer(question: str) -> str:
         answer_lines = ["不能。即使完成检测，系统结果也只是疑似区域辅助识别，不作为临床诊断依据。"]
         next_steps = ["如有疼痛、肿胀、流脓、发热或张口受限，请优先到正规口腔科就诊。"]
     elif "报告" in question:
-        answer_lines = ["完成检测后，可以在对应页面或报告中心生成单图、多模型、批量或综合报告，并下载 Markdown、PDF 或 Word 文件。"]
-        next_steps = ["先至少完成一次单图检测、多模型对比或批量检测，再打开“报告中心”选择报告类型。"]
+        answer_lines = ["完成检测后，可在对应检测页面生成单项报告；报告中心会自动汇总当前单图、多模型和批量结果，生成综合报告，并提供 Markdown、PDF 或 Word 下载。"]
+        next_steps = ["先至少完成一种检测任务，再打开“报告中心”确认自动纳入的数据来源并生成综合报告。"]
     else:
         answer_lines = ["当前还没有可分析的检测结果。请先上传图片并运行检测；完成后我可以结合模型、区域、置信度和报告上下文回答。"]
     lines = [
@@ -4496,7 +5082,7 @@ def local_rule_answer(
         else:
             lines.append("当前选择范围未包含多模型对比结果；请切换到“当前多模型对比”或“全部最新结果”后再询问模型差异。")
     elif "报告" in question:
-        lines.append("可在报告中心选择单图检测报告、多模型对比报告、批量检测报告或综合报告。报告会包含模型、阈值参数、疑似区域明细、对比表、一致性分析和人工复核建议。")
+        lines.append("单项报告可在对应检测页面生成；报告中心自动汇总当前单图、多模型对比和批量结果，形成包含参数、疑似区域明细、模型一致性和人工复核建议的综合报告。")
     elif "限制" in question or "局限" in question:
         lines.append("系统限制包括：默认 CPU 推理速度有限；权重缺失时无法推理；低质量影像会影响检测效果；模型输出只能代表疑似区域，最终仍需专业口腔医生复核。")
     else:
@@ -5004,6 +5590,7 @@ class CloudChatRequest(BaseModel):
     session_id: str = Field(default="")
     message: str = Field(default="")
     history: list[dict[str, Any]] = Field(default_factory=list)
+    asked_questions: list[str] = Field(default_factory=list)
     scope: str = Field(default="全部最新结果")
     role: str = Field(default="患者易懂版")
     allow_cloud: bool = True
@@ -5014,6 +5601,7 @@ class AssistantSuggestionRequest(BaseModel):
     scope: str = Field(default="全部最新结果")
     last_user_message: str = Field(default="")
     last_assistant_answer: str = Field(default="")
+    asked_questions: list[str] = Field(default_factory=list)
 
 
 class AssistantExportContextRequest(BaseModel):
@@ -5035,6 +5623,102 @@ def compact_unique_questions(candidates: list[str], fallback: list[str] | None =
         else:
             unique.append(NO_DETECTION_FOLLOWUP_QUESTIONS[len(unique) % len(NO_DETECTION_FOLLOWUP_QUESTIONS)])
     return unique[:limit]
+
+
+def normalized_question_similarity_text(value: Any) -> str:
+    text = chat_content_to_text(value).lower().strip()
+    replacements = (
+        ("应当", "应"),
+        ("应该", "应"),
+        ("怎样", "如何"),
+        ("怎么", "如何"),
+        ("为何", "为什么"),
+        ("人工复核", "复核"),
+        ("可信度", "置信度"),
+        ("目前", "当前"),
+        ("现在", "当前"),
+    )
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+
+
+def question_topic_fingerprints(value: Any) -> set[str]:
+    text = normalized_question_similarity_text(value)
+    topics: set[str] = set()
+    if "置信度" in text and any(term in text for term in ("最低", "较低", "偏低", "低置信度")):
+        topics.add("lowest_confidence")
+    if "复核" in text and any(term in text for term in ("顺序", "优先级", "先看", "排序", "先复核")):
+        topics.add("review_order")
+    if "模型" in text and any(term in text for term in ("差异", "分歧", "冲突", "不一致", "不同")):
+        topics.add("model_difference")
+    if any(term in text for term in ("图片", "影像", "原图")) and any(term in text for term in ("质量", "清晰", "模糊", "曝光", "重拍")):
+        topics.add("image_quality")
+    if "阈值" in text and any(term in text for term in ("调整", "调高", "调低", "影响", "选择", "设置")):
+        topics.add("threshold_effect")
+    if any(term in text for term in ("临床诊断", "支持诊断", "作为诊断", "能否诊断")):
+        topics.add("clinical_diagnosis")
+    if "报告" in text and any(term in text for term in ("生成", "导出", "包含", "补充", "重点")):
+        topics.add("report_generation")
+    return topics
+
+
+def questions_semantically_similar(left: Any, right: Any) -> bool:
+    left_key = normalized_question_similarity_text(left)
+    right_key = normalized_question_similarity_text(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    if question_topic_fingerprints(left) & question_topic_fingerprints(right):
+        return True
+    shorter, longer = sorted((left_key, right_key), key=len)
+    if len(shorter) >= 8 and shorter in longer and len(shorter) / max(1, len(longer)) >= 0.68:
+        return True
+    if SequenceMatcher(None, left_key, right_key).ratio() >= 0.76:
+        return True
+    left_pairs = {left_key[index : index + 2] for index in range(max(0, len(left_key) - 1))}
+    right_pairs = {right_key[index : index + 2] for index in range(max(0, len(right_key) - 1))}
+    if not left_pairs or not right_pairs:
+        return False
+    return len(left_pairs & right_pairs) / len(left_pairs | right_pairs) >= 0.64
+
+
+def compact_fresh_questions(
+    candidates: list[str],
+    fallback: list[str] | None,
+    asked_questions: list[str] | None,
+    limit: int = 6,
+) -> list[str]:
+    asked = [str(question or "").strip() for question in (asked_questions or []) if str(question or "").strip()]
+    fresh_fallbacks = [
+        "当前结果还有哪些尚未讨论的复核重点？",
+        "基于原始影像，下一步还应核对哪些细节？",
+        "当前回答中还有哪些不确定性需要说明？",
+        "如果调整阈值，哪些未讨论区域可能发生变化？",
+        "生成报告前还需要补充哪些复核信息？",
+        "哪些发现适合在就诊时向医生重点说明？",
+    ]
+    selected: list[str] = []
+    pool = [
+        *(candidates or []),
+        *((fallback or []) or []),
+        *fresh_fallbacks,
+        *DEFAULT_FOLLOWUP_QUESTIONS,
+        *NO_DETECTION_FOLLOWUP_QUESTIONS,
+    ]
+    for question in pool:
+        text = str(question or "").strip()
+        if not text:
+            continue
+        if any(questions_semantically_similar(text, asked_question) for asked_question in asked):
+            continue
+        if any(questions_semantically_similar(text, selected_question) for selected_question in selected):
+            continue
+        selected.append(text)
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
 
 
 def text_has_any(text: str, terms: tuple[str, ...]) -> bool:
@@ -5152,12 +5836,21 @@ def assistant_suggested_questions(
     batch_items: list[dict[str, Any]],
     user_message: str = "",
     assistant_answer: str = "",
+    asked_questions: list[str] | None = None,
 ) -> list[str]:
     try:
-        questions = generate_followup_questions(scope, detection, comparison, batch_items)[-1]
-        context_questions = [str(q) for q in questions[:6]] if isinstance(questions, list) else DEFAULT_FOLLOWUP_QUESTIONS
+        context_questions = contextual_followup_questions(scope, detection, comparison, batch_items)
         turn_questions = turn_followup_questions(user_message, assistant_answer, scope, detection, comparison, batch_items) if user_message or assistant_answer else []
-        return compact_unique_questions(turn_questions, context_questions)
+        asked = [chat_content_to_text(question) for question in (asked_questions or [])]
+        if user_message and not any(questions_semantically_similar(user_message, question) for question in asked):
+            asked.append(chat_content_to_text(user_message))
+        has_result_context = bool(successful_results(selected_chat_results(scope, detection, comparison, batch_items)))
+        if has_result_context and turn_questions:
+            candidates = [turn_questions[0], *context_questions[:4], *turn_questions[1:3], *context_questions[4:]]
+            return compact_fresh_questions(candidates, context_questions, asked)
+        candidates = turn_questions if turn_questions else context_questions
+        fallbacks = context_questions if turn_questions else NO_DETECTION_FOLLOWUP_QUESTIONS
+        return compact_fresh_questions(candidates, fallbacks, asked)
     except Exception:
         pass
     return NO_DETECTION_FOLLOWUP_QUESTIONS[:6]
@@ -5221,6 +5914,15 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
     comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
     batch_items = latest.get("batch_items") if isinstance(latest.get("batch_items"), list) else []
     history = normalize_chat_history(payload.history, limit=AI_CHAT_HISTORY_LIMIT, max_chars=AI_CHAT_HISTORY_MAX_CHARS)
+    asked_questions = [
+        chat_content_to_text(question)
+        for question in payload.asked_questions[-30:]
+        if chat_content_to_text(question).strip()
+    ]
+    for item in history:
+        if item.get("role") == "user" and item.get("content"):
+            asked_questions.append(chat_content_to_text(item.get("content")))
+    asked_questions.append(user_message)
     pending_feedback = get_cached_cloud_feedback(session_id)
 
     started = time.perf_counter()
@@ -5264,7 +5966,15 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
         "answer": content,
         "elapsed_seconds": elapsed_seconds,
         "message_id": f"assistant-{uuid.uuid4().hex}",
-        "suggested_questions": assistant_suggested_questions(scope, detection, comparison, batch_items, user_message, content),
+        "suggested_questions": assistant_suggested_questions(
+            scope,
+            detection,
+            comparison,
+            batch_items,
+            user_message,
+            content,
+            asked_questions,
+        ),
         "evidence_links": assistant_evidence_links(scope, detection, comparison, batch_items),
         "source": source_note,
         "pending_for_next_answer": bool(feedback_after.get("pending_for_next_answer")),
@@ -5313,6 +6023,7 @@ async def api_assistant_suggestions(payload: AssistantSuggestionRequest) -> dict
             batch_items,
             chat_content_to_text(payload.last_user_message),
             chat_content_to_text(payload.last_assistant_answer),
+            [chat_content_to_text(question) for question in payload.asked_questions[-30:]],
         )
         return {
             "ok": True,
@@ -6174,6 +6885,22 @@ def export_report_docx(markdown: str, path: Path) -> str:
     return str(path)
 
 
+def report_empty_state_markup(
+    message: str = "完成任意检测后，报告中心会自动汇总现有结果；生成后可预览正文、图片并下载文件。",
+    title: str = "尚未生成报告",
+) -> str:
+    return (
+        "<section class='report-empty-state' role='status' aria-live='polite'>"
+        "<div class='report-empty-icon' aria-hidden='true'><span>DOC</span></div>"
+        "<p class='report-empty-kicker'>报告工作区</p>"
+        f"<h4>{xml_escape(title)}</h4>"
+        f"<p class='report-empty-description'>{xml_escape(message)}</p>"
+        "<div class='report-empty-formats' aria-label='支持的报告格式'>"
+        "<span>Markdown</span><span>PDF</span><span>Word</span>"
+        "</div></section>"
+    )
+
+
 def generate_report(
     report_type: str,
     detection: dict[str, Any],
@@ -6195,7 +6922,14 @@ def generate_report(
         return "当前暂无可生成报告的检测结果，请先完成检测或多模型对比。", gr.update(value=[], visible=False), None, None, None
     gallery = report_visual_gallery(report_type, detection, comparison, batch_items)
     markdown = make_report_markdown(detection, comparison, batch_items, report_type, report_language)
-    stem = f"dental_aux_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    report_prefix = {
+        "单图检测报告": "dental_single_report",
+        "多模型对比报告": "dental_comparison_report",
+        "批量检测报告": "dental_batch_report",
+        "综合报告": "dental_integrated_report",
+    }.get(report_type, "dental_report")
+    language_tag = "en" if report_language_is_en(report_language) else "zh"
+    stem = f"{report_prefix}_{language_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     md_path = REPORT_DIR / f"{stem}.md"
     pdf_path = REPORT_DIR / f"{stem}.pdf"
     docx_path = REPORT_DIR / f"{stem}.docx"
@@ -6203,6 +6937,38 @@ def generate_report(
     export_report_pdf(markdown, pdf_path)
     export_report_docx(markdown, docx_path)
     return markdown_for_gradio_preview(markdown), gr.update(value=gallery, visible=bool(gallery)), str(md_path), str(pdf_path), str(docx_path)
+
+
+def generate_report_center(
+    detection: dict[str, Any],
+    comparison: list[dict[str, Any]],
+    batch_items: list[dict[str, Any]],
+    report_language: str = "中文",
+):
+    preview, gallery, md_path, pdf_path, docx_path = generate_report(
+        "综合报告",
+        detection,
+        comparison,
+        batch_items,
+        report_language,
+    )
+    if not all((md_path, pdf_path, docx_path)):
+        return (
+            report_empty_state_markup(str(preview), "暂时无法生成报告"),
+            gallery,
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(visible=False),
+        )
+    return (
+        preview,
+        gallery,
+        gr.update(value=md_path, visible=True),
+        gr.update(value=pdf_path, visible=True),
+        gr.update(value=docx_path, visible=True),
+        gr.update(visible=True),
+    )
 
 
 def generate_single_detection_tab_report(detection: dict[str, Any], report_language: str = "中文"):
@@ -6619,7 +7385,7 @@ python app.py
 - 多模型对比：同一影像运行三个 YOLO 模型，展示差异和一致性分析。
 - 批量检测：多张影像逐张 CPU 推理，生成汇总表和批量报告。
 - 智诊管家：围绕当前检测结果、多模型对比和报告内容进行安全问答。
-- 报告中心：生成单图、多模型、批量或综合 Markdown 报告。
+- 报告中心：自动汇总当前检测结果，生成综合报告并管理可重新预览和下载的报告归档。
 
 ## YOLO 检测流程
 
@@ -6645,7 +7411,7 @@ python app.py
 
 ## 报告生成说明
 
-报告中心支持单图检测报告、多模型对比报告、批量检测报告和综合报告。报告会记录时间、模型、阈值、检测表格、一致性分析、批量摘要、自动分析和人工复核建议。
+单项报告在各检测页面生成；报告中心只负责自动汇总当前单图、多模型对比与批量结果，生成综合报告，并集中提供预览、下载与归档回看。报告会记录时间、模型、阈值、检测表格、一致性分析、批量摘要和人工复核建议。
 
 ## CPU 推理说明
 
@@ -7346,10 +8112,15 @@ def native_ai_assistant_html() -> str:
         }}
         .native-ai-composer-head {{
           display: flex;
-          align-items: center;
+          align-items: flex-start;
           justify-content: space-between;
           gap: 12px;
           margin-bottom: 0;
+        }}
+        .native-ai-suggestion-heading {{
+          display: grid;
+          gap: 4px;
+          min-width: 0;
         }}
         .native-ai-suggestion-title {{
           display: inline-flex;
@@ -7369,8 +8140,16 @@ def native_ai_assistant_html() -> str:
           background: #14b8a6;
           box-shadow: 0 0 0 4px rgba(20,184,166,0.12);
         }}
+        .native-ai-suggestion-hint {{
+          padding-left: 16px;
+          color: #94a3b8;
+          font-size: 11px;
+          font-weight: 680;
+          line-height: 1.35;
+        }}
         .native-ai-suggestion-count {{
           flex: none;
+          margin-top: 1px;
           padding: 4px 9px;
           border-radius: 999px;
           border: 1px solid rgba(226,232,240,0.82);
@@ -7382,13 +8161,13 @@ def native_ai_assistant_html() -> str:
         .native-ai-suggestions {{
           counter-reset: native-ai-suggestion;
           display: grid;
-          grid-template-columns: 1fr;
-          gap: 8px;
-          max-height: 304px;
-          overflow-y: auto;
-          padding: 1px 2px 2px 1px;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 7px;
+          align-items: stretch;
+          max-height: none;
+          overflow: visible;
+          padding: 2px 1px;
           margin-bottom: 0;
-          scrollbar-width: thin;
         }}
         .native-ai-export-panel {{
           grid-column: 1 / -1;
@@ -7504,31 +8283,34 @@ def native_ai_assistant_html() -> str:
           position: relative;
           display: block !important;
           width: 100% !important;
-          min-height: 44px;
+          min-height: 50px;
+          height: auto;
           border: 1px solid rgba(226,232,240,0.92) !important;
           border-radius: 16px !important;
           background:
             linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94)) !important;
           color: #1e293b !important;
           cursor: pointer;
-          padding: 8px 36px 8px 46px !important;
+          padding: 9px 34px 9px 44px !important;
           text-align: left !important;
           white-space: normal !important;
-          font-size: 13px !important;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          font-size: 12.5px !important;
           font-weight: 780 !important;
-          line-height: 1.42;
+          line-height: 1.46;
           box-shadow: 0 7px 16px rgba(15, 23, 42, 0.035) !important;
           transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease;
         }}
         .native-ai-assistant button.native-ai-suggestion::before {{
           content: counter(native-ai-suggestion, decimal-leading-zero);
           position: absolute;
-          left: 13px;
+          left: 11px;
           top: 50%;
           transform: translateY(-50%);
-          width: 25px;
-          height: 25px;
-          border-radius: 9px;
+          width: 24px;
+          height: 24px;
+          border-radius: 8px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -7541,7 +8323,7 @@ def native_ai_assistant_html() -> str:
         .native-ai-assistant button.native-ai-suggestion::after {{
           content: "";
           position: absolute;
-          right: 16px;
+          right: 14px;
           top: 50%;
           width: 7px;
           height: 7px;
@@ -7577,7 +8359,9 @@ def native_ai_assistant_html() -> str:
           grid-template-columns: minmax(0, 1fr) auto;
           gap: 12px;
           align-items: end;
-          margin-top: 6px;
+          margin-top: 3px;
+          padding-top: 12px;
+          border-top: 1px solid rgba(226,232,240,0.82);
         }}
         #ask-ai-input {{
           min-width: 0;
@@ -7697,6 +8481,10 @@ def native_ai_assistant_html() -> str:
             grid-template-columns: repeat(2, minmax(0, 1fr));
             max-height: none;
           }}
+          .native-ai-assistant button.native-ai-suggestion {{
+            min-height: 58px;
+            height: 100%;
+          }}
           .native-ai-input-row {{
             grid-template-columns: minmax(0, 1fr) auto;
             margin-top: 0;
@@ -7752,8 +8540,9 @@ def native_ai_assistant_html() -> str:
             grid-template-columns: 1fr;
           }}
           .native-ai-assistant button.native-ai-suggestion {{
-            min-height: 54px;
-            padding: 10px 36px 10px 48px;
+            min-height: 50px;
+            height: auto;
+            padding: 9px 34px 9px 44px;
           }}
           .native-ai-input-row {{
             grid-template-columns: 1fr;
@@ -7813,7 +8602,10 @@ def native_ai_assistant_html() -> str:
         </main>
         <footer class="native-ai-composer">
           <div class="native-ai-composer-head">
-            <div class="native-ai-suggestion-title">推荐追问</div>
+            <div class="native-ai-suggestion-heading">
+              <div class="native-ai-suggestion-title">推荐追问</div>
+              <div class="native-ai-suggestion-hint">基于当前结果动态生成 · 点击即可提问</div>
+            </div>
             <div class="native-ai-suggestion-count">6 条</div>
           </div>
           <div id="native-ai-suggestions" class="native-ai-suggestions">{starters}</div>
@@ -7842,6 +8634,7 @@ def native_ai_assistant_js() -> str:
   root.dataset.installed = "true";
   const messagesEl = root.querySelector("#native-ai-messages");
   const suggestionsEl = root.querySelector("#native-ai-suggestions");
+  const suggestionCountEl = root.querySelector(".native-ai-suggestion-count");
   const input = root.querySelector("#ask-ai-input textarea");
   const sendBtn = root.querySelector("#ask-ai-send");
   const exportMdBtn = root.querySelector("#native-ai-export-md");
@@ -8323,17 +9116,53 @@ def native_ai_assistant_js() -> str:
     return pendingFeedbackSave;
   }
 
+  function normalizeQuestionKey(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/应当|应该/g, "应")
+      .replace(/怎样|怎么/g, "如何")
+      .replace(/为何/g, "为什么")
+      .replace(/人工复核/g, "复核")
+      .replace(/可信度/g, "置信度")
+      .replace(/目前|现在/g, "当前")
+      .replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+  }
+
+  function askedQuestionPayload() {
+    return chatHistory
+      .filter(item => item && item.role === "user" && String(item.content || "").trim())
+      .map(item => String(item.content || "").trim())
+      .slice(-30);
+  }
+
+  function suggestionWasAsked(question, askedQuestions) {
+    const candidate = normalizeQuestionKey(question);
+    if (!candidate) return true;
+    return askedQuestions.some(asked => {
+      const previous = normalizeQuestionKey(asked);
+      if (!previous) return false;
+      if (candidate === previous) return true;
+      const shorter = candidate.length <= previous.length ? candidate : previous;
+      const longer = candidate.length > previous.length ? candidate : previous;
+      return shorter.length >= 8 && longer.includes(shorter) && shorter.length / longer.length >= 0.68;
+    });
+  }
+
   function renderSuggestions(questions) {
-    const list = Array.isArray(questions) && questions.length ? questions : defaultSuggestions;
+    const list = Array.isArray(questions) ? questions : defaultSuggestions;
+    const askedQuestions = askedQuestionPayload();
+    const visibleQuestions = [...new Set(list.map(question => String(question || "").trim()).filter(Boolean))]
+      .filter(question => !suggestionWasAsked(question, askedQuestions))
+      .slice(0, 6);
     suggestionsEl.innerHTML = "";
-    list.slice(0, 6).forEach(question => {
+    if (suggestionCountEl) suggestionCountEl.textContent = visibleQuestions.length + " 条";
+    visibleQuestions.forEach(question => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "native-ai-suggestion";
       btn.textContent = question;
       btn.title = question;
       btn.setAttribute("aria-label", "推荐追问：" + question);
-      btn.addEventListener("click", () => sendMessage(question));
       suggestionsEl.appendChild(btn);
     });
   }
@@ -8343,7 +9172,8 @@ def native_ai_assistant_js() -> str:
     const lastUser = [...chatHistory].reverse().find(item => item && item.role === "user");
     return {
       last_user_message: lastUser ? lastUser.content || "" : "",
-      last_assistant_answer: lastAssistant ? lastAssistant.content || "" : ""
+      last_assistant_answer: lastAssistant ? lastAssistant.content || "" : "",
+      asked_questions: askedQuestionPayload()
     };
   }
 
@@ -8356,7 +9186,8 @@ def native_ai_assistant_js() -> str:
       const data = await postJson("/api/assistant_suggestions", {
         scope: scopeSelect.value,
         last_user_message: turn.last_user_message,
-        last_assistant_answer: turn.last_assistant_answer
+        last_assistant_answer: turn.last_assistant_answer,
+        asked_questions: turn.asked_questions
       });
       if (data.context_updated_at && data.context_updated_at !== lastSuggestionContextAt) {
         lastSuggestionContextAt = data.context_updated_at;
@@ -8404,6 +9235,7 @@ def native_ai_assistant_js() -> str:
         session_id: sessionId,
         message: text,
         history: outgoingHistory,
+        asked_questions: askedQuestionPayload(),
         scope: scopeSelect.value,
         role: roleSelect.value,
         allow_cloud: allowCloud.checked,
@@ -8477,6 +9309,17 @@ def native_ai_assistant_js() -> str:
   });
 
   sendBtn.addEventListener("click", () => sendMessage());
+  root.addEventListener("dental-ai-submit", event => {
+    const message = String(event.detail?.message || "").trim();
+    if (!message || sending) return;
+    const draft = input.value;
+    event.preventDefault();
+    void sendMessage(message);
+    if (draft) {
+      input.value = draft;
+      syncInputHeight();
+    }
+  });
   exportMdBtn?.addEventListener("click", exportChatMarkdown);
   exportPdfBtn?.addEventListener("click", exportChatPdf);
   input.addEventListener("input", syncInputHeight);
@@ -8707,8 +9550,24 @@ def build_app() -> gr.Blocks:
                             gr.Markdown("选择一个结构化检测区域，左侧显示原图局部，右侧显示同一位置的模型标注；检测结果图最大化不便查看局部时，可用这里逐区复核。")
                             det_region_selector = gr.Dropdown(choices=[], label="选择疑似区域", interactive=True, elem_id="det-region-selector")
                             with gr.Row(elem_classes="linked-region-row"):
-                                det_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
-                                det_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
+                                det_region_original = gr.Image(
+                                    type="pil",
+                                    format="png",
+                                    height=400,
+                                    label="原图局部放大",
+                                    interactive=False,
+                                    buttons=["fullscreen", "download"],
+                                    elem_classes="linked-region-image",
+                                )
+                                det_region_annotated = gr.Image(
+                                    type="pil",
+                                    format="png",
+                                    height=400,
+                                    label="结果图同位置放大",
+                                    interactive=False,
+                                    buttons=["fullscreen", "download"],
+                                    elem_classes="linked-region-image",
+                                )
                             det_region_note = gr.Markdown("运行检测后，可选择某个疑似区域查看原图与标注图的联动放大结果。")
                 with gr.Group(elem_classes=["detection-report-panel", "single-report-panel"]):
                     gr.Markdown("#### 单图检测报告")
@@ -8846,8 +9705,24 @@ def build_app() -> gr.Blocks:
                             gr.Markdown("按模型编号和区域编号查看局部细节，区域标签会包含模型名称，便于区分不同模型的检测结果。")
                             cmp_region_selector = gr.Dropdown(choices=[], label="选择模型与疑似区域", interactive=True, elem_id="cmp-region-selector")
                             with gr.Row(elem_classes="linked-region-row"):
-                                cmp_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
-                                cmp_region_annotated = gr.Image(type="pil", label="对应模型结果图局部", interactive=False, buttons=["fullscreen", "download"])
+                                cmp_region_original = gr.Image(
+                                    type="pil",
+                                    format="png",
+                                    height=400,
+                                    label="原图局部放大",
+                                    interactive=False,
+                                    buttons=["fullscreen", "download"],
+                                    elem_classes="linked-region-image",
+                                )
+                                cmp_region_annotated = gr.Image(
+                                    type="pil",
+                                    format="png",
+                                    height=400,
+                                    label="对应模型结果图局部",
+                                    interactive=False,
+                                    buttons=["fullscreen", "download"],
+                                    elem_classes="linked-region-image",
+                                )
                             cmp_region_note = gr.Markdown("运行多模型对比后，可选择模型和区域查看联动放大结果。")
                 with gr.Group(elem_classes=["detection-report-panel", "compare-report-panel"]):
                     gr.Markdown("#### 多模型对比报告")
@@ -9005,8 +9880,24 @@ def build_app() -> gr.Blocks:
                             gr.Markdown("按图片编号和区域编号查看局部细节，区域标签会包含图片名称，便于批量任务中快速定位。")
                             batch_region_selector = gr.Dropdown(choices=[], label="选择图片与疑似区域", interactive=True, elem_id="batch-region-selector")
                             with gr.Row(elem_classes="linked-region-row"):
-                                batch_region_original = gr.Image(type="pil", label="原图局部放大", interactive=False, buttons=["fullscreen", "download"])
-                                batch_region_annotated = gr.Image(type="pil", label="结果图同位置放大", interactive=False, buttons=["fullscreen", "download"])
+                                batch_region_original = gr.Image(
+                                    type="pil",
+                                    format="png",
+                                    height=400,
+                                    label="原图局部放大",
+                                    interactive=False,
+                                    buttons=["fullscreen", "download"],
+                                    elem_classes="linked-region-image",
+                                )
+                                batch_region_annotated = gr.Image(
+                                    type="pil",
+                                    format="png",
+                                    height=400,
+                                    label="结果图同位置放大",
+                                    interactive=False,
+                                    buttons=["fullscreen", "download"],
+                                    elem_classes="linked-region-image",
+                                )
                             batch_region_note = gr.Markdown("运行批量检测后，可选择图片和区域查看联动放大结果。")
                 with gr.Group(elem_classes=["detection-report-panel", "batch-report-panel"]):
                     gr.Markdown("#### 批量检测报告")
@@ -9053,9 +9944,8 @@ def build_app() -> gr.Blocks:
                     with gr.Group(elem_classes="history-filter-stack"):
                         history_task_filter = gr.Dropdown(["全部任务", "单模型检测", "多模型对比", "批量检测"], value="全部任务", label="任务类型")
                         history_review_filter = gr.Dropdown(["全部复核等级", "强烈建议人工复核", "建议人工复核", "常规人工复核", "当前阈值下无疑似区域", "无法评估"], value="全部复核等级", label="复核等级")
-                        history_initial_pages = max(1, (len(history_rows()) + 19) // 20)
-                        history_initial_choices = [f"第 {index} / {history_initial_pages} 页" for index in range(1, history_initial_pages + 1)]
-                        history_page = gr.Dropdown(history_initial_choices, value=history_initial_choices[0], label="结果分页", interactive=history_initial_pages > 1)
+                        history_initial_pages = max(1, (len(history_rows()) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+                        history_page_state = gr.State(1)
             with gr.Group(elem_classes=["history-table-panel"]):
                 gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>任务明细</span><div><h3>检测历史列表</h3><p>表格字段与原有统计口径保持一致。</p></div></div>")
                 history_table = gr.Dataframe(
@@ -9064,6 +9954,45 @@ def build_app() -> gr.Blocks:
                     label="检测历史",
                     wrap=True,
                 )
+                with gr.Row(elem_classes=["history-pagination-bar"]):
+                    history_page_feedback = gr.Markdown(
+                        f"共 {len(history_rows())} 条记录",
+                        elem_id="history-page-feedback",
+                    )
+                    with gr.Row(variant="compact", elem_classes=["history-pagination"]):
+                        history_previous_page_btn = gr.Button(
+                            "‹ 上一页",
+                            size="sm",
+                            interactive=False,
+                            elem_id="history-page-previous",
+                        )
+                        gr.HTML("<span aria-hidden='true'>到第</span>", elem_id="history-page-prefix")
+                        history_page_input = gr.Number(
+                            value=1,
+                            placeholder="页码",
+                            show_label=False,
+                            container=False,
+                            step=1,
+                            scale=0,
+                            min_width=72,
+                            elem_id="history-page-input",
+                        )
+                        history_page_total = gr.HTML(
+                            history_page_total_html(history_initial_pages),
+                            elem_id="history-page-total",
+                        )
+                        history_page_jump_btn = gr.Button(
+                            "跳转",
+                            variant="primary",
+                            size="sm",
+                            elem_id="history-page-jump",
+                        )
+                        history_next_page_btn = gr.Button(
+                            "下一页 ›",
+                            size="sm",
+                            interactive=history_initial_pages > 1,
+                            elem_id="history-page-next",
+                        )
             with gr.Row(equal_height=False, elem_classes=["history-detail-workspace"]):
                 with gr.Column(scale=4, elem_classes=["history-detail-controls"]):
                     gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>记录定位</span><div><h3>选择任务</h3><p>选中记录后在右侧查看完整信息。</p></div></div>")
@@ -9083,43 +10012,127 @@ def build_app() -> gr.Blocks:
         with gr.Group(elem_id="page-report", elem_classes=["dental-page"]):
             gr.HTML(
                 workspace_page_intro(
-                    "结果编排与多格式交付",
+                    "跨任务汇总与统一交付",
                     "报告中心",
-                    "将当前单图、多模型或批量任务整理为结构化报告，在同一工作区中预览、导出并回看最近产物。",
-                    ("中英双语", "图文预览", "三种格式", "本地归档"),
+                    "自动汇总当前单图、多模型对比与批量任务，生成一份综合报告，并集中管理可再次预览和下载的报告归档。",
+                    ("自动汇总", "综合编排", "三种格式", "可用归档"),
                     "08",
                 )
             )
             with gr.Row(equal_height=False, elem_classes=["report-workspace-grid"]):
                 with gr.Column(scale=4, elem_classes=["report-command-column"]):
-                    with gr.Group(elem_classes=["report-command-panel"]):
-                        gr.HTML("<div class='workspace-panel-heading'><span>生成设置</span><div><h3>创建检测报告</h3><p>选择数据范围与语言后生成当前报告。</p></div></div>")
-                        with gr.Group(elem_classes="report-controls-row"):
-                            report_type = gr.Dropdown(["单图检测报告", "多模型对比报告", "批量检测报告", "综合报告"], value="综合报告", label="报告类型")
-                            report_language = gr.Dropdown(["中文", "English"], value="中文", label="报告语言")
-                            report_btn = gr.Button("生成检测报告", variant="primary", elem_classes=["report-generate-action"])
+                    with gr.Column(elem_classes=["report-command-panel"]):
+                        gr.HTML(
+                            "<div class='workspace-panel-heading'><span>综合编排</span><div><h3>创建综合报告</h3><p>自动纳入当前已有结果，不再重复提供单项报告入口。</p></div></div>",
+                            elem_classes=["report-command-heading"],
+                        )
+                        report_source_overview = gr.HTML(
+                            report_source_overview_html(),
+                            elem_classes=["report-source-overview-panel"],
+                        )
+                        with gr.Row(equal_height=True, elem_classes=["report-controls-row"]):
+                            report_language = gr.Dropdown(
+                                ["中文", "English"],
+                                value="中文",
+                                label="报告语言",
+                                scale=1,
+                                min_width=220,
+                                elem_classes=["report-language-control"],
+                            )
+                            report_btn = gr.Button(
+                                "生成综合报告",
+                                variant="primary",
+                                scale=0,
+                                min_width=260,
+                                elem_classes=["report-generate-action"],
+                            )
                 with gr.Column(scale=8, elem_classes=["report-preview-column"]):
-                    gr.HTML("<div class='workspace-panel-heading'><span>文档画布</span><div><h3>报告内容预览</h3><p>生成后可检查正文与图片，再选择所需格式下载。</p></div></div>")
+                    gr.HTML(
+                        "<div class='workspace-panel-heading'><span>综合画布</span><div><h3>综合报告预览</h3><p>统一检查跨任务摘要、复核清单和结果图片，再选择格式下载。</p></div></div>",
+                        elem_classes=["report-preview-heading"],
+                    )
                     report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
-                    report_preview = gr.Markdown("尚未生成报告。", elem_classes="report-preview-panel")
-                    with gr.Row(elem_classes="report-download-row"):
-                        report_file = gr.DownloadButton("下载 Markdown 报告", elem_classes="report-download-action")
-                        report_pdf_file = gr.DownloadButton("下载 PDF 报告", elem_classes="report-download-action")
-                        report_docx_file = gr.DownloadButton("下载 Word 报告", elem_classes="report-download-action")
-            with gr.Group(elem_classes=["report-recent-panel"]):
-                gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>本地归档</span><div><h3>最近生成</h3><p>回看已生成的报告文件。</p></div></div>")
-                recent_reports = gr.HTML(recent_reports_html(), elem_classes="recent-reports-panel")
+                    report_preview = gr.Markdown(report_empty_state_markup(), elem_classes="report-preview-panel")
+                    with gr.Row(visible=False, elem_classes="report-download-row") as report_download_row:
+                        report_file = gr.DownloadButton("下载 Markdown 报告", visible=False, elem_classes="report-download-action")
+                        report_pdf_file = gr.DownloadButton("下载 PDF 报告", visible=False, elem_classes="report-download-action")
+                        report_docx_file = gr.DownloadButton("下载 Word 报告", visible=False, elem_classes="report-download-action")
+            archive_records_initial = report_archive_records()
+            archive_choices_initial = [str(record["choice"]) for record in archive_records_initial]
+            archive_record_initial = archive_records_initial[0] if archive_records_initial else None
+            archive_files_initial = archive_record_initial.get("files", {}) if archive_record_initial else {}
+            archive_markdown_initial = str(archive_record_initial.get("markdown") or "") if archive_record_initial else ""
+            archive_gallery_initial = report_archive_gallery(archive_markdown_initial)
+            archive_preview_initial = (
+                markdown_for_gradio_preview(archive_markdown_initial, max_inline_images=3)
+                if archive_markdown_initial
+                else report_empty_state_markup("生成综合报告后，可从左侧归档列表重新打开。", "暂无报告归档")
+            )
+            with gr.Column(elem_classes=["report-recent-panel", "report-archive-panel"]):
+                gr.HTML(
+                    "<div class='workspace-panel-heading workspace-panel-heading--compact'><span>可用归档</span><div><h3>报告归档</h3><p>选择历史报告，重新预览正文与图片，或再次下载已有格式。</p></div></div>",
+                    elem_classes=["report-archive-heading"],
+                )
+                with gr.Row(equal_height=False, elem_classes=["report-archive-grid"]):
+                    with gr.Column(scale=4, elem_classes=["report-archive-command"]):
+                        with gr.Row(equal_height=True, elem_classes=["report-archive-toolbar"]):
+                            report_archive_selector = gr.Dropdown(
+                                choices=archive_choices_initial,
+                                value=archive_choices_initial[0] if archive_choices_initial else None,
+                                label="选择报告",
+                                interactive=bool(archive_choices_initial),
+                                elem_classes=["report-archive-selector"],
+                            )
+                            report_archive_refresh_btn = gr.Button("刷新归档", elem_classes=["report-archive-refresh"])
+                        report_archive_summary = gr.HTML(
+                            report_archive_summary_html(archive_record_initial),
+                            elem_classes=["report-archive-summary-panel"],
+                        )
+                        with gr.Row(visible=bool(archive_files_initial), elem_classes=["report-archive-download-row"]) as report_archive_download_row:
+                            report_archive_md = gr.DownloadButton("Markdown", value=archive_files_initial.get(".md"), visible=bool(archive_files_initial.get(".md")))
+                            report_archive_pdf = gr.DownloadButton("PDF", value=archive_files_initial.get(".pdf"), visible=bool(archive_files_initial.get(".pdf")))
+                            report_archive_docx = gr.DownloadButton("Word", value=archive_files_initial.get(".docx"), visible=bool(archive_files_initial.get(".docx")))
+                            report_archive_csv = gr.DownloadButton("CSV", value=archive_files_initial.get(".csv"), visible=bool(archive_files_initial.get(".csv")))
+                    with gr.Column(scale=8, elem_classes=["report-archive-preview-column"]):
+                        report_archive_gallery_component = gr.Gallery(
+                            value=archive_gallery_initial,
+                            label="归档图片",
+                            columns=4,
+                            height=240,
+                            visible=bool(archive_gallery_initial),
+                        )
+                        report_archive_preview = gr.Markdown(
+                            archive_preview_initial,
+                            elem_classes=["report-archive-preview"],
+                        )
 
         refresh_btn.click(lambda: (*dashboard_outputs(), registry_status_markdown()), outputs=[dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status])
         clear_outputs = [dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, current_detection, current_comparison, current_batch, history_summary_cards, history_table, history_detail_selector, history_detail, history_notice]
         clear_history_event = clear_history_btn.click(clear_all_records, outputs=clear_outputs)
         clear_history_page_event = clear_history_page_btn.click(clear_all_records, outputs=clear_outputs)
-        history_refresh_outputs = [history_summary_cards, history_table, history_detail_selector, history_detail, history_notice]
+        history_pagination_outputs = [
+            history_page_state,
+            history_page_input,
+            history_page_total,
+            history_previous_page_btn,
+            history_next_page_btn,
+            history_page_feedback,
+        ]
+        history_refresh_outputs = [
+            history_summary_cards,
+            history_table,
+            history_detail_selector,
+            history_detail,
+            history_notice,
+            *history_pagination_outputs,
+        ]
         refresh_history_btn.click(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
         history_task_filter.change(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
         history_review_filter.change(refresh_history_view, inputs=[history_task_filter, history_review_filter], outputs=history_refresh_outputs)
         history_detail_selector.change(history_detail_markdown, inputs=history_detail_selector, outputs=history_detail)
         export_history_btn.click(export_history_csv, outputs=history_export_file)
+        clear_history_event.then(reset_history_pagination, outputs=history_pagination_outputs)
+        clear_history_page_event.then(reset_history_pagination, outputs=history_pagination_outputs)
 
         det_event = det_btn.click(
             run_single_detection,
@@ -9329,16 +10342,57 @@ def build_app() -> gr.Blocks:
             show_progress="hidden",
         )
 
-        report_event = report_btn.click(generate_report, inputs=[report_type, current_detection, current_comparison, current_batch, report_language], outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file])
-        report_event.then(recent_reports_html, outputs=recent_reports)
-        single_report_event.then(recent_reports_html, outputs=recent_reports)
-        comparison_report_event.then(recent_reports_html, outputs=recent_reports)
-        batch_report_event.then(recent_reports_html, outputs=recent_reports)
+        report_event = report_btn.click(
+            generate_report_center,
+            inputs=[current_detection, current_comparison, current_batch, report_language],
+            outputs=[report_preview, report_gallery, report_file, report_pdf_file, report_docx_file, report_download_row],
+        )
+        report_archive_load_outputs = [
+            report_archive_summary,
+            report_archive_gallery_component,
+            report_archive_preview,
+            report_archive_download_row,
+            report_archive_md,
+            report_archive_pdf,
+            report_archive_docx,
+            report_archive_csv,
+        ]
+        report_archive_refresh_outputs = [report_archive_selector, *report_archive_load_outputs]
+        report_archive_selector.change(
+            load_report_archive,
+            inputs=report_archive_selector,
+            outputs=report_archive_load_outputs,
+        )
+        report_archive_refresh_btn.click(refresh_report_archive, outputs=report_archive_refresh_outputs)
+        report_event.then(refresh_report_archive, outputs=report_archive_refresh_outputs)
+        single_report_event.then(refresh_report_archive, outputs=report_archive_refresh_outputs)
+        comparison_report_event.then(refresh_report_archive, outputs=report_archive_refresh_outputs)
+        batch_report_event.then(refresh_report_archive, outputs=report_archive_refresh_outputs)
 
-        history_page.change(
-            paged_history_view,
-            inputs=[history_task_filter, history_review_filter, history_page],
-            outputs=[history_table, history_page, history_notice],
+        report_source_inputs = [current_detection, current_comparison, current_batch]
+        for source_event in (det_event, cmp_event, batch_event, batch_retry_event, clear_history_event, clear_history_page_event):
+            source_event.then(report_source_overview_html, inputs=report_source_inputs, outputs=report_source_overview)
+
+        history_page_outputs = [history_table, *history_pagination_outputs]
+        history_previous_page_btn.click(
+            previous_history_page,
+            inputs=[history_task_filter, history_review_filter, history_page_state],
+            outputs=history_page_outputs,
+        )
+        history_next_page_btn.click(
+            next_history_page,
+            inputs=[history_task_filter, history_review_filter, history_page_state],
+            outputs=history_page_outputs,
+        )
+        history_page_jump_btn.click(
+            jump_history_page,
+            inputs=[history_task_filter, history_review_filter, history_page_input, history_page_state],
+            outputs=history_page_outputs,
+        )
+        history_page_input.submit(
+            jump_history_page,
+            inputs=[history_task_filter, history_review_filter, history_page_input, history_page_state],
+            outputs=history_page_outputs,
         )
         refresh_history_btn.click(lambda: history_thumbnail_gallery(), outputs=history_gallery)
         for history_event in (det_event, cmp_event, batch_event):
