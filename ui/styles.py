@@ -7632,4 +7632,196 @@ button.solid-primary-action:hover,
     min-height: 240px !important;
   }
 }
+
+/* Report documents: shared paper typography for live and archived previews. */
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose {
+  max-width: 980px !important;
+  margin: 0 auto !important;
+  padding: clamp(18px, 3vw, 34px) !important;
+  overflow-wrap: anywhere !important;
+  border: 1px solid #dce6ed !important;
+  border-radius: 14px !important;
+  background: #fff !important;
+  color: #243b53 !important;
+  line-height: 1.72 !important;
+  box-shadow: 0 14px 34px rgba(25, 55, 76, .07) !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose > h1:first-of-type {
+  margin: -1px -1px 28px !important;
+  padding: 30px clamp(22px, 4vw, 42px) 28px !important;
+  border: 0 !important;
+  border-left: 6px solid #14b8a6 !important;
+  border-radius: 13px !important;
+  background:
+    radial-gradient(circle at 92% 16%, rgba(42, 167, 200, .38) 0 45px, transparent 46px),
+    linear-gradient(135deg, #0b263a 0%, #123b55 68%, #0f6b75 100%) !important;
+  color: #fff !important;
+  font-size: clamp(24px, 3.2vw, 36px) !important;
+  line-height: 1.26 !important;
+  letter-spacing: -.02em !important;
+  box-shadow: 0 15px 30px rgba(11, 38, 58, .16) !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose h2 {
+  margin: 30px 0 14px !important;
+  padding: 8px 12px !important;
+  border: 0 !important;
+  border-left: 4px solid #0f9d8a !important;
+  border-radius: 0 9px 9px 0 !important;
+  background: linear-gradient(90deg, #eaf8f5 0%, rgba(234, 248, 245, .2) 80%, transparent 100%) !important;
+  color: #123b55 !important;
+  font-size: clamp(18px, 2vw, 23px) !important;
+  line-height: 1.35 !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose h3 {
+  margin: 22px 0 10px !important;
+  padding-bottom: 7px !important;
+  border-bottom: 1px solid #dce6ed !important;
+  color: #0f766e !important;
+  font-size: 16px !important;
+  line-height: 1.4 !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose p,
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose li {
+  color: #334e68 !important;
+  font-size: 14px !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose blockquote {
+  margin: 14px 0 20px !important;
+  padding: 13px 16px !important;
+  border: 1px solid #bfe3dc !important;
+  border-left: 5px solid #0f9d8a !important;
+  border-radius: 10px !important;
+  background: #eaf8f5 !important;
+  color: #234b4a !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose blockquote p { margin: 0 !important; color: #234b4a !important; font-weight: 700 !important; }
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose table {
+  width: 100% !important;
+  min-width: 0 !important;
+  margin: 12px 0 22px !important;
+  overflow: hidden !important;
+  border: 1px solid #cbdbe5 !important;
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+  border-radius: 10px !important;
+  table-layout: auto !important;
+  font-size: 12px !important;
+  box-shadow: 0 5px 14px rgba(28, 62, 84, .05) !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose thead th {
+  padding: 10px 11px !important;
+  border-color: #31556a !important;
+  background: #123b55 !important;
+  color: #fff !important;
+  font-weight: 850 !important;
+  text-align: left !important;
+  white-space: normal !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose tbody td {
+  padding: 9px 11px !important;
+  border-color: #e0e9ef !important;
+  color: #334e68 !important;
+  vertical-align: top !important;
+  white-space: normal !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose tbody tr:nth-child(even) td { background: #f4f8fb !important; }
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose img {
+  display: block !important;
+  width: auto !important;
+  max-width: 100% !important;
+  max-height: 560px !important;
+  margin: 14px auto 20px !important;
+  padding: 8px !important;
+  object-fit: contain !important;
+  border: 1px solid #d7e3ea !important;
+  border-radius: 11px !important;
+  background: #f4f8fb !important;
+  box-shadow: 0 10px 24px rgba(24, 56, 77, .09) !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose code {
+  padding: 2px 5px !important;
+  border-radius: 5px !important;
+  background: #eaf3fa !important;
+  color: #0f766e !important;
+  font-size: .92em !important;
+}
+:is(
+  #page-report .report-preview-panel,
+  #page-report .report-archive-preview,
+  .detection-report-panel .detection-report-preview
+) .prose hr { margin: 28px 0 !important; border-color: #dce6ed !important; }
+
+@media (max-width: 680px) {
+  :is(
+    #page-report .report-preview-panel,
+    #page-report .report-archive-preview,
+    .detection-report-panel .detection-report-preview
+  ) .prose { padding: 14px !important; border-radius: 10px !important; }
+  :is(
+    #page-report .report-preview-panel,
+    #page-report .report-archive-preview,
+    .detection-report-panel .detection-report-preview
+  ) .prose > h1:first-of-type { padding: 22px 18px !important; border-radius: 9px !important; }
+  :is(
+    #page-report .report-preview-panel,
+    #page-report .report-archive-preview,
+    .detection-report-panel .detection-report-preview
+  ) .prose table { font-size: 11px !important; }
+}
 """

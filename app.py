@@ -5,6 +5,7 @@ import base64
 import copy
 from difflib import SequenceMatcher
 import hashlib
+from io import BytesIO
 import math
 import os
 import re
@@ -50,6 +51,7 @@ from assistant.config import (
 )
 from detection.constants import CLASS_ALIASES, CLASS_KNOWLEDGE
 from reports.constants import DISCLAIMER, FULL_DISCLAIMER
+from reports.document_export import export_docx_from_markdown, export_markdown_bundle, export_pdf_from_markdown
 from ui.empty_states import (
     batch_empty_state_for_upload,
     build_detection_empty_state,
@@ -175,6 +177,11 @@ MODEL_RECOMMEND_SCENES = {
     "lightweight": "速度优先、默认基线",
     "high_precision": "精细定位优先",
     "high_recall": "初筛和减少漏检优先",
+}
+MODEL_RECOMMEND_SCENES_EN = {
+    "lightweight": "Speed-first baseline",
+    "high_precision": "Precision-focused localization",
+    "high_recall": "Screening with fewer missed candidates",
 }
 
 
@@ -326,7 +333,7 @@ def ensure_dirs() -> None:
 
 
 def cleanup_output_artifacts(force: bool = False) -> dict[str, Any]:
-    """Prune generated reports/assets by age and size without touching state files."""
+    """Prune whole report groups while preserving assets referenced by retained Markdown."""
     global OUTPUT_LAST_CLEANUP_AT
     now = time.time()
     if not force and now - OUTPUT_LAST_CLEANUP_AT < OUTPUT_CLEANUP_INTERVAL_SECONDS:
@@ -335,35 +342,114 @@ def cleanup_output_artifacts(force: bool = False) -> dict[str, Any]:
         return {"skipped": True, "removed": 0, "freed_bytes": 0}
     try:
         ensure_dirs()
-        files: list[tuple[Path, float, int]] = []
-        for folder in (REPORT_DIR, REPORT_ASSET_DIR):
-            if not folder.exists():
+        report_groups: dict[str, list[tuple[Path, float, int]]] = {}
+        for path in REPORT_DIR.glob("*"):
+            try:
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+            except OSError:
                 continue
-            for dirpath, _, filenames in os.walk(folder):
+            report_groups.setdefault(path.stem, []).append((path, stat.st_mtime, stat.st_size))
+
+        asset_files: list[tuple[Path, float, int]] = []
+        if REPORT_ASSET_DIR.exists():
+            for dirpath, _, filenames in os.walk(REPORT_ASSET_DIR):
                 base = Path(dirpath)
                 for filename in filenames:
                     path = base / filename
                     try:
                         stat = path.stat()
-                        files.append((path, stat.st_mtime, stat.st_size))
+                        asset_files.append((path, stat.st_mtime, stat.st_size))
                     except OSError:
                         continue
-        files.sort(key=lambda item: item[1], reverse=True)
-        keep_paths = {item[0] for item in files[:OUTPUT_KEEP_RECENT_FILES]}
+
+        report_units = [
+            {
+                "id": ("report", stem),
+                "stem": stem,
+                "paths": [item[0] for item in entries],
+                "mtime": max(item[1] for item in entries),
+                "size": sum(item[2] for item in entries),
+            }
+            for stem, entries in report_groups.items()
+        ]
+        asset_units = [
+            {"id": ("asset", str(path)), "path": path, "mtime": mtime, "size": size}
+            for path, mtime, size in asset_files
+        ]
+        all_units = sorted([*report_units, *asset_units], key=lambda item: float(item["mtime"]), reverse=True)
+        recent_unit_ids = {unit["id"] for unit in all_units[:OUTPUT_KEEP_RECENT_FILES]}
         cutoff = now - OUTPUT_RETENTION_DAYS * 86400
-        remove_paths = {path for path, mtime, _ in files if mtime < cutoff and path not in keep_paths}
-        remaining_bytes = sum(size for path, _, size in files if path not in remove_paths)
-        if remaining_bytes > OUTPUT_MAX_BYTES:
-            for path, _, size in reversed(files):
-                if path in keep_paths or path in remove_paths:
+        removed_stems = {
+            str(unit["stem"])
+            for unit in report_units
+            if float(unit["mtime"]) < cutoff and unit["id"] not in recent_unit_ids
+        }
+        removed_assets: set[Path] = set()
+
+        def referenced_assets() -> set[Path]:
+            references: set[Path] = set()
+            available_assets = {path.resolve() for path, _, _ in asset_files}
+            for stem, entries in report_groups.items():
+                if stem in removed_stems:
                     continue
-                remove_paths.add(path)
-                remaining_bytes -= size
-                if remaining_bytes <= OUTPUT_MAX_BYTES:
+                for md_path, _, _ in entries:
+                    if md_path.suffix.lower() != ".md":
+                        continue
+                    try:
+                        lines = md_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                    except OSError:
+                        continue
+                    for line in lines:
+                        image_ref = parse_markdown_image(line)
+                        if image_ref and image_ref[1].resolve() in available_assets:
+                            references.add(image_ref[1].resolve())
+            return references
+
+        protected_assets = referenced_assets()
+        for unit in asset_units:
+            path = Path(unit["path"])
+            if float(unit["mtime"]) < cutoff and unit["id"] not in recent_unit_ids and path.resolve() not in protected_assets:
+                removed_assets.add(path)
+
+        def remaining_size() -> int:
+            report_size = sum(int(unit["size"]) for unit in report_units if str(unit["stem"]) not in removed_stems)
+            asset_size = sum(int(unit["size"]) for unit in asset_units if Path(unit["path"]) not in removed_assets)
+            return report_size + asset_size
+
+        remaining_bytes = remaining_size()
+        if remaining_bytes > OUTPUT_MAX_BYTES:
+            while remaining_bytes > OUTPUT_MAX_BYTES:
+                protected_assets = referenced_assets()
+                candidates = [
+                    unit
+                    for unit in report_units
+                    if str(unit["stem"]) not in removed_stems and unit["id"] not in recent_unit_ids
+                ]
+                candidates.extend(
+                    unit
+                    for unit in asset_units
+                    if Path(unit["path"]) not in removed_assets
+                    and unit["id"] not in recent_unit_ids
+                    and Path(unit["path"]).resolve() not in protected_assets
+                )
+                if not candidates:
                     break
+                oldest = min(candidates, key=lambda item: float(item["mtime"]))
+                if oldest["id"][0] == "report":
+                    removed_stems.add(str(oldest["stem"]))
+                else:
+                    removed_assets.add(Path(oldest["path"]))
+                remaining_bytes = remaining_size()
+
+        remove_paths = set(removed_assets)
+        for stem in removed_stems:
+            remove_paths.update(path for path, _, _ in report_groups.get(stem, []))
         removed = 0
         freed = 0
-        size_by_path = {path: size for path, _, size in files}
+        size_by_path = {path: size for entries in report_groups.values() for path, _, size in entries}
+        size_by_path.update({path: size for path, _, size in asset_files})
         for path in remove_paths:
             try:
                 path.unlink(missing_ok=True)
@@ -371,9 +457,10 @@ def cleanup_output_artifacts(force: bool = False) -> dict[str, Any]:
                 freed += size_by_path.get(path, 0)
             except OSError:
                 continue
+        actual_remaining = sum(size_by_path.values()) - freed
         OUTPUT_LAST_CLEANUP_AT = now
-        OUTPUT_STORAGE_CACHE.update({"value": remaining_bytes, "checked_at": now})
-        return {"skipped": False, "removed": removed, "freed_bytes": freed, "remaining_bytes": remaining_bytes}
+        OUTPUT_STORAGE_CACHE.update({"value": actual_remaining, "checked_at": now})
+        return {"skipped": False, "removed": removed, "freed_bytes": freed, "remaining_bytes": actual_remaining}
     finally:
         OUTPUT_CLEANUP_LOCK.release()
 
@@ -452,8 +539,9 @@ def attach_result_traceability(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def traceability_markdown(results: list[dict[str, Any]]) -> str:
-    lines = ["### 可追溯性信息", f"- 应用版本：{APP_VERSION}"]
+def traceability_markdown(results: list[dict[str, Any]], language: str | None = "中文") -> str:
+    english = report_language_is_en(language)
+    lines = ["### Traceability Details", f"- App version: {APP_VERSION}"] if english else ["### 可追溯性信息", f"- 应用版本：{APP_VERSION}"]
     seen: set[tuple[str, str]] = set()
     for result in results:
         trace = result_traceability(result)
@@ -462,13 +550,21 @@ def traceability_markdown(results: list[dict[str, Any]]) -> str:
             continue
         seen.add(key)
         thresholds = trace.get("thresholds", {}) or result.get("thresholds", {})
-        lines.append(
-            f"- {trace.get('model_name', result.get('model_name', '-'))}｜模型版本：{trace.get('model_key', '-')} / {trace.get('model_type', '-')}｜权重：`{trace.get('weight_path', '-')}`｜SHA-256：`{trace.get('weight_sha256_12', '-')}`｜"
-            f"阈值：conf={thresholds.get('conf', '-')}、IoU={thresholds.get('iou', '-')}｜推理：{trace.get('inference_time_ms', result.get('inference_time_ms', 0))} ms｜"
-            f"结果时间：{trace.get('created_at', result.get('created_at', '-'))}｜影像指纹：`{trace.get('image_sha256_12', '-')}`"
-        )
+        if english:
+            lines.append(
+                f"- {trace.get('model_name', result.get('model_name', '-'))} | Model version: {trace.get('model_key', '-')} / {trace.get('model_type', '-')} | "
+                f"Weights: `{trace.get('weight_path', '-')}` | SHA-256: `{trace.get('weight_sha256_12', '-')}` | "
+                f"Thresholds: conf={thresholds.get('conf', '-')}, IoU={thresholds.get('iou', '-')} | Inference: {trace.get('inference_time_ms', result.get('inference_time_ms', 0))} ms | "
+                f"Completed at: {trace.get('created_at', result.get('created_at', '-'))} | Image fingerprint: `{trace.get('image_sha256_12', '-')}`"
+            )
+        else:
+            lines.append(
+                f"- {trace.get('model_name', result.get('model_name', '-'))}｜模型版本：{trace.get('model_key', '-')} / {trace.get('model_type', '-')}｜权重：`{trace.get('weight_path', '-')}`｜SHA-256：`{trace.get('weight_sha256_12', '-')}`｜"
+                f"阈值：conf={thresholds.get('conf', '-')}、IoU={thresholds.get('iou', '-')}｜推理：{trace.get('inference_time_ms', result.get('inference_time_ms', 0))} ms｜"
+                f"结果时间：{trace.get('created_at', result.get('created_at', '-'))}｜影像指纹：`{trace.get('image_sha256_12', '-')}`"
+            )
     if not seen:
-        lines.append("- 当前范围没有成功推理结果可记录。")
+        lines.append("- No successful inference result is available in the selected scope." if english else "- 当前范围没有成功推理结果可记录。")
     return "\n".join(lines)
 
 
@@ -2585,17 +2681,29 @@ def report_result_pairs(
     detection: dict[str, Any] | None = None,
     comparison: list[dict[str, Any]] | None = None,
     batch_items: list[dict[str, Any]] | None = None,
+    language: str | None = "中文",
 ) -> list[tuple[str, dict[str, Any]]]:
+    english = report_language_is_en(language)
+
+    def compact_label(value: Any, limit: int = 46) -> str:
+        text = re.sub(r"\s+", " ", str(value or "-")).strip()
+        if len(text) <= limit:
+            return text
+        tail = min(14, max(8, limit // 3))
+        return f"{text[: limit - tail - 1]}…{text[-tail:]}"
+
     pairs: list[tuple[str, dict[str, Any]]] = []
     if isinstance(detection, dict) and detection:
-        pairs.append(("单图检测", detection))
+        pairs.append(("Single-image Detection" if english else "单图检测", detection))
     for idx, result in enumerate(comparison or [], 1):
         if isinstance(result, dict):
-            pairs.append((f"多模型对比·模型{idx}", result))
+            model_label = compact_label(result.get("model_name") or (f"Model {idx}" if english else f"模型{idx}"), 38)
+            pairs.append((f"Model Comparison · {model_label}" if english else f"多模型对比 · {model_label}", result))
     for idx, item in enumerate(batch_items or [], 1):
         if isinstance(item, dict) and isinstance(item.get("result"), dict):
             name = item.get("image_name") or item["result"].get("image_name") or f"图片{idx}"
-            pairs.append((f"批量检测·{name}", item["result"]))
+            name_label = compact_label(name, 40)
+            pairs.append((f"Batch · Image {idx} · {name_label}" if english else f"批量检测 · 图片{idx} · {name_label}", item["result"]))
     return pairs
 
 
@@ -2633,14 +2741,16 @@ def class_summary_markdown(pairs: list[tuple[str, dict[str, Any]]]) -> str:
     if not records:
         lines.append("当前选择范围内未检出可归纳的疑似类别。")
         return "\n".join(lines)
-    lines.extend(["| 类别 | 疑似区域数 | 平均置信度 | 最高置信度 | 模型含义 | 复核重点 | 常见注意点 |", "|---|---:|---:|---:|---|---|---|"])
+    lines.extend(["| 类别 | 疑似区域数 | 置信度（均值 / 最高） | 复核重点 | 常见注意点 |", "|---|---:|---:|---|---|"])
     for class_name, confs in sorted(records.items()):
         info = CLASS_KNOWLEDGE.get(
             class_name,
             {"meaning": "自定义模型类别，请结合训练集定义解释。", "review": "建议结合原始影像与专业经验复核。", "note": "暂无内置类别说明。"},
         )
+        review_focus = f"{info['meaning']} {info['review']}"
         lines.append(
-            f"| {class_name} | {len(confs)} | {sum(confs) / len(confs):.3f} | {max(confs):.3f} | {info['meaning']} | {info['review']} | {info['note']} |"
+            f"| {markdown_table_value(class_name)} | {len(confs)} | {sum(confs) / len(confs):.3f} / {max(confs):.3f} | "
+            f"{markdown_table_value(review_focus)} | {markdown_table_value(info['note'])} |"
         )
     return "\n".join(lines)
 
@@ -2669,7 +2779,10 @@ def review_worklist_markdown(pairs: list[tuple[str, dict[str, Any]]], limit: int
     lines.extend(["| 优先级 | 来源 | 区域 | 类别 | 置信度 | 坐标 | 复核建议 |", "|---:|---|---:|---|---:|---|---|"])
     for rank, row in enumerate(rows[:limit], 1):
         bbox = ", ".join(str(v) for v in row["bbox"])
-        lines.append(f"| {rank} | {row['source']} | {row['region']} | {row['class']} | {row['confidence']:.3f} | {bbox} | {row['suggestion']} |")
+        lines.append(
+            f"| {rank} | {markdown_table_value(row['source'])} | {row['region']} | {markdown_table_value(row['class'])} | "
+            f"{row['confidence']:.3f} | {markdown_table_value(bbox)} | {markdown_table_value(row['suggestion'])} |"
+        )
     if len(rows) > limit:
         lines.append(f"\n> 仅展示前 {limit} 个优先复核区域，其余 {len(rows) - limit} 个区域请在结构化表格中查看。")
     return "\n".join(lines)
@@ -2689,35 +2802,109 @@ def batch_priority_markdown(items: list[dict[str, Any]] | None, limit: int = 12)
     for rank, (_, _, _, image_name, result, level) in enumerate(ranked[:limit], 1):
         classes = sorted({box.get("class_name", "-") for box in result.get("boxes", [])})
         advice = "优先打开原图与检测图人工复核。" if severity.get(level, 0) >= 2 else "常规复核或归档。"
-        lines.append(f"| {rank} | {image_name} | {level} | {result.get('box_count', 0)} | {float(result.get('max_confidence', 0.0)):.3f} | {'、'.join(classes) if classes else '-'} | {advice} |")
+        lines.append(
+            f"| {rank} | {markdown_table_value(image_name)} | {markdown_table_value(level)} | {result.get('box_count', 0)} | "
+            f"{float(result.get('max_confidence', 0.0)):.3f} | {markdown_table_value('、'.join(classes) if classes else '-')} | {markdown_table_value(advice)} |"
+        )
     return "\n".join(lines)
 
 
-def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+def csv_safe_text(value: Any) -> str:
+    """Prevent spreadsheet software from interpreting user-controlled text as a formula."""
+    text = "" if value is None else str(value)
+    if text.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def markdown_table_value(value: Any, fallback: str = "-") -> str:
+    """Render a value safely inside a Markdown table cell."""
+    if value is None or value == "":
+        return fallback
+    return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
+def markdown_table_row(values: list[Any] | tuple[Any, ...]) -> str:
+    return "| " + " | ".join(markdown_table_value(value) for value in values) + " |"
+
+
+def markdown_heading_text(value: Any, fallback: str = "-") -> str:
+    text = str(value or fallback).replace("\r", " ").replace("\n", " ")
+    return re.sub(r"\s+", " ", text).strip() or fallback
+
+
+def markdown_image_alt(value: Any, fallback: str = "Image") -> str:
+    return markdown_heading_text(value, fallback).replace("[", "［").replace("]", "］")
+
+
+def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | None, str | None]:
+    items = [item for item in (items or []) if isinstance(item, dict)]
     if not items:
-        return None, None
+        return None, None, None
     ensure_dirs()
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
     csv_path = REPORT_DIR / f"batch_detection_{ts}.csv"
     md_path = REPORT_DIR / f"batch_detection_{ts}.md"
-    df = pd.DataFrame(
-        [
-            batch_result_row(item)
-            + [
-                "、".join(sorted({box.get("class_name", "-") for box in item.get("result", {}).get("boxes", [])})) or "-",
-                "; ".join(f"区域{i + 1}:{box.get('risk_level', '-')}" for i, box in enumerate(item.get("result", {}).get("boxes", [])[:5])) or "-",
+    bundle_path = REPORT_DIR / f"batch_detection_{ts}.zip"
+    summary_rows: list[list[Any]] = []
+    region_rows: list[dict[str, Any]] = []
+    for item_index, item in enumerate(items, 1):
+        result = item.get("result", {}) if isinstance(item.get("result"), dict) else {}
+        image_name = str(item.get("image_name") or result.get("image_name") or f"图片{item_index}")
+        csv_image_name = csv_safe_text(image_name)
+        boxes = result.get("boxes", []) if isinstance(result.get("boxes"), list) else []
+        status = status_text(result)
+        success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
+        average = round(float(result.get("avg_confidence", 0.0)), 4) if success and boxes else None
+        maximum = round(float(result.get("max_confidence", 0.0)), 4) if success and boxes else None
+        elapsed = round(float(result.get("inference_time_ms", 0.0)), 2) if success else None
+        classes = "、".join(sorted({csv_safe_text(box.get("class_name", "")) for box in boxes if box.get("class_name")}))
+        summary_rows.append(
+            [
+                image_name,
+                status,
+                len(boxes) if success else 0,
+                f"{average:.3f} / {maximum:.3f}" if average is not None and maximum is not None else "",
+                f"{elapsed:.2f}" if elapsed is not None else "",
+                overall_review_level(result),
+                classes,
+                str(result.get("error_message", "") or ""),
             ]
-            for item in items
-        ],
-        columns=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因", "检出类别摘要", "前5个区域复核等级"],
-    )
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        )
+        region_values = boxes or [None]
+        for region_index, box in enumerate(region_values, 1):
+            box = box if isinstance(box, dict) else {}
+            raw_bbox = box.get("bbox_xyxy", [])
+            bbox = list(raw_bbox) if isinstance(raw_bbox, (list, tuple)) else []
+            bbox = bbox[:4] + [None] * max(0, 4 - len(bbox))
+            region_rows.append(
+                {
+                    "图片序号": item_index,
+                    "图片名称": csv_image_name,
+                    "推理状态": status,
+                    "使用模型": csv_safe_text(result.get("model_name", "")),
+                    "图片疑似区域总数": len(boxes) if success else 0,
+                    "图片平均置信度": average,
+                    "图片最高置信度": maximum,
+                    "区域编号": region_index if boxes else None,
+                    "类别": csv_safe_text(box.get("class_name", "")),
+                    "区域置信度": round(float(box.get("confidence", 0.0)), 4) if box else None,
+                    "复核提示": csv_safe_text(box.get("risk_level", overall_review_level(result))),
+                    "坐标x1": bbox[0],
+                    "坐标y1": bbox[1],
+                    "坐标x2": bbox[2],
+                    "坐标y2": bbox[3],
+                    "推理耗时(ms)": elapsed,
+                    "失败原因": csv_safe_text(result.get("error_message", "")),
+                }
+            )
+    frame = pd.DataFrame(region_rows)
     md_table = [
-        "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 | 检出类别摘要 | 前5个区域复核等级 |",
-        "|---|---|---:|---:|---:|---:|---|---|---|---|",
+        "| 图片名称 | 推理状态 | 疑似区域 | 置信度（均值 / 最高） | 推理耗时(ms) | 复核提示 | 检出类别 | 失败原因 |",
+        "|---|---|---:|---|---:|---|---|---|",
     ]
-    for row in df.astype(str).values.tolist():
-        md_table.append("| " + " | ".join(row) + " |")
+    for row in summary_rows:
+        md_table.append("| " + " | ".join(markdown_table_value(value) for value in row) + " |")
     lines = [
         "# 批量牙齿病变疑似区域辅助识别报告",
         "",
@@ -2748,8 +2935,19 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
         "## 免责声明",
         FULL_DISCLAIMER,
     ]
-    md_path.write_text("\n".join(lines), encoding="utf-8")
-    return str(md_path), str(csv_path)
+    markdown = "\n".join(lines)
+    with tempfile.TemporaryDirectory(prefix=".batch-report-build-", dir=REPORT_DIR) as temp_dir:
+        temp_root = Path(temp_dir)
+        temp_csv = temp_root / csv_path.name
+        temp_md = temp_root / md_path.name
+        temp_bundle = temp_root / bundle_path.name
+        frame.to_csv(temp_csv, index=False, encoding="utf-8-sig", na_rep="")
+        temp_md.write_text(markdown, encoding="utf-8")
+        export_markdown_bundle(markdown, temp_bundle, REPORT_DIR)
+        temp_csv.replace(csv_path)
+        temp_md.replace(md_path)
+        temp_bundle.replace(bundle_path)
+    return str(md_path), str(csv_path), str(bundle_path)
 
 
 def generate_batch_report_outputs(items: list[dict[str, Any]] | None) -> tuple[Any, ...]:
@@ -2757,9 +2955,9 @@ def generate_batch_report_outputs(items: list[dict[str, Any]] | None) -> tuple[A
     if not items:
         return "尚未生成批量报告预览。", gr.update(value=[], visible=False), None, None
     try:
-        md_path, csv_path = export_batch_report(items)
+        md_path, csv_path, bundle_path = export_batch_report(items)
         preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告未能生成。"
-        return markdown_for_gradio_preview(preview_raw), gr.update(value=[], visible=False), md_path, csv_path
+        return markdown_for_gradio_preview(preview_raw), gr.update(value=[], visible=False), bundle_path, csv_path
     except Exception as exc:
         return f"> 批量报告生成失败：{exc}", gr.update(value=[], visible=False), None, None
 
@@ -3392,7 +3590,7 @@ def report_source_overview_html(
 def report_archive_records(limit: int = 30) -> list[dict[str, Any]]:
     ensure_dirs()
     grouped: dict[str, dict[str, Any]] = {}
-    allowed_extensions = {".md", ".pdf", ".docx", ".csv"}
+    allowed_extensions = {".md", ".zip", ".pdf", ".docx", ".csv"}
     for path in REPORT_DIR.glob("*"):
         try:
             if not path.is_file() or path.suffix.lower() not in allowed_extensions:
@@ -3408,7 +3606,11 @@ def report_archive_records(limit: int = 30) -> list[dict[str, Any]]:
         record["size"] = int(record["size"]) + stat.st_size
         record["files"][path.suffix.lower()] = str(path)
 
-    records = [record for record in grouped.values() if ".md" in record["files"] or ".pdf" in record["files"] or ".docx" in record["files"]]
+    records = [
+        record
+        for record in grouped.values()
+        if any(extension in record["files"] for extension in (".md", ".zip", ".pdf", ".docx"))
+    ]
     records.sort(key=lambda item: float(item["mtime"]), reverse=True)
     records = records[:limit]
     for record in records:
@@ -3426,7 +3628,12 @@ def report_archive_records(limit: int = 30) -> list[dict[str, Any]]:
             report_type = "批量检测报告"
         else:
             report_type = "检测报告"
-        formats = [extension[1:].upper() for extension in (".md", ".pdf", ".docx", ".csv") if extension in record["files"]]
+        formats: list[str] = []
+        if ".zip" in record["files"]:
+            formats.append("MD 图文包")
+        elif ".md" in record["files"]:
+            formats.append("MD")
+        formats.extend(label for extension, label in ((".pdf", "PDF"), (".docx", "DOCX"), (".csv", "CSV")) if extension in record["files"])
         created_at = datetime.fromtimestamp(float(record["mtime"])).strftime("%Y-%m-%d %H:%M")
         record.update(
             {
@@ -3514,7 +3721,11 @@ def load_report_archive(choice: str | None) -> tuple[Any, ...]:
         gr.update(value=gallery, visible=bool(gallery)),
         preview,
         gr.update(visible=bool(files)),
-        gr.update(value=files.get(".md"), visible=bool(files.get(".md"))),
+        gr.update(
+            value=files.get(".zip") or files.get(".md"),
+            visible=bool(files.get(".zip") or files.get(".md")),
+            label="Markdown 图文包" if files.get(".zip") else "Markdown 源文档",
+        ),
         gr.update(value=files.get(".pdf"), visible=bool(files.get(".pdf"))),
         gr.update(value=files.get(".docx"), visible=bool(files.get(".docx"))),
         gr.update(value=files.get(".csv"), visible=bool(files.get(".csv"))),
@@ -3532,11 +3743,20 @@ def export_history_csv() -> str | None:
     if not rows:
         return None
     ensure_dirs()
-    path = REPORT_DIR / f"detection_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    pd.DataFrame(
+    stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
+    path = REPORT_DIR / f"detection_history_{stamp}.csv"
+    frame = pd.DataFrame(
         rows,
-        columns=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级"],
-    ).to_csv(path, index=False, encoding="utf-8-sig")
+        columns=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时(ms)", "复核提示"],
+    )
+    for column in ("任务类型", "图片名称", "使用模型", "复核提示"):
+        frame[column] = frame[column].map(csv_safe_text)
+    for column in ("检测框数量", "平均置信度", "最高置信度", "推理耗时(ms)"):
+        frame[column] = pd.to_numeric(frame[column].replace("-", pd.NA), errors="coerce")
+    with tempfile.TemporaryDirectory(prefix=".history-export-", dir=REPORT_DIR) as temp_dir:
+        temp_path = Path(temp_dir) / path.name
+        frame.to_csv(temp_path, index=False, encoding="utf-8-sig", na_rep="")
+        temp_path.replace(path)
     return str(path)
 
 
@@ -4739,11 +4959,15 @@ def make_chat_session_summary(history: list[Any] | None, scope: str, role: str, 
     lines = [
         f"# {AI_ASSISTANT_DISPLAY_NAME}会话摘要",
         "",
-        f"- 生成时间：{now_iso()}",
-        f"- 分析范围：{scope}",
-        f"- 回答视图：{role}",
-        f"- 最近回答状态：{source_status or '未记录'}",
-        "- 摘要用途：记录用户围绕检测结果、模型依据、不确定性和复核建议的交互问答，便于后续人工复查和答辩整理。",
+        "> 汇总本次检测上下文与交互问答，便于人工复查、归档和答辩整理。",
+        "",
+        "## 记录信息",
+        "| 项目 | 内容 |",
+        "|---|---|",
+        markdown_table_row(["生成时间", now_iso()]),
+        markdown_table_row(["分析范围", scope]),
+        markdown_table_row(["回答视图", role]),
+        markdown_table_row(["最近回答状态", source_status or "未记录"]),
         "",
         "## 会话场景说明",
         "- 患者易懂版：强调通俗解释和就诊复核提醒。",
@@ -4776,7 +5000,8 @@ def make_chat_session_summary(history: list[Any] | None, scope: str, role: str, 
 def export_chat_session_summary(history: list[Any] | None, scope: str, role: str, source_status: str) -> tuple[str, str | None]:
     summary = make_chat_session_summary(history, scope, role, source_status)
     ensure_dirs()
-    path = REPORT_DIR / f"chat_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
+    path = REPORT_DIR / f"chat_session_{stamp}.md"
     path.write_text(summary, encoding="utf-8")
     return summary, str(path)
 
@@ -6166,7 +6391,7 @@ def report_cover_markdown(report_type: str, pairs: list[tuple[str, dict[str, Any
                 f"| App version | {APP_VERSION} |",
                 f"| Valid inference groups | {metrics['success']} / {metrics['groups']} |",
                 f"| Candidate regions | {metrics['boxes']} |",
-                f"| Classes involved | {classes} |",
+                markdown_table_row(["Classes involved", classes]),
             ]
         )
     classes = "、".join(metrics["classes"]) if metrics["classes"] else "当前阈值下未检出明确类别"
@@ -6182,7 +6407,7 @@ def report_cover_markdown(report_type: str, pairs: list[tuple[str, dict[str, Any
             f"| 应用版本 | {APP_VERSION} |",
             f"| 有效推理结果 | {metrics['success']} / {metrics['groups']} 组 |",
             f"| 疑似区域总数 | {metrics['boxes']} 个 |",
-            f"| 涉及类别 | {classes} |",
+            markdown_table_row(["涉及类别", classes]),
         ]
     )
 
@@ -6224,8 +6449,10 @@ def report_risk_legend_markdown(language: str | None = "中文") -> str:
     if report_language_is_en(language):
         return "\n".join(
             [
-                "## Risk Level Guide",
-                "| Level | Meaning | Suggested action |",
+                "## Model Review Priority Guide",
+                "> Review priority is derived from model confidence and result ambiguity. It does not represent disease severity or clinical risk.",
+                "",
+                "| Review cue | Meaning | Suggested action |",
                 "|---|---|---|",
                 "| High confidence | The model output is relatively stable under the current threshold. | Review together with the original image and clinical context. |",
                 "| Manual review suggested | Medium confidence or a region that needs location/class verification. | Prioritize manual review before using it in any conclusion. |",
@@ -6234,8 +6461,10 @@ def report_risk_legend_markdown(language: str | None = "中文") -> str:
         )
     return "\n".join(
         [
-            "## 风险分级说明",
-            "| 等级 | 含义 | 建议动作 |",
+            "## 模型复核优先级说明",
+            "> 复核优先级依据模型置信度与结果歧义程度生成，不代表病变严重程度或临床风险。",
+            "",
+            "| 复核提示 | 含义 | 建议动作 |",
             "|---|---|---|",
             "| 可信度较高 | 当前阈值下模型输出相对稳定。 | 结合原图和临床信息常规复核。 |",
             "| 建议人工复核 | 置信度中等或位置/类别需要进一步确认。 | 在形成结论前优先人工复核。 |",
@@ -6244,7 +6473,34 @@ def report_risk_legend_markdown(language: str | None = "中文") -> str:
     )
 
 
-def report_region_crop_assets(source: str, result: dict[str, Any], max_regions: int) -> list[tuple[str, str, str]]:
+def report_image_info_text(result: dict[str, Any]) -> str:
+    info = result.get("image_info") if isinstance(result.get("image_info"), dict) else {}
+    width = info.get("width")
+    height = info.get("height")
+    mode = info.get("mode")
+    size = f"{width} × {height} px" if width and height else "尺寸未记录"
+    return f"{size} · {mode}" if mode else size
+
+
+def report_visual_options_text(result: dict[str, Any]) -> str:
+    options = result.get("visual_options") if isinstance(result.get("visual_options"), dict) else {}
+    parts = [
+        "显示类别" if options.get("show_label", True) else "隐藏类别",
+        "显示置信度" if options.get("show_confidence", True) else "隐藏置信度",
+    ]
+    if options.get("line_width") is not None:
+        parts.append(f"框线 {options.get('line_width')} px")
+    if options.get("color_mode"):
+        parts.append(str(options.get("color_mode")))
+    return " · ".join(parts)
+
+
+def report_region_crop_assets(
+    source: str,
+    result: dict[str, Any],
+    max_regions: int,
+    language: str | None = "中文",
+) -> list[tuple[str, str, str]]:
     original, annotated = result_original_and_annotated(None, result)
     if original is None or annotated is None:
         return []
@@ -6262,7 +6518,11 @@ def report_region_crop_assets(source: str, result: dict[str, Any], max_regions: 
         prefix = f"report_{safe_asset_stem(source)}_r{region_idx}"
         original_path = save_image_asset(original_crop, prefix, "crop_original")
         annotated_path = save_image_asset(annotated_crop, prefix, "crop_result")
-        caption = f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
+        caption = (
+            f"{source} | Region {region_idx} | {box.get('class_name', '-')} | Confidence {float(box.get('confidence', 0.0)):.3f}"
+            if report_language_is_en(language)
+            else f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
+        )
         crops.append((caption, original_path, annotated_path))
     return crops
 
@@ -6330,11 +6590,14 @@ def report_visual_markdown(
         original_path = assets.get("original")
         if not result_path and not original_path:
             continue
-        lines.append(f"### {source}")
+        safe_source = markdown_heading_text(source)
+        lines.append(f"### {safe_source}")
         if result_path:
-            lines.append(f"![{source} 结果图]({report_asset_markdown_path(result_path)})")
+            result_alt = f"{safe_source} result image" if report_language_is_en(language) else f"{safe_source} 结果图"
+            lines.append(f"![{markdown_image_alt(result_alt)}]({report_asset_markdown_path(result_path)})")
         if original_path:
-            lines.append(f"![{source} 原图]({report_asset_markdown_path(original_path)})")
+            original_alt = f"{safe_source} original image" if report_language_is_en(language) else f"{safe_source} 原图"
+            lines.append(f"![{markdown_image_alt(original_alt)}]({report_asset_markdown_path(original_path)})")
         lines.append("")
     region_count = 0
     region_title = "### Local Review Crops" if report_language_is_en(language) else "### 局部复核截图"
@@ -6343,10 +6606,13 @@ def report_visual_markdown(
         remaining = max_regions - region_count
         if remaining <= 0:
             break
-        for caption, original_path, annotated_path in report_region_crop_assets(source, result, remaining):
-            region_lines.append(f"**{caption}**")
-            region_lines.append(f"![{caption} 原图局部]({report_asset_markdown_path(original_path)})")
-            region_lines.append(f"![{caption} 标注局部]({report_asset_markdown_path(annotated_path)})")
+        for caption, original_path, annotated_path in report_region_crop_assets(source, result, remaining, language):
+            safe_caption = markdown_heading_text(caption)
+            region_lines.append(f"**{safe_caption.replace('**', '')}**")
+            original_alt = f"{safe_caption} original crop" if report_language_is_en(language) else f"{safe_caption} 原图局部"
+            annotated_alt = f"{safe_caption} annotated crop" if report_language_is_en(language) else f"{safe_caption} 标注局部"
+            region_lines.append(f"![{markdown_image_alt(original_alt)}]({report_asset_markdown_path(original_path)})")
+            region_lines.append(f"![{markdown_image_alt(annotated_alt)}]({report_asset_markdown_path(annotated_path)})")
             region_lines.append("")
             region_count += 1
             if region_count >= max_regions:
@@ -6370,6 +6636,7 @@ def make_report_markdown(
         detection if include_detection else None,
         comparison if include_comparison else None,
         batch_items if include_batch else None,
+        report_language,
     )
     if report_language_is_en(report_language):
         return make_report_markdown_en(detection, comparison, batch_items, report_type, active_pairs)
@@ -6403,28 +6670,26 @@ def make_report_markdown(
                 f"- 模型运行模式：{detection.get('runtime_mode', '-')}",
                 f"- 推理状态：{STATUS_LABELS.get(detection.get('status'), '-')}",
                 f"- 阈值参数：conf={detection.get('thresholds', {}).get('conf', '-')}, IoU={detection.get('thresholds', {}).get('iou', '-')}",
-                f"- 图像信息：{detection.get('image_info', {})}",
+                f"- 图像信息：{report_image_info_text(detection)}",
                 f"- 疑似区域数量：{detection.get('box_count', 0)}",
                 f"- 推理耗时：{detection.get('inference_time_ms', 0)} ms",
                 "",
                 "### 检测目标明细",
-                "| 编号 | 类别 | 置信度 | 坐标x1 | 坐标y1 | 坐标x2 | 坐标y2 | 风险等级 | 复核建议 |",
-                "|---:|---|---:|---:|---:|---:|---:|---|---|",
+                "| 编号 | 类别 | 置信度 | 区域坐标（x1, y1, x2, y2） | 复核提示 | 复核建议 |",
+                "|---:|---|---:|---|---|---|",
             ]
         )
         for i, box in enumerate(detection.get("boxes", []), 1):
             x1, y1, x2, y2 = box["bbox_xyxy"]
-            lines.append(
-                f"| {i} | {box['class_name']} | {box['confidence']:.3f} | {x1} | {y1} | {x2} | {y2} | {box['risk_level']} | {box['review_suggestion']} |"
-            )
+            lines.append(markdown_table_row([i, box["class_name"], f"{box['confidence']:.3f}", f"{x1}, {y1}, {x2}, {y2}", box["risk_level"], box["review_suggestion"]]))
         if not detection.get("boxes"):
-            lines.append("| - | - | - | - | - | - | - | - | 当前阈值下未检测到疑似区域 |")
+            lines.append("| - | - | - | - | 常规人工复核 | 当前阈值下未检测到疑似区域 |")
         lines.append("")
         lines.extend(
             [
                 "### 复核优先级",
                 f"- 总体复核等级：{overall_review_level(detection)}",
-                f"- 可视化设置：{detection.get('visual_options', {})}",
+                f"- 可视化设置：{report_visual_options_text(detection)}",
             ]
         )
         lines.append("")
@@ -6432,24 +6697,25 @@ def make_report_markdown(
         lines.extend(
             [
                 "## 多模型对比结果",
-                "| 模型 | 类型 | 状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时(ms) | 复核建议数量 | 推荐使用场景 | 失败原因 |",
-                "|---|---|---|---:|---:|---:|---:|---:|---|---|",
+                "| 模型 | 类型 | 状态 | 疑似区域 | 置信度（均值 / 最高） | 耗时(ms) | 需复核区域 | 推荐场景 / 失败原因 |",
+                "|---|---|---|---:|---|---:|---:|---|",
             ]
         )
         for row in compare_rows(comparison):
-            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+            recommendation = str(row[8]) if str(row[2]) in {"成功", "Success"} else str(row[9] or row[8])
+            lines.append(markdown_table_row([row[0], row[1], row[2], row[3], f"{row[4]} / {row[5]}", row[6], row[7], recommendation]))
         lines.extend(["", "### 一致性分析", "| 区域编号 | 涉及模型 | 最高置信度 | 平均置信度 | 一致性等级 | 复核建议 |", "|---:|---|---:|---:|---|---|"])
         c_rows = consistency_rows(comparison)
         if c_rows:
             for row in c_rows:
-                lines.append("| " + " | ".join(str(v) for v in row) + " |")
+                lines.append(markdown_table_row(row))
         else:
             lines.append("| - | - | - | - | - | 当前没有可分析的一致性区域 |")
         lines.extend(["", "### 模型差异归因", "| 差异类型 | 涉及模型/区域 | IoU | 说明 | 人工复核建议 |", "|---|---|---:|---|---|"])
         difference_rows = model_difference_attribution(comparison)
         if difference_rows:
             for row in difference_rows:
-                lines.append(f"| {row['类型']} | {row['模型/区域']} | {row['IoU']} | {row['说明']} | {row['建议']} |")
+                lines.append(markdown_table_row([row["类型"], row["模型/区域"], row["IoU"], row["说明"], row["建议"]]))
         else:
             lines.append("| - | - | - | 当前没有可归因的模型差异 | - |")
         lines.extend(["", compare_summary(comparison), system_recommendation(comparison), ""])
@@ -6457,12 +6723,13 @@ def make_report_markdown(
         lines.extend(["## 批量检测摘要", batch_summary_markdown(batch_items), "", batch_priority_markdown(batch_items), "", "### 批量检测表格"])
         lines.extend(
             [
-                "| 图片名称 | 推理状态 | 检测框数量 | 平均置信度 | 最高置信度 | 推理耗时 | 复核建议等级 | 失败原因 |",
-                "|---|---|---:|---:|---:|---:|---|---|",
+                "| 图片名称 | 推理状态 | 疑似区域 | 置信度（均值 / 最高） | 推理耗时(ms) | 复核提示 | 失败原因 |",
+                "|---|---|---:|---|---:|---|---|",
             ]
         )
         for item in batch_items:
-            lines.append("| " + " | ".join(str(v) for v in batch_result_row(item)) + " |")
+            row = batch_result_row(item)
+            lines.append(markdown_table_row([row[0], row[1], row[2], f"{row[3]} / {row[4]}", row[5], row[6], row[7]]))
         lines.append("")
     trace_results: list[dict[str, Any]] = []
     if include_detection and isinstance(detection, dict):
@@ -6529,7 +6796,7 @@ def class_summary_markdown_en(pairs: list[tuple[str, dict[str, Any]]]) -> str:
             "Periapical_Lesion": "Review relation to root apex and surrounding periapical structure.",
             "Impacted": "Review tooth position, eruption direction, adjacent teeth and overall panoramic context.",
         }.get(class_name, "Review together with the original image and model training definition.")
-        lines.append(f"| {class_name} | {len(confs)} | {sum(confs) / len(confs):.3f} | {max(confs):.3f} | {focus} |")
+        lines.append(markdown_table_row([class_name, len(confs), f"{sum(confs) / len(confs):.3f}", f"{max(confs):.3f}", focus]))
     return "\n".join(lines)
 
 
@@ -6554,10 +6821,10 @@ def review_worklist_markdown_en(pairs: list[tuple[str, dict[str, Any]]], limit: 
         lines.append("No region-level review task is available under the current threshold; routine review of the original image is still recommended.")
         return "\n".join(lines)
     rows.sort(key=lambda x: (severity.get(str(x["risk"]), 1), x["confidence"]), reverse=True)
-    lines.extend(["| Priority | Source | Region | Class | Confidence | Coordinates | Risk |", "|---:|---|---:|---|---:|---|---|"])
+    lines.extend(["| Priority | Source | Region | Class | Confidence | Coordinates | Review cue |", "|---:|---|---:|---|---:|---|---|"])
     for rank, row in enumerate(rows[:limit], 1):
         bbox = ", ".join(str(v) for v in row["bbox"])
-        lines.append(f"| {rank} | {row['source']} | {row['region']} | {row['class']} | {row['confidence']:.3f} | {bbox} | {english_risk_text(row['risk'])} |")
+        lines.append(markdown_table_row([rank, row["source"], row["region"], row["class"], f"{row['confidence']:.3f}", bbox, english_risk_text(row["risk"])]))
     if len(rows) > limit:
         lines.append(f"\n> Showing the top {limit} regions only. Check the structured table for the remaining {len(rows) - limit} regions.")
     return "\n".join(lines)
@@ -6604,28 +6871,31 @@ def make_report_markdown_en(
                 f"- Candidate regions: {detection.get('box_count', 0)}",
                 f"- Inference time: {detection.get('inference_time_ms', 0)} ms",
                 "",
-                "| No. | Class | Confidence | Coordinates | Risk |",
+                "| No. | Class | Confidence | Coordinates | Review cue |",
                 "|---:|---|---:|---|---|",
             ]
         )
         for i, box in enumerate(detection.get("boxes", []), 1):
             bbox = ", ".join(str(v) for v in box.get("bbox_xyxy", []))
-            lines.append(f"| {i} | {box.get('class_name', '-')} | {float(box.get('confidence', 0.0)):.3f} | {bbox} | {english_risk_text(box.get('risk_level'))} |")
+            lines.append(markdown_table_row([i, box.get("class_name", "-"), f"{float(box.get('confidence', 0.0)):.3f}", bbox, english_risk_text(box.get("risk_level"))]))
         if not detection.get("boxes"):
             lines.append("| - | - | - | - | No candidate under current threshold |")
         lines.append("")
     if include_comparison:
-        lines.extend(["## Multi-model Comparison", "| Model | Type | Status | Boxes | Avg conf. | Max conf. | Time(ms) | Review count | Suggested use | Error |", "|---|---|---|---:|---:|---:|---:|---:|---|---|"])
-        for row in compare_rows(comparison):
-            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+        lines.extend(["## Multi-model Comparison", "| Model | Type | Status | Regions | Confidence (avg / max) | Time(ms) | Review count | Suggested use / error |", "|---|---|---|---:|---|---:|---:|---|"])
+        for result, row in zip(comparison, compare_rows(comparison)):
+            row[2] = english_status_text(result)
+            success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
+            recommendation = MODEL_RECOMMEND_SCENES_EN.get(result.get("model_key", ""), "General comparison") if success else str(row[9] or "Unavailable")
+            lines.append(markdown_table_row([row[0], row[1], row[2], row[3], f"{row[4]} / {row[5]}", row[6], row[7], recommendation]))
         lines.append("")
     if include_batch:
-        lines.extend(["## Batch Screening Table", "| Image | Status | Boxes | Avg conf. | Max conf. | Time(ms) | Review level | Error |", "|---|---|---:|---:|---:|---:|---|---|"])
+        lines.extend(["## Batch Screening Table", "| Image | Status | Regions | Confidence (avg / max) | Time(ms) | Review cue | Error |", "|---|---|---:|---|---:|---|---|"])
         for item in batch_items:
             row = batch_result_row(item)
             row[1] = english_status_text(item.get("result", {}))
             row[6] = english_risk_text(row[6])
-            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+            lines.append(markdown_table_row([row[0], row[1], row[2], f"{row[3]} / {row[4]}", row[5], row[6], row[7]]))
         lines.append("")
     trace_results: list[dict[str, Any]] = []
     if include_detection and isinstance(detection, dict):
@@ -6637,7 +6907,7 @@ def make_report_markdown_en(
     lines.extend(
         [
             "## Traceability",
-            traceability_markdown(trace_results),
+            traceability_markdown(trace_results, "English"),
             "",
             "## Disclaimer",
             "This system is only for auxiliary recognition and research display. It is not a clinical diagnosis. Final interpretation must be reviewed by qualified dental professionals with the original image and other clinical information.",
@@ -6646,22 +6916,94 @@ def make_report_markdown_en(
     return "\n".join(lines)
 
 
+def parse_markdown_image(line: str) -> tuple[str, Path] | None:
+    match = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", line.strip())
+    if not match:
+        return None
+    alt, raw_path = match.group(1), match.group(2)
+    if raw_path.startswith("data:image/"):
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (REPORT_DIR / path).resolve()
+    if not path.exists():
+        return None
+    return alt, path
+
+
+def report_preview_data_uri(image_path: Path, max_edge: int = 1800, passthrough_bytes: int = 900_000) -> str:
+    """Return a crisp but bounded preview image, leaving downloadable files untouched."""
+    mime_type = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+    }.get(image_path.suffix.lower(), "image/png")
+    raw = image_path.read_bytes()
+    with Image.open(BytesIO(raw)) as source:
+        width, height = source.size
+        if len(raw) <= passthrough_bytes and max(width, height) <= max_edge:
+            return f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
+        preview = ImageOps.exif_transpose(source).copy()
+    preview.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    if preview.mode not in {"RGB", "L"}:
+        canvas = Image.new("RGB", preview.size, "white")
+        if "A" in preview.getbands():
+            canvas.paste(preview, mask=preview.getchannel("A"))
+        else:
+            canvas.paste(preview.convert("RGB"))
+        preview = canvas
+    elif preview.mode == "L":
+        preview = preview.convert("RGB")
+    buffer = BytesIO()
+    preview.save(buffer, format="JPEG", quality=90, optimize=True, progressive=True, subsampling=0)
+    return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+
+
+def markdown_for_gradio_preview(markdown: str, max_inline_images: int = 10) -> str:
+    rendered_lines: list[str] = []
+    inline_count = 0
+    skipped = 0
+    for line in markdown.splitlines():
+        image_ref = parse_markdown_image(line)
+        if image_ref and inline_count < max_inline_images:
+            alt, image_path = image_ref
+            try:
+                rendered_lines.append(f"![{markdown_image_alt(alt)}]({report_preview_data_uri(image_path)})")
+                inline_count += 1
+                continue
+            except Exception:
+                pass
+        if image_ref:
+            skipped += 1
+            alt, _ = image_ref
+            rendered_lines.append(f"> 图片预览已折叠：{alt}（完整图片见上方报告图片预览或下载报告文件）。")
+            continue
+        rendered_lines.append(line)
+    if skipped:
+        rendered_lines.append(f"\n> 为保持页面流畅，其余 {skipped} 张图片未内嵌到 Markdown 预览，可在报告图片预览中查看。")
+    return "\n".join(rendered_lines)
+
+
 def load_report_font(size: int = 16) -> ImageFont.ImageFont:
+    """Load a CJK-capable font for the dependency-free legacy PDF fallback."""
     candidates = [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simsun.ttc",
     ]
-    for path in candidates:
+    for candidate in candidates:
         try:
-            if Path(path).exists():
-                return ImageFont.truetype(path, size=size)
+            if Path(candidate).exists():
+                return ImageFont.truetype(candidate, size=size)
         except Exception:
             continue
     return ImageFont.load_default()
 
 
 def wrap_text_for_pdf(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    """Wrap mixed Chinese/Latin text for the legacy raster PDF fallback."""
     if not text:
         return [""]
     lines: list[str] = []
@@ -6682,48 +7024,7 @@ def wrap_text_for_pdf(text: str, font: ImageFont.ImageFont, max_width: int) -> l
     return lines
 
 
-def parse_markdown_image(line: str) -> tuple[str, Path] | None:
-    match = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", line.strip())
-    if not match:
-        return None
-    alt, raw_path = match.group(1), match.group(2)
-    if raw_path.startswith("data:image/"):
-        return None
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = (REPORT_DIR / path).resolve()
-    if not path.exists():
-        return None
-    return alt, path
-
-
-def markdown_for_gradio_preview(markdown: str, max_inline_images: int = 10) -> str:
-    rendered_lines: list[str] = []
-    inline_count = 0
-    skipped = 0
-    for line in markdown.splitlines():
-        image_ref = parse_markdown_image(line)
-        if image_ref and inline_count < max_inline_images:
-            alt, image_path = image_ref
-            try:
-                data = base64.b64encode(image_path.read_bytes()).decode("ascii")
-                rendered_lines.append(f"![{alt}](data:image/png;base64,{data})")
-                inline_count += 1
-                continue
-            except Exception:
-                pass
-        if image_ref:
-            skipped += 1
-            alt, _ = image_ref
-            rendered_lines.append(f"> 图片预览已折叠：{alt}（完整图片见上方报告图片预览或下载报告文件）。")
-            continue
-        rendered_lines.append(line)
-    if skipped:
-        rendered_lines.append(f"\n> 为保持页面流畅，其余 {skipped} 张图片未内嵌到 Markdown 预览，可在报告图片预览中查看。")
-    return "\n".join(rendered_lines)
-
-
-def export_report_pdf(markdown: str, path: Path) -> str:
+def _legacy_export_report_pdf(markdown: str, path: Path) -> str:
     ensure_dirs()
     width, height = 1240, 1754
     margin = 72
@@ -6824,7 +7125,7 @@ def docx_image_xml(rid: str, image_path: Path, alt: str, max_cx: int = 5486400) 
     return xml, data
 
 
-def export_report_docx(markdown: str, path: Path) -> str:
+def _legacy_export_report_docx(markdown: str, path: Path) -> str:
     ensure_dirs()
     body_parts: list[str] = []
     media: list[tuple[str, bytes, str]] = []
@@ -6885,6 +7186,24 @@ def export_report_docx(markdown: str, path: Path) -> str:
     return str(path)
 
 
+def export_report_pdf(markdown: str, path: Path) -> str:
+    """Export a searchable, vector-text PDF with a real document layout."""
+    try:
+        return export_pdf_from_markdown(markdown, path, REPORT_DIR)
+    except ModuleNotFoundError:
+        # Keep the application usable in an older environment until requirements
+        # are installed; new installations always use the styled exporter.
+        return _legacy_export_report_pdf(markdown, path)
+
+
+def export_report_docx(markdown: str, path: Path) -> str:
+    """Export an editable Word document with native tables and headings."""
+    try:
+        return export_docx_from_markdown(markdown, path, REPORT_DIR)
+    except ModuleNotFoundError:
+        return _legacy_export_report_docx(markdown, path)
+
+
 def report_empty_state_markup(
     message: str = "完成任意检测后，报告中心会自动汇总现有结果；生成后可预览正文、图片并下载文件。",
     title: str = "尚未生成报告",
@@ -6896,7 +7215,7 @@ def report_empty_state_markup(
         f"<h4>{xml_escape(title)}</h4>"
         f"<p class='report-empty-description'>{xml_escape(message)}</p>"
         "<div class='report-empty-formats' aria-label='支持的报告格式'>"
-        "<span>Markdown</span><span>PDF</span><span>Word</span>"
+        "<span>Markdown 图文包</span><span>PDF</span><span>Word</span>"
         "</div></section>"
     )
 
@@ -6929,14 +7248,27 @@ def generate_report(
         "综合报告": "dental_integrated_report",
     }.get(report_type, "dental_report")
     language_tag = "en" if report_language_is_en(report_language) else "zh"
-    stem = f"{report_prefix}_{language_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
+    stem = f"{report_prefix}_{language_tag}_{stamp}"
     md_path = REPORT_DIR / f"{stem}.md"
+    bundle_path = REPORT_DIR / f"{stem}.zip"
     pdf_path = REPORT_DIR / f"{stem}.pdf"
     docx_path = REPORT_DIR / f"{stem}.docx"
-    md_path.write_text(markdown, encoding="utf-8")
-    export_report_pdf(markdown, pdf_path)
-    export_report_docx(markdown, docx_path)
-    return markdown_for_gradio_preview(markdown), gr.update(value=gallery, visible=bool(gallery)), str(md_path), str(pdf_path), str(docx_path)
+    with tempfile.TemporaryDirectory(prefix=".report-build-", dir=REPORT_DIR) as temp_dir:
+        temp_root = Path(temp_dir)
+        temp_md = temp_root / md_path.name
+        temp_bundle = temp_root / bundle_path.name
+        temp_pdf = temp_root / pdf_path.name
+        temp_docx = temp_root / docx_path.name
+        temp_md.write_text(markdown, encoding="utf-8")
+        export_report_pdf(markdown, temp_pdf)
+        export_report_docx(markdown, temp_docx)
+        export_markdown_bundle(markdown, temp_bundle, REPORT_DIR)
+        temp_md.replace(md_path)
+        temp_bundle.replace(bundle_path)
+        temp_pdf.replace(pdf_path)
+        temp_docx.replace(docx_path)
+    return markdown_for_gradio_preview(markdown), gr.update(value=gallery, visible=bool(gallery)), str(bundle_path), str(pdf_path), str(docx_path)
 
 
 def generate_report_center(
@@ -7032,26 +7364,46 @@ def generate_report_with_progress(
             *skipped(),
         )
         markdown = make_report_markdown(detection, comparison, batch_items, report_type, report_language)
-        stem = f"dental_aux_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        report_prefix = {
+            "单图检测报告": "dental_single_report",
+            "多模型对比报告": "dental_comparison_report",
+            "批量检测报告": "dental_batch_report",
+            "综合报告": "dental_integrated_report",
+        }.get(report_type, "dental_report")
+        language_tag = "en" if report_language_is_en(report_language) else "zh"
+        stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
+        stem = f"{report_prefix}_{language_tag}_{stamp}"
         md_path = REPORT_DIR / f"{stem}.md"
+        bundle_path = REPORT_DIR / f"{stem}.zip"
         pdf_path = REPORT_DIR / f"{stem}.pdf"
         docx_path = REPORT_DIR / f"{stem}.docx"
-        md_path.write_text(markdown, encoding="utf-8")
-        yield (
-            detection_progress_update(62, "正在生成 PDF 报告", "Markdown 报告已完成，正在排版并导出 PDF 文件。"),
-            *skipped(),
-        )
-        export_report_pdf(markdown, pdf_path)
-        yield (
-            detection_progress_update(84, "正在生成 Word 报告", "PDF 已完成，正在生成可编辑的 Word 报告。"),
-            *skipped(),
-        )
-        export_report_docx(markdown, docx_path)
+        with tempfile.TemporaryDirectory(prefix=".report-build-", dir=REPORT_DIR) as temp_dir:
+            temp_root = Path(temp_dir)
+            temp_md = temp_root / md_path.name
+            temp_bundle = temp_root / bundle_path.name
+            temp_pdf = temp_root / pdf_path.name
+            temp_docx = temp_root / docx_path.name
+            temp_md.write_text(markdown, encoding="utf-8")
+            yield (
+                detection_progress_update(62, "正在生成 PDF 报告", "Markdown 内容已整理，正在排版并导出可检索 PDF。"),
+                *skipped(),
+            )
+            export_report_pdf(markdown, temp_pdf)
+            yield (
+                detection_progress_update(84, "正在生成 Word 报告", "PDF 已完成，正在生成含原生表格的可编辑 Word 报告。"),
+                *skipped(),
+            )
+            export_report_docx(markdown, temp_docx)
+            export_markdown_bundle(markdown, temp_bundle, REPORT_DIR)
+            temp_md.replace(md_path)
+            temp_bundle.replace(bundle_path)
+            temp_pdf.replace(pdf_path)
+            temp_docx.replace(docx_path)
         yield (
             detection_progress_hide(),
             markdown_for_gradio_preview(markdown),
             gr.update(value=gallery, visible=bool(gallery)),
-            str(md_path),
+            str(bundle_path),
             str(pdf_path),
             str(docx_path),
         )
@@ -7103,9 +7455,9 @@ def generate_batch_report_with_progress(items: list[dict[str, Any]] | None):
             detection_progress_update(32, "正在整理批量明细", "正在汇总逐图状态、疑似区域和复核优先级。"),
             *skipped(),
         )
-        md_path, csv_path = export_batch_report(records)
+        md_path, csv_path, bundle_path = export_batch_report(records)
         yield (
-            detection_progress_update(86, "正在准备报告预览", "Markdown 与 CSV 文件已生成，正在加载页面预览。"),
+            detection_progress_update(86, "正在准备报告预览", "Markdown 图文包与结构化 CSV 已生成，正在加载页面预览。"),
             *skipped(),
         )
         preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告未能生成。"
@@ -7113,7 +7465,7 @@ def generate_batch_report_with_progress(items: list[dict[str, Any]] | None):
             detection_progress_hide(),
             markdown_for_gradio_preview(preview_raw),
             gr.update(value=[], visible=False),
-            md_path,
+            bundle_path,
             csv_path,
         )
     except Exception as exc:
@@ -8951,12 +9303,24 @@ def native_ai_assistant_js() -> str:
 
   function currentChatMarkdown(contextMarkdown) {
     const now = new Date().toLocaleString();
+    const tableCell = value => String(value || "-").replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
     const lines = [
       "# 智诊管家问答记录",
       "",
-      "- 导出时间：" + now,
-      "- 分析范围：" + (scopeSelect.value || "-"),
-      "- 回答视图：" + (roleSelect.value || "-"),
+      "> 汇总当前检测上下文与本次问答，便于复核、归档和后续沟通。",
+      "",
+      "## 记录信息",
+      "| 项目 | 内容 |",
+      "|---|---|",
+      "| 文档类型 | 智诊管家问答记录 |",
+      "| 导出时间 | " + tableCell(now) + " |",
+      "| 分析范围 | " + tableCell(scopeSelect.value) + " |",
+      "| 回答视图 | " + tableCell(roleSelect.value) + " |",
+      "| AI 服务 | " + tableCell(currentProviderName()) + " |",
+      "",
+      "## 阅读提示",
+      "- 先核对检测上下文与影像范围，再阅读问答结论。",
+      "- 涉及低置信度、模型分歧或具体区域时，应回到原图进行人工复核。",
       "",
       contextMarkdown || "## 当前检测上下文摘要\n\n当前没有可用检测上下文。",
       "",
@@ -9008,33 +9372,62 @@ def native_ai_assistant_js() -> str:
   }
 
   async function exportChatPdf() {
-    setExportBusy(true);
-    setStatus("正在整理对话和检测上下文摘要…");
-    const contextMarkdown = await fetchExportContextMarkdown();
-    const markdown = currentChatMarkdown(contextMarkdown);
-    const html = renderMarkdown(markdown);
     const win = window.open("", "_blank", "width=960,height=720");
     if (!win) {
       setStatus("浏览器阻止了 PDF 导出窗口，请允许弹窗后重试。");
-      setExportBusy(false);
       return;
     }
-    win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>智诊管家问答记录</title>
+    setExportBusy(true);
+    setStatus("正在整理对话和检测上下文摘要…");
+    try {
+      win.document.title = "正在生成智诊管家问答记录";
+      win.document.body.innerHTML = "<p style='font-family:Microsoft YaHei,sans-serif;padding:32px;color:#334e68'>正在整理精排文档，请稍候…</p>";
+      const contextMarkdown = await fetchExportContextMarkdown();
+      const markdown = currentChatMarkdown(contextMarkdown);
+      const html = renderMarkdown(markdown);
+      win.document.open();
+      win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>智诊管家问答记录</title>
       <style>
-        body { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #0f172a; margin: 36px; line-height: 1.75; }
-        h1 { font-size: 28px; margin: 0 0 18px; }
-        h2 { margin-top: 28px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; }
-        h3 { margin-top: 20px; color: #1d4ed8; }
-        blockquote { border-left: 4px solid #bfdbfe; background: #f8fafc; padding: 8px 12px; color: #475569; }
-        table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-        th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: left; vertical-align: top; }
-        @media print { body { margin: 18mm; } }
+        :root { --navy:#0b263a; --blue:#123b55; --teal:#0f9d8a; --ink:#243b53; --muted:#66788a; --line:#d8e4ec; --pale:#f4f8fb; }
+        * { box-sizing: border-box; }
+        html { background: #edf3f6; }
+        body { width: min(920px, calc(100% - 36px)); margin: 24px auto; padding: 34px 42px 46px; border: 1px solid var(--line); border-radius: 16px; background: #fff; color: var(--ink); font-family: "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 14px; line-height: 1.72; box-shadow: 0 18px 44px rgba(15,43,63,.12); }
+        h1 { margin: -12px -20px 30px; padding: 34px 30px 30px; border-left: 7px solid var(--teal); border-radius: 12px; background: linear-gradient(135deg,var(--navy),var(--blue) 70%,#0f6b75); color:#fff; font-size: 30px; line-height:1.25; letter-spacing:-.02em; }
+        h2 { margin: 30px 0 14px; padding: 8px 12px; border-left: 4px solid var(--teal); border-radius: 0 8px 8px 0; background: linear-gradient(90deg,#eaf8f5,transparent); color:var(--blue); font-size:20px; }
+        h3 { margin: 22px 0 10px; padding-bottom: 7px; border-bottom: 1px solid var(--line); color:#0f766e; font-size:16px; break-after:avoid; }
+        p { margin: 7px 0 11px; }
+        ul,ol { padding-left: 24px; }
+        li { margin: 5px 0; }
+        blockquote { margin: 14px 0 20px; padding: 13px 16px; border:1px solid #bfe3dc; border-left:5px solid var(--teal); border-radius:10px; background:#eaf8f5; color:#234b4a; font-weight:700; }
+        .native-ai-table-wrap { width:100%; overflow-x:auto; margin:12px 0 22px; }
+        table { width:100%; border-collapse:separate; border-spacing:0; border:1px solid #cbdbe5; border-radius:10px; overflow:hidden; font-size:12px; }
+        th,td { padding:9px 11px; border-right:1px solid #e0e9ef; border-bottom:1px solid #e0e9ef; text-align:left; vertical-align:top; }
+        th { background:var(--blue); color:#fff; font-weight:800; }
+        tbody tr:nth-child(even) td { background:var(--pale); }
+        tr:last-child td { border-bottom:0; }
+        th:last-child,td:last-child { border-right:0; }
+        pre { overflow:auto; padding:14px; border:1px solid var(--line); border-radius:9px; background:#f7fafc; }
+        code { padding:2px 5px; border-radius:4px; background:#eaf3fa; color:#0f766e; }
+        hr { margin:28px 0; border:0; border-top:1px solid var(--line); }
+        @page { size:A4; margin:17mm 16mm 19mm; }
+        @media print {
+          html { background:#fff; }
+          body { width:auto; margin:0; padding:0; border:0; border-radius:0; box-shadow:none; print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+          h1 { margin-top:0; }
+          h1,h2,h3,blockquote,table { break-inside:avoid; }
+          a { color:inherit; text-decoration:none; }
+        }
       </style></head><body>${html}</body></html>`);
-    win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 300);
-    setStatus("已打开 PDF 打印窗口，可选择“另存为 PDF”；内容包含当前检测上下文摘要。");
-    setExportBusy(false);
+      win.document.close();
+      win.focus();
+      setTimeout(() => win.print(), 300);
+      setStatus("已打开精排 PDF 打印窗口，可选择“另存为 PDF”；内容包含封面信息、检测上下文与完整问答。");
+    } catch (error) {
+      try { win.close(); } catch (_) {}
+      setStatus("PDF 打印版生成失败：" + (error?.message || error));
+    } finally {
+      setExportBusy(false);
+    }
   }
 
   function addAssistantMessage(answer, options = {}) {
@@ -9588,9 +9981,9 @@ def build_app() -> gr.Blocks:
                         )
                         single_report_gallery = gr.Gallery(label="单图报告图片预览", columns=3, height=320, visible=False)
                     with gr.Row(elem_classes="report-download-row"):
-                        single_report_md = gr.DownloadButton("下载单图 Markdown 报告", elem_classes="report-download-action")
-                        single_report_pdf = gr.DownloadButton("下载单图 PDF 报告", elem_classes="report-download-action")
-                        single_report_docx = gr.DownloadButton("下载单图 Word 报告", elem_classes="report-download-action")
+                        single_report_md = gr.DownloadButton("下载 Markdown 图文包", elem_classes="report-download-action")
+                        single_report_pdf = gr.DownloadButton("下载高清 PDF", elem_classes="report-download-action")
+                        single_report_docx = gr.DownloadButton("下载可编辑 Word", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-compare", elem_classes=["dental-page"]):
             gr.HTML(
@@ -9743,9 +10136,9 @@ def build_app() -> gr.Blocks:
                         )
                         comparison_report_gallery = gr.Gallery(label="多模型报告图片预览", columns=3, height=320, visible=False)
                     with gr.Row(elem_classes="report-download-row"):
-                        comparison_report_md = gr.DownloadButton("下载对比 Markdown 报告", elem_classes="report-download-action")
-                        comparison_report_pdf = gr.DownloadButton("下载对比 PDF 报告", elem_classes="report-download-action")
-                        comparison_report_docx = gr.DownloadButton("下载对比 Word 报告", elem_classes="report-download-action")
+                        comparison_report_md = gr.DownloadButton("下载 Markdown 图文包", elem_classes="report-download-action")
+                        comparison_report_pdf = gr.DownloadButton("下载高清 PDF", elem_classes="report-download-action")
+                        comparison_report_docx = gr.DownloadButton("下载可编辑 Word", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-batch", elem_classes=["dental-page"]):
             gr.HTML(
@@ -9917,8 +10310,8 @@ def build_app() -> gr.Blocks:
                         )
                         batch_report_gallery = gr.Gallery(label="批量报告图片预览", columns=3, height=320, visible=False)
                     with gr.Row(elem_classes=["batch-download-row", "report-download-row"]):
-                        batch_md_file = gr.DownloadButton("下载批量 Markdown 报告", elem_classes="report-download-action")
-                        batch_csv_file = gr.DownloadButton("下载批量 CSV 报告", elem_classes="report-download-action")
+                        batch_md_file = gr.DownloadButton("下载 Markdown 图文包", elem_classes="report-download-action")
+                        batch_csv_file = gr.DownloadButton("下载结构化 CSV", elem_classes="report-download-action")
 
         with gr.Group(elem_id="page-history", elem_classes=["dental-page"]):
             gr.HTML(
@@ -10054,9 +10447,9 @@ def build_app() -> gr.Blocks:
                     report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
                     report_preview = gr.Markdown(report_empty_state_markup(), elem_classes="report-preview-panel")
                     with gr.Row(visible=False, elem_classes="report-download-row") as report_download_row:
-                        report_file = gr.DownloadButton("下载 Markdown 报告", visible=False, elem_classes="report-download-action")
-                        report_pdf_file = gr.DownloadButton("下载 PDF 报告", visible=False, elem_classes="report-download-action")
-                        report_docx_file = gr.DownloadButton("下载 Word 报告", visible=False, elem_classes="report-download-action")
+                        report_file = gr.DownloadButton("下载 Markdown 图文包", visible=False, elem_classes="report-download-action")
+                        report_pdf_file = gr.DownloadButton("下载高清 PDF", visible=False, elem_classes="report-download-action")
+                        report_docx_file = gr.DownloadButton("下载可编辑 Word", visible=False, elem_classes="report-download-action")
             archive_records_initial = report_archive_records()
             archive_choices_initial = [str(record["choice"]) for record in archive_records_initial]
             archive_record_initial = archive_records_initial[0] if archive_records_initial else None
@@ -10089,10 +10482,14 @@ def build_app() -> gr.Blocks:
                             elem_classes=["report-archive-summary-panel"],
                         )
                         with gr.Row(visible=bool(archive_files_initial), elem_classes=["report-archive-download-row"]) as report_archive_download_row:
-                            report_archive_md = gr.DownloadButton("Markdown", value=archive_files_initial.get(".md"), visible=bool(archive_files_initial.get(".md")))
-                            report_archive_pdf = gr.DownloadButton("PDF", value=archive_files_initial.get(".pdf"), visible=bool(archive_files_initial.get(".pdf")))
-                            report_archive_docx = gr.DownloadButton("Word", value=archive_files_initial.get(".docx"), visible=bool(archive_files_initial.get(".docx")))
-                            report_archive_csv = gr.DownloadButton("CSV", value=archive_files_initial.get(".csv"), visible=bool(archive_files_initial.get(".csv")))
+                            report_archive_md = gr.DownloadButton(
+                                "Markdown 图文包" if archive_files_initial.get(".zip") else "Markdown 源文档",
+                                value=archive_files_initial.get(".zip") or archive_files_initial.get(".md"),
+                                visible=bool(archive_files_initial.get(".zip") or archive_files_initial.get(".md")),
+                            )
+                            report_archive_pdf = gr.DownloadButton("高清 PDF", value=archive_files_initial.get(".pdf"), visible=bool(archive_files_initial.get(".pdf")))
+                            report_archive_docx = gr.DownloadButton("可编辑 Word", value=archive_files_initial.get(".docx"), visible=bool(archive_files_initial.get(".docx")))
+                            report_archive_csv = gr.DownloadButton("结构化 CSV", value=archive_files_initial.get(".csv"), visible=bool(archive_files_initial.get(".csv")))
                     with gr.Column(scale=8, elem_classes=["report-archive-preview-column"]):
                         report_archive_gallery_component = gr.Gallery(
                             value=archive_gallery_initial,
