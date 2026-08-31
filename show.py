@@ -102,3 +102,4 @@ if __name__ == "__main__":
 
     class_names = {0: "Caries", 1: "Periapical Lesion", 2: "Impacted"}
     view_dental_xray(img_path, txt_path, class_names)
+                                                                                            

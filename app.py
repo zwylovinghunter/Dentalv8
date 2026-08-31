@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from services.runtime_cache import configure_runtime_environment
+
+PROJECT_RUNTIME_PATHS = configure_runtime_environment()
+
 import json
 import base64
 import copy
@@ -1204,10 +1208,8 @@ def result_to_box_rows(result: dict[str, Any]) -> list[list[Any]]:
                 i,
                 box["class_name"],
                 round(box["confidence"], 4),
-                x1,
-                y1,
-                x2,
-                y2,
+                f"{float(box.get('area_ratio', 0.0)) * 100:.2f}%",
+                f"({x1:.0f}, {y1:.0f}) → ({x2:.0f}, {y2:.0f})",
                 box["risk_level"],
                 box["review_suggestion"],
             ]
@@ -1229,17 +1231,44 @@ def filtered_detection_rows(
     if class_filter and class_filter != "全部类别":
         rows = [row for row in rows if str(row[1]) == class_filter]
     if risk_filter and risk_filter != "全部风险":
-        rows = [row for row in rows if str(row[7]) == risk_filter]
+        rows = [row for row in rows if str(row[5]) == risk_filter]
     risk_rank = {"强烈建议人工复核": 0, "建议人工复核": 1, "可信度较高": 2}
     if sort_mode == "风险优先":
-        rows.sort(key=lambda row: (risk_rank.get(str(row[7]), 9), -float(row[2])))
+        rows.sort(key=lambda row: (risk_rank.get(str(row[5]), 9), float(row[2])))
     elif sort_mode == "置信度从高到低":
         rows.sort(key=lambda row: -float(row[2]))
     elif sort_mode == "置信度从低到高":
         rows.sort(key=lambda row: float(row[2]))
+    elif sort_mode == "区域占比从大到小":
+        rows.sort(key=lambda row: -float(str(row[3]).rstrip("%")))
+    elif sort_mode == "区域占比从小到大":
+        rows.sort(key=lambda row: float(str(row[3]).rstrip("%")))
     else:
         rows.sort(key=lambda row: int(row[0]))
     return rows
+
+
+def detection_filter_status_html(result: dict[str, Any] | None, rows: list[list[Any]]) -> str:
+    total = len((result or {}).get("boxes", []))
+    shown = len(rows)
+    state = "全部区域" if shown == total else "已应用筛选"
+    return (
+        "<div class='analysis-filter-status'>"
+        f"<span>{xml_escape(state)}</span><b>当前显示 {shown} / {total} 个疑似区域</b>"
+        "<small>点击表格任一行可直接联动到局部复核。</small>"
+        "</div>"
+    )
+
+
+def filtered_detection_outputs(
+    result: dict[str, Any] | None,
+    query: str = "",
+    class_filter: str = "全部类别",
+    risk_filter: str = "全部风险",
+    sort_mode: str = "按区域编号",
+) -> tuple[list[list[Any]], str]:
+    rows = filtered_detection_rows(result, query, class_filter, risk_filter, sort_mode)
+    return rows, detection_filter_status_html(result, rows)
 
 
 def detection_table_selected_region(result: dict[str, Any] | None, evt: gr.SelectData):
@@ -1574,6 +1603,151 @@ def detection_summary_cards(result: dict[str, Any] | None) -> str:
     return "\n".join(cards)
 
 
+def analysis_metric_card(label: str, value: Any, detail: str, tone: str = "blue") -> str:
+    tone = tone if tone in {"blue", "teal", "cyan", "violet", "amber", "rose", "slate"} else "blue"
+    value_text = str(value)
+    value_size = " is-long" if len(value_text) >= 10 else (" is-medium" if len(value_text) >= 7 else "")
+    value_title = xml_escape(value_text, {"'": "&apos;", '"': "&quot;"})
+    return (
+        f"<article class='analysis-kpi analysis-tone-{tone}'>"
+        f"<span>{xml_escape(str(label))}</span>"
+        f"<b class='analysis-kpi-value{value_size}' title='{value_title}'>{xml_escape(value_text)}</b>"
+        f"<small>{xml_escape(str(detail))}</small>"
+        "</article>"
+    )
+
+
+def analysis_distribution_html(items: list[tuple[str, int, str]]) -> str:
+    total = sum(max(0, int(count)) for _, count, _ in items)
+    if total <= 0:
+        return "<div class='analysis-distribution-empty'>暂无可统计项目</div>"
+    bars: list[str] = []
+    legends: list[str] = []
+    for label, raw_count, tone in items:
+        count = max(0, int(raw_count))
+        if not count:
+            continue
+        safe_tone = tone if tone in {"blue", "teal", "cyan", "violet", "amber", "rose", "slate"} else "blue"
+        share = count / total * 100
+        bars.append(
+            f"<span class='analysis-distribution-segment analysis-tone-{safe_tone}' "
+            f"style='--analysis-share:{share:.4f}%' title='{xml_escape(str(label))}：{count}'></span>"
+        )
+        legends.append(
+            f"<span><i class='analysis-dot analysis-tone-{safe_tone}'></i>"
+            f"{xml_escape(str(label))}<b>{count}</b></span>"
+        )
+    return (
+        "<div class='analysis-distribution-bar' aria-label='结果分布'>" + "".join(bars) + "</div>"
+        "<div class='analysis-distribution-legend'>" + "".join(legends) + "</div>"
+    )
+
+
+def analysis_empty_dashboard(eyebrow: str, title: str, description: str) -> str:
+    return (
+        "<section class='result-analysis-dashboard is-empty'>"
+        "<header class='analysis-dashboard-header'>"
+        "<div>"
+        f"<span class='analysis-eyebrow'>{xml_escape(eyebrow)}</span>"
+        f"<h3>{xml_escape(title)}</h3>"
+        f"<p>{xml_escape(description)}</p>"
+        "</div><span class='analysis-state-pill'>等待结果</span>"
+        "</header>"
+        "<div class='analysis-empty-state'><b>完成检测后自动生成</b>"
+        "<span>这里将展示关键指标、结果分布和优先复核提示。</span></div>"
+        "</section>"
+    )
+
+
+def analysis_table_heading_html(title: str, description: str, badge: str) -> str:
+    return (
+        "<div class='analysis-table-heading'>"
+        f"<div><span>{xml_escape(badge)}</span><h4>{xml_escape(title)}</h4>"
+        f"<p>{xml_escape(description)}</p></div>"
+        "</div>"
+    )
+
+
+def structured_result_overview_html(result: dict[str, Any] | None) -> str:
+    result = result if isinstance(result, dict) else {}
+    if not result:
+        return analysis_empty_dashboard("区域级数据", "结构化结果概览", "汇总疑似区域、类别、置信度与人工复核优先级。")
+    if result.get("status") != "success" or result.get("runtime_mode") != "real_yolo_cpu":
+        message = result.get("error_message") or "本次推理未形成可统计的结构化结果。"
+        return (
+            "<section class='result-analysis-dashboard has-error'>"
+            "<header class='analysis-dashboard-header'><div>"
+            "<span class='analysis-eyebrow'>区域级数据</span><h3>结构化结果概览</h3>"
+            f"<p>{xml_escape(str(message))}</p></div><span class='analysis-state-pill'>无法统计</span></header>"
+            "</section>"
+        )
+    boxes = [box for box in result.get("boxes", []) if isinstance(box, dict)]
+    classes: dict[str, int] = {}
+    risk_counts = {"强烈建议人工复核": 0, "建议人工复核": 0, "可信度较高": 0}
+    for box in boxes:
+        class_name = str(box.get("class_name") or "未命名类别")
+        classes[class_name] = classes.get(class_name, 0) + 1
+        level = str(box.get("risk_level") or "")
+        if level in risk_counts:
+            risk_counts[level] += 1
+    confidences = [float(box.get("confidence", 0.0)) for box in boxes]
+    review_count = risk_counts["强烈建议人工复核"] + risk_counts["建议人工复核"]
+    image_info = result.get("image_info", {}) if isinstance(result.get("image_info"), dict) else {}
+    resolution = f"{int(image_info.get('width', 0))} × {int(image_info.get('height', 0))}" if image_info.get("width") and image_info.get("height") else "—"
+    thresholds = result.get("thresholds", {}) if isinstance(result.get("thresholds"), dict) else {}
+    conf_threshold = float(thresholds.get("conf", 0.0))
+    iou_threshold = float(thresholds.get("iou", 0.0))
+    metrics = [
+        analysis_metric_card("疑似区域", len(boxes), "当前阈值下保留", "blue"),
+        analysis_metric_card("检出类别", len(classes), "按模型类别去重", "cyan"),
+        analysis_metric_card("需重点复核", review_count, "强烈建议或建议复核", "rose" if review_count else "teal"),
+        analysis_metric_card("平均置信度", f"{sum(confidences) / len(confidences):.3f}" if confidences else "—", "区域置信度均值", "violet"),
+        analysis_metric_card("最高置信度", f"{max(confidences):.3f}" if confidences else "—", "仅代表模型输出强度", "amber"),
+        analysis_metric_card("原图分辨率", resolution, f"推理 {float(result.get('inference_time_ms', 0.0)):.0f} ms", "slate"),
+    ]
+    risk_rank = {"强烈建议人工复核": 0, "建议人工复核": 1, "可信度较高": 2}
+    priority_boxes = sorted(
+        enumerate(boxes, 1),
+        key=lambda pair: (risk_rank.get(str(pair[1].get("risk_level")), 9), float(pair[1].get("confidence", 0.0))),
+    )[:3]
+    priority_rows: list[str] = []
+    for index, box in priority_boxes:
+        level = str(box.get("risk_level") or "常规人工复核")
+        tone = "rose" if level == "强烈建议人工复核" else ("amber" if level == "建议人工复核" else "teal")
+        priority = "P1" if tone == "rose" else ("P2" if tone == "amber" else "P3")
+        priority_rows.append(
+            f"<article class='analysis-priority-row analysis-tone-{tone}'><span>{priority}</span>"
+            f"<div><b>区域 {index} · {xml_escape(str(box.get('class_name', '-')))}</b>"
+            f"<small>置信度 {float(box.get('confidence', 0.0)):.3f} · {xml_escape(level)}</small></div></article>"
+        )
+    if not priority_rows:
+        priority_rows.append("<div class='analysis-compact-empty'>当前阈值下没有疑似区域，仍建议结合原图完成常规复核。</div>")
+    class_chips = "".join(
+        f"<span>{xml_escape(name)}<b>{count}</b></span>"
+        for name, count in sorted(classes.items(), key=lambda item: (-item[1], item[0]))
+    ) or "<span>暂无检出类别<b>0</b></span>"
+    return (
+        "<section class='result-analysis-dashboard'>"
+        "<header class='analysis-dashboard-header'><div>"
+        "<span class='analysis-eyebrow'>区域级数据</span><h3>结构化结果概览</h3>"
+        f"<p>{xml_escape(str(result.get('model_name', '-')))} · 置信度阈值 {conf_threshold:.2f} · IoU 阈值 {iou_threshold:.2f}</p>"
+        f"</div><span class='analysis-state-pill'>共 {len(boxes)} 个区域</span></header>"
+        "<div class='analysis-kpi-grid'>" + "".join(metrics) + "</div>"
+        "<div class='analysis-insight-grid'>"
+        "<article class='analysis-insight-card'><header><b>复核优先级分布</b><span>按现有置信度规则</span></header>"
+        + analysis_distribution_html([
+            ("强烈建议复核", risk_counts["强烈建议人工复核"], "rose"),
+            ("建议复核", risk_counts["建议人工复核"], "amber"),
+            ("可信度较高", risk_counts["可信度较高"], "teal"),
+        ])
+        + "<div class='analysis-class-chips'>" + class_chips + "</div></article>"
+        "<article class='analysis-insight-card'><header><b>优先复核队列</b><span>最多展示 3 个区域</span></header>"
+        + "".join(priority_rows) + "</article></div>"
+        "<div class='analysis-guidance'><b>如何理解：</b>复核优先级由置信度规则生成；置信度不是患病概率，也不表示病变严重程度。点击下方表格行可直接进入联动复核。</div>"
+        "</section>"
+    )
+
+
 def region_choices(result: dict[str, Any] | None) -> list[str]:
     if not result or not result.get("boxes"):
         return []
@@ -1894,6 +2068,17 @@ def class_knowledge_cards(result: dict[str, Any] | None) -> str:
     return "\n".join(cards)
 
 
+def collapsible_class_knowledge_html(result: dict[str, Any] | None) -> str:
+    return (
+        "<details class='analysis-knowledge-details'>"
+        "<summary><span>已检出类别说明与复核知识</span><i aria-hidden='true'>▾</i></summary>"
+        "<div class='analysis-knowledge-body'>"
+        f"{class_knowledge_cards(result)}"
+        "</div>"
+        "</details>"
+    )
+
+
 def steps_to_rows(result: dict[str, Any]) -> list[list[Any]]:
     return [[s["步骤"], s["状态"], s["耗时(ms)"], s["说明"]] for s in result.get("process_steps", [])]
 
@@ -2096,7 +2281,7 @@ def run_single_detection(
             gr.update(value=detection_summary_cards(None), visible=False),
             gr.update(value=[], visible=False),
             gr.update(value="请先上传一张图片。", visible=False),
-            gr.update(value=class_knowledge_cards(None), visible=False),
+            gr.update(value=collapsible_class_knowledge_html(None), visible=False),
             {},
             gr.Dropdown(choices=[], value=None),
             *dashboard_outputs(),
@@ -2112,7 +2297,7 @@ def run_single_detection(
         gr.update(value=detection_summary_cards(None), visible=False),
         gr.update(value=[], visible=False),
         gr.update(value="检测进行中，请稍候。", visible=False),
-        gr.update(value=class_knowledge_cards(None), visible=False),
+        gr.update(value=collapsible_class_knowledge_html(None), visible=False),
         {},
         gr.Dropdown(choices=[], value=None),
         gr.skip(),
@@ -2132,7 +2317,7 @@ def run_single_detection(
         gr.update(value=detection_summary_cards(None), visible=False),
         gr.update(value=[], visible=False),
         gr.update(value="模型正在推理。", visible=False),
-        gr.update(value=class_knowledge_cards(None), visible=False),
+        gr.update(value=collapsible_class_knowledge_html(None), visible=False),
         {},
         gr.Dropdown(choices=[], value=None),
         gr.skip(),
@@ -2153,7 +2338,7 @@ def run_single_detection(
         gr.update(value=detection_summary_cards(None), visible=False),
         gr.update(value=[], visible=False),
         gr.update(value="正在整理结果。", visible=False),
-        gr.update(value=class_knowledge_cards(None), visible=False),
+        gr.update(value=collapsible_class_knowledge_html(None), visible=False),
         {},
         gr.Dropdown(choices=[], value=None),
         gr.skip(),
@@ -2184,7 +2369,7 @@ def run_single_detection(
         gr.update(value=detection_summary_cards(result), visible=True),
         gr.update(value=result_to_box_rows(result), visible=True),
         gr.update(value=explanation_markdown(result), visible=True),
-        gr.update(value=class_knowledge_cards(result), visible=True),
+        gr.update(value=collapsible_class_knowledge_html(result), visible=True),
         result,
         gr.Dropdown(choices=choices, value=choices[0] if choices else None),
         *deferred_dashboard_outputs(),
@@ -2200,7 +2385,7 @@ def reset_single_detection_outputs():
         gr.update(value=detection_summary_cards(None), visible=False),
         gr.update(value=[], visible=False),
         gr.update(value="等待检测。", visible=False),
-        gr.update(value=class_knowledge_cards(None), visible=False),
+        gr.update(value=collapsible_class_knowledge_html(None), visible=False),
         {},
         gr.Dropdown(choices=[], value=None),
         *dashboard_outputs(),
@@ -2275,8 +2460,9 @@ def bbox_iou(box_a: list[float], box_b: list[float]) -> float:
 
 
 def analyze_model_consistency(results: list[dict[str, Any]], iou_threshold: float = 0.35) -> list[dict[str, Any]]:
+    valid = successful_results(results)
     detections: list[dict[str, Any]] = []
-    for result in successful_results(results):
+    for result in valid:
         for box in result.get("boxes", []):
             detections.append(
                 {
@@ -2291,7 +2477,7 @@ def analyze_model_consistency(results: list[dict[str, Any]], iou_threshold: floa
         target_group = None
         for group in groups:
             if any(
-                det["class_name"] == item["class_name"] and bbox_iou(det["bbox"], item["bbox"]) >= iou_threshold
+                bbox_iou(det["bbox"], item["bbox"]) >= iou_threshold
                 for item in group
             ):
                 target_group = group
@@ -2303,17 +2489,39 @@ def analyze_model_consistency(results: list[dict[str, Any]], iou_threshold: floa
     rows = []
     for idx, group in enumerate(groups, 1):
         models = sorted({item["model"] for item in group})
+        classes = sorted({str(item.get("class_name") or "-") for item in group})
         confs = [float(item["confidence"]) for item in group]
-        high = len(models) >= 2
+        class_conflict = any(
+            left["model"] != right["model"]
+            and left["class_name"] != right["class_name"]
+            and bbox_iou(left["bbox"], right["bbox"]) >= iou_threshold
+            for left_index, left in enumerate(group)
+            for right in group[left_index + 1:]
+        )
+        if class_conflict:
+            conclusion = "类别冲突"
+            suggestion = "不同模型在相近位置给出不同类别，建议优先结合原图和局部放大图人工判断。"
+        elif len(models) > 1 and len(models) == len(valid):
+            conclusion = "全模型共识"
+            suggestion = "所有成功模型在相近位置检出同类疑似区域，仍需结合原始影像人工复核。"
+        elif len(models) > 1:
+            conclusion = "部分模型共识"
+            suggestion = "部分模型在相近位置检出同类疑似区域，建议核对未检出模型与原始影像。"
+        else:
+            conclusion = "单模型独有"
+            suggestion = "仅单个模型在该位置检出疑似区域，建议结合原始影像排查误检或漏检。"
         rows.append(
             {
                 "区域编号": idx,
                 "涉及模型": "、".join(models),
+                "模型票数": len(models),
                 "最高置信度": max(confs) if confs else 0.0,
+                "最低置信度": min(confs) if confs else 0.0,
                 "平均置信度": sum(confs) / len(confs) if confs else 0.0,
-                "一致性等级": "高一致性疑似区域" if high else "低一致性疑似区域",
-                "复核建议": "多个模型在相近位置检测到疑似区域，建议人工重点复核。" if high else "仅单个模型检测到，建议结合原始影像人工判断。",
-                "类别": group[0].get("class_name", "-"),
+                "置信度差": (max(confs) - min(confs)) if confs else 0.0,
+                "一致性等级": conclusion,
+                "复核建议": suggestion,
+                "类别": " / ".join(classes),
             }
         )
     return rows
@@ -2339,15 +2547,18 @@ def system_recommendation(results: list[dict[str, Any]]) -> str:
     ok = successful_results(results)
     if not ok:
         return f"### 系统推荐结论\n\n当前没有成功的真实推理结果，无法生成模型推荐。\n\n{DISCLAIMER}"
-    high_rows = [row for row in analyze_model_consistency(results) if row["一致性等级"] == "高一致性疑似区域"]
+    consensus_rows = [
+        row for row in analyze_model_consistency(results)
+        if row["一致性等级"] in {"全模型共识", "部分模型共识"}
+    ]
     lines = [
         "### 系统推荐结论",
         "- 速度优先：推荐均衡型基线模型。",
         "- 精细定位优先：推荐高精度牙齿病变定位模型。",
         "- 初筛和减少漏检优先：推荐高召回牙齿病变检测模型。",
     ]
-    if high_rows:
-        lines.append("- 当前存在多模型相近检测区域，疑似区域稳定性较高，建议人工重点复核。")
+    if consensus_rows:
+        lines.append("- 当前存在多模型同类别的相近检测区域，建议结合原图进行人工重点复核。")
     else:
         lines.append("- 当前不同模型结果差异较明显，建议结合原始影像人工判断。")
     lines.extend(["", DISCLAIMER])
@@ -2488,7 +2699,7 @@ def run_model_comparison(
         detection_empty_state_update("compare", False),
         *slider_updates,
         gr.update(value=compare_rows(results), visible=True),
-        gr.update(value=consistency_rows(results), visible=True),
+        gr.update(value=consistency_analysis_rows(results), visible=True),
         gr.update(value=summary, visible=True),
         results,
         gr.Dropdown(choices=linked_choices, value=linked_choices[0] if linked_choices else None),
@@ -2809,6 +3020,307 @@ def batch_priority_markdown(items: list[dict[str, Any]] | None, limit: int = 12)
     return "\n".join(lines)
 
 
+def consistency_analysis_rows(results: list[dict[str, Any]] | None) -> list[list[Any]]:
+    valid_count = len(successful_results(results or []))
+    rows: list[list[Any]] = []
+    for item in analyze_model_consistency(results or []):
+        votes = int(item.get("模型票数", 0))
+        conclusion = str(item.get("一致性等级") or "单模型独有")
+        rows.append(
+            [
+                item["区域编号"],
+                item.get("类别", "-"),
+                f"{votes}/{valid_count or 0}",
+                item["涉及模型"],
+                f"{float(item.get('最低置信度', 0.0)):.3f} – {float(item.get('最高置信度', 0.0)):.3f}",
+                f"{float(item.get('置信度差', 0.0)):.3f}",
+                f"{float(item.get('平均置信度', 0.0)):.3f}",
+                conclusion,
+                item["复核建议"],
+            ]
+        )
+    return rows
+
+
+def comparison_difference_rows(results: list[dict[str, Any]] | None) -> list[list[Any]]:
+    return [
+        [row["类型"], row["模型/区域"], row["IoU"], row["说明"], row["建议"]]
+        for row in model_difference_attribution(results or [])
+    ]
+
+
+def batch_analysis_rows(items: list[dict[str, Any]] | None) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for index, item in enumerate(items or [], 1):
+        result = item.get("result", {}) if isinstance(item, dict) and isinstance(item.get("result"), dict) else {}
+        success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
+        boxes = [box for box in result.get("boxes", []) if isinstance(box, dict)] if success else []
+        classes = "、".join(sorted({str(box.get("class_name")) for box in boxes if box.get("class_name")})) or "—"
+        rows.append(
+            [
+                index,
+                item.get("image_name", "-") if isinstance(item, dict) else "-",
+                status_text(result),
+                len(boxes),
+                f"{float(result.get('avg_confidence', 0.0)):.3f}" if boxes else "—",
+                f"{float(result.get('max_confidence', 0.0)):.3f}" if boxes else "—",
+                overall_review_level(result),
+                classes,
+                f"{float(result.get('inference_time_ms', 0.0)):.2f}" if success else "—",
+                str(result.get("error_message") or ""),
+            ]
+        )
+    return rows
+
+
+def filtered_batch_analysis_rows(
+    items: list[dict[str, Any]] | None,
+    query: str = "",
+    status_filter: str = "全部状态",
+    review_filter: str = "全部复核等级",
+    sort_mode: str = "复核优先",
+) -> list[list[Any]]:
+    pairs = list(zip(items or [], batch_analysis_rows(items)))
+    needle = str(query or "").strip().casefold()
+    if needle:
+        pairs = [(item, row) for item, row in pairs if needle in " ".join(str(value) for value in row).casefold()]
+    if status_filter == "成功":
+        pairs = [
+            (item, row) for item, row in pairs
+            if isinstance(item, dict)
+            and item.get("result", {}).get("status") == "success"
+            and item.get("result", {}).get("runtime_mode") == "real_yolo_cpu"
+        ]
+    elif status_filter == "失败或未完成":
+        pairs = [
+            (item, row) for item, row in pairs
+            if not (
+                isinstance(item, dict)
+                and item.get("result", {}).get("status") == "success"
+                and item.get("result", {}).get("runtime_mode") == "real_yolo_cpu"
+            )
+        ]
+    if review_filter and review_filter != "全部复核等级":
+        pairs = [(item, row) for item, row in pairs if str(row[6]) == review_filter]
+    severity = {
+        "强烈建议人工复核": 0,
+        "建议人工复核": 1,
+        "常规人工复核": 2,
+        "当前阈值下无疑似区域": 3,
+        "无法评估": 4,
+    }
+    if sort_mode == "疑似区域从多到少":
+        pairs.sort(key=lambda pair: (-int(pair[1][3]), int(pair[1][0])))
+    elif sort_mode == "最高置信度从高到低":
+        pairs.sort(key=lambda pair: (-float(pair[1][5]) if pair[1][5] != "—" else 1.0, int(pair[1][0])))
+    elif sort_mode == "推理耗时从长到短":
+        pairs.sort(key=lambda pair: (-float(pair[1][8]) if pair[1][8] != "—" else 1.0, int(pair[1][0])))
+    elif sort_mode == "图片顺序":
+        pairs.sort(key=lambda pair: int(pair[1][0]))
+    else:
+        pairs.sort(key=lambda pair: (severity.get(str(pair[1][6]), 9), -int(pair[1][3]), int(pair[1][0])))
+    return [row for _, row in pairs]
+
+
+def batch_filter_status_html(items: list[dict[str, Any]] | None, rows: list[list[Any]]) -> str:
+    total = len(items or [])
+    return (
+        "<div class='analysis-filter-status'><span>批量明细</span>"
+        f"<b>当前显示 {len(rows)} / {total} 张影像</b>"
+        "<small>筛选只改变当前表格视图，不会删除检测结果。</small></div>"
+    )
+
+
+def filtered_batch_analysis_outputs(
+    items: list[dict[str, Any]] | None,
+    query: str = "",
+    status_filter: str = "全部状态",
+    review_filter: str = "全部复核等级",
+    sort_mode: str = "复核优先",
+) -> tuple[list[list[Any]], str]:
+    rows = filtered_batch_analysis_rows(items, query, status_filter, review_filter, sort_mode)
+    return rows, batch_filter_status_html(items, rows)
+
+
+def batch_analysis_overview_html(items: list[dict[str, Any]] | None) -> str:
+    items = [item for item in (items or []) if isinstance(item, dict)]
+    if not items:
+        return analysis_empty_dashboard("批次级分析", "批量检测概览", "汇总处理状态、疑似区域、复核等级和优先查看影像。")
+    successful = [
+        item for item in items
+        if item.get("result", {}).get("status") == "success"
+        and item.get("result", {}).get("runtime_mode") == "real_yolo_cpu"
+    ]
+    failed = len(items) - len(successful)
+    all_boxes = [box for item in successful for box in item.get("result", {}).get("boxes", []) if isinstance(box, dict)]
+    confidences = [float(box.get("confidence", 0.0)) for box in all_boxes]
+    review_levels = {
+        "强烈建议人工复核": 0,
+        "建议人工复核": 0,
+        "常规人工复核": 0,
+        "当前阈值下无疑似区域": 0,
+        "无法评估": 0,
+    }
+    class_counts: dict[str, int] = {}
+    for item in items:
+        result = item.get("result", {}) if isinstance(item.get("result"), dict) else {}
+        level = overall_review_level(result)
+        review_levels[level] = review_levels.get(level, 0) + 1
+        for box in result.get("boxes", []):
+            if not isinstance(box, dict):
+                continue
+            name = str(box.get("class_name") or "未命名类别")
+            class_counts[name] = class_counts.get(name, 0) + 1
+    focus_count = review_levels.get("强烈建议人工复核", 0) + review_levels.get("建议人工复核", 0)
+    success_rate = len(successful) / len(items) * 100 if items else 0.0
+    metrics = [
+        analysis_metric_card("本批影像", len(items), "已进入本轮队列", "blue"),
+        analysis_metric_card("处理成功", len(successful), f"成功率 {success_rate:.0f}%", "teal"),
+        analysis_metric_card("失败或未完成", failed, "可在逐图复核区重试", "rose" if failed else "slate"),
+        analysis_metric_card("疑似区域总数", len(all_boxes), "所有成功影像合计", "cyan"),
+        analysis_metric_card("重点复核影像", focus_count, "按影像去重统计", "amber" if focus_count else "teal"),
+        analysis_metric_card("区域平均 / 最高", f"{sum(confidences) / len(confidences):.3f} / {max(confidences):.3f}" if confidences else "— / —", "按全部区域加权", "violet"),
+    ]
+    severity = {
+        "强烈建议人工复核": 4,
+        "建议人工复核": 3,
+        "常规人工复核": 2,
+        "当前阈值下无疑似区域": 1,
+        "无法评估": 0,
+    }
+    ranked: list[tuple[int, int, float, int, dict[str, Any]]] = []
+    for index, item in enumerate(items, 1):
+        result = item.get("result", {}) if isinstance(item.get("result"), dict) else {}
+        ranked.append((severity.get(overall_review_level(result), 0), int(result.get("box_count", 0)), float(result.get("max_confidence", 0.0)), index, item))
+    ranked.sort(reverse=True)
+    priority_rows: list[str] = []
+    for rank, (_, box_count, max_confidence, image_index, item) in enumerate(ranked[:3], 1):
+        result = item.get("result", {}) if isinstance(item.get("result"), dict) else {}
+        level = overall_review_level(result)
+        tone = "rose" if level == "强烈建议人工复核" else ("amber" if level == "建议人工复核" else "blue")
+        priority_rows.append(
+            f"<article class='analysis-priority-row analysis-tone-{tone}'><span>P{rank}</span><div>"
+            f"<b>图片 {image_index} · {xml_escape(str(item.get('image_name', '-')))}</b>"
+            f"<small>{box_count} 个疑似区域 · 最高置信度 {max_confidence:.3f} · {xml_escape(level)}</small>"
+            "</div></article>"
+        )
+    class_chips = "".join(
+        f"<span>{xml_escape(name)}<b>{count}</b></span>"
+        for name, count in sorted(class_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:8]
+    ) or "<span>暂无检出类别<b>0</b></span>"
+    first_result = successful[0].get("result", {}) if successful else {}
+    thresholds = first_result.get("thresholds", {}) if isinstance(first_result.get("thresholds"), dict) else {}
+    model_name = first_result.get("model_name", "未形成成功结果")
+    return (
+        "<section class='result-analysis-dashboard'>"
+        "<header class='analysis-dashboard-header'><div><span class='analysis-eyebrow'>批次级分析</span>"
+        "<h3>批量检测概览</h3>"
+        f"<p>{xml_escape(str(model_name))} · 置信度阈值 {float(thresholds.get('conf', 0.0)):.2f} · IoU 阈值 {float(thresholds.get('iou', 0.0)):.2f}</p>"
+        f"</div><span class='analysis-state-pill'>已处理 {len(items)} 张</span></header>"
+        "<div class='analysis-kpi-grid'>" + "".join(metrics) + "</div>"
+        "<div class='analysis-insight-grid'>"
+        "<article class='analysis-insight-card'><header><b>影像复核等级分布</b><span>按图片统计</span></header>"
+        + analysis_distribution_html([
+            ("强烈建议复核", review_levels.get("强烈建议人工复核", 0), "rose"),
+            ("建议复核", review_levels.get("建议人工复核", 0), "amber"),
+            ("常规复核", review_levels.get("常规人工复核", 0), "blue"),
+            ("无疑似区域", review_levels.get("当前阈值下无疑似区域", 0), "teal"),
+            ("无法评估", review_levels.get("无法评估", 0), "slate"),
+        ])
+        + "<div class='analysis-class-chips'>" + class_chips + "</div></article>"
+        "<article class='analysis-insight-card'><header><b>优先查看影像</b><span>综合复核等级与区域数</span></header>"
+        + "".join(priority_rows) + "</article></div>"
+        "<div class='analysis-guidance'><b>统计口径：</b>成功率仅统计真实 YOLO CPU 推理完成的影像；平均置信度按全部疑似区域加权，重点复核影像按图片去重。</div>"
+        "</section>"
+    )
+
+
+def comparison_difference_update(results: list[dict[str, Any]] | None) -> Any:
+    rows = comparison_difference_rows(results)
+    return gr.update(value=rows, visible=bool(rows))
+
+
+def comparison_analysis_overview_html(results: list[dict[str, Any]] | None) -> str:
+    results = [item for item in (results or []) if isinstance(item, dict)]
+    if not results:
+        return analysis_empty_dashboard("跨模型分析", "一致性与分歧概览", "汇总模型运行表现、区域共识和需要优先人工判断的分歧。")
+    valid = successful_results(results)
+    if not valid:
+        return (
+            "<section class='result-analysis-dashboard has-error'><header class='analysis-dashboard-header'><div>"
+            "<span class='analysis-eyebrow'>跨模型分析</span><h3>一致性与分歧概览</h3>"
+            "<p>当前没有成功的真实推理结果，无法形成模型共识统计。</p>"
+            f"</div><span class='analysis-state-pill'>有效模型 0/{len(results)}</span></header></section>"
+        )
+    groups = analyze_model_consistency(results)
+    valid_count = len(valid)
+    full = sum(1 for item in groups if item.get("一致性等级") == "全模型共识")
+    partial = sum(1 for item in groups if item.get("一致性等级") == "部分模型共识")
+    unique = sum(1 for item in groups if item.get("一致性等级") == "单模型独有")
+    conflicts = sum(1 for item in groups if item.get("一致性等级") == "类别冲突")
+    differences = model_difference_attribution(results)
+    total_boxes = sum(int(item.get("box_count", 0)) for item in valid)
+    all_confidences = [float(box.get("confidence", 0.0)) for item in valid for box in item.get("boxes", [])]
+    fastest = min(valid, key=lambda item: float(item.get("inference_time_ms", float("inf"))))
+    metrics = [
+        analysis_metric_card("有效模型", f"{valid_count}/{len(results)}", "成功完成真实推理", "blue"),
+        analysis_metric_card("候选区域", total_boxes, "各模型检测框合计", "cyan"),
+        analysis_metric_card("全模型共识", full, f"{valid_count}/{valid_count} 模型同类重叠", "teal"),
+        analysis_metric_card("部分共识", partial, "至少两个模型同类重叠", "violet"),
+        analysis_metric_card("单模型独有", unique, "需要结合原图排查", "amber" if unique else "slate"),
+        analysis_metric_card("类别冲突", conflicts, "按空间位置簇去重", "rose" if conflicts else "teal"),
+    ]
+    priority_rows: list[str] = []
+    for row in differences[:4]:
+        conflict = row.get("类型") == "类别冲突"
+        tone = "rose" if conflict else "amber"
+        priority = "P1" if conflict else "P2"
+        priority_rows.append(
+            f"<article class='analysis-priority-row analysis-tone-{tone}'><span>{priority}</span><div>"
+            f"<b>{xml_escape(str(row.get('类型', '模型分歧')))}</b>"
+            f"<small>{xml_escape(str(row.get('模型/区域', '-')))} · {xml_escape(str(row.get('说明', '')))}</small>"
+            "</div></article>"
+        )
+    if not priority_rows:
+        priority_rows.append("<div class='analysis-compact-empty'>暂未发现类别冲突或单模型独有区域，仍需逐区核对原始影像。</div>")
+    model_cards: list[str] = []
+    for result in results:
+        success = result in valid
+        status = "推理成功" if success else status_text(result)
+        detail = (
+            f"疑似区域 {int(result.get('box_count', 0))} · 平均置信度 {float(result.get('avg_confidence', 0.0)):.3f} · {float(result.get('inference_time_ms', 0.0)):.0f} ms"
+            if success else str(result.get("error_message") or "未参与有效统计")
+        )
+        model_cards.append(
+            "<article class='analysis-model-card'>"
+            f"<div><b>{xml_escape(str(result.get('model_name', '-')))}</b><span>{xml_escape(status)}</span></div>"
+            f"<p>{xml_escape(detail)}</p><small>{xml_escape(MODEL_RECOMMEND_SCENES.get(str(result.get('model_key', '')), '-'))}</small>"
+            "</article>"
+        )
+    average_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
+    return (
+        "<section class='result-analysis-dashboard'>"
+        "<header class='analysis-dashboard-header'><div><span class='analysis-eyebrow'>跨模型分析</span>"
+        "<h3>一致性与分歧概览</h3>"
+        f"<p>先按 IoU ≥ 0.35 聚合空间位置，再判断类别共识 · 检测框平均置信度 {average_confidence:.3f} · 最快模型 {xml_escape(str(fastest.get('model_name', '-')))}</p>"
+        f"</div><span class='analysis-state-pill'>有效模型 {valid_count}/{len(results)}</span></header>"
+        "<div class='analysis-kpi-grid'>" + "".join(metrics) + "</div>"
+        "<div class='analysis-insight-grid'>"
+        "<article class='analysis-insight-card'><header><b>区域共识分布</b><span>按空间位置簇互斥统计</span></header>"
+        + analysis_distribution_html([
+            ("全模型共识", full, "teal"),
+            ("部分共识", partial, "violet"),
+            ("类别冲突", conflicts, "rose"),
+            ("单模型独有", unique, "amber"),
+        ])
+        + "<div class='analysis-model-grid'>" + "".join(model_cards) + "</div></article>"
+        "<article class='analysis-insight-card'><header><b>优先复核队列</b><span>类别冲突优先</span></header>"
+        + "".join(priority_rows) + "</article></div>"
+        "<div class='analysis-guidance'><b>如何理解：</b>多模型共识只表示模型输出相近，不等同于诊断正确；冲突和独有区域应优先结合原图与局部放大图人工判断。</div>"
+        "</section>"
+    )
+
+
 def csv_safe_text(value: Any) -> str:
     """Prevent spreadsheet software from interpreting user-controlled text as a formula."""
     text = "" if value is None else str(value)
@@ -3095,7 +3607,7 @@ def run_batch_detection(
                 f"第 {idx}/{total_files} 张已完成",
                 f"{image_name} 已完成检测，正在继续处理剩余影像。",
             ),
-            rows=[batch_result_row(item) for item in items],
+            rows=batch_analysis_rows(items),
             preview=None,
         )
     for deferred_index, file_obj in enumerate(deferred_files, total_files + 1):
@@ -3112,7 +3624,7 @@ def run_batch_detection(
         items.append({"image_name": image_name, "result": deferred_result})
     yield batch_detection_running_outputs(
         detection_progress_update(92, "正在整理批量结果", "正在整理结果表、图片预览和联动查看区域。"),
-        rows=[batch_result_row(item) for item in items],
+        rows=batch_analysis_rows(items),
     )
     result_errors: list[str] = []
     try:
@@ -3120,7 +3632,7 @@ def run_batch_detection(
     except Exception as exc:
         result_errors.append(f"历史记录保存失败：{exc}")
     update_latest_ai_context(batch_items=items)
-    rows = [batch_result_row(item) for item in items]
+    rows = batch_analysis_rows(items)
     linked_choices = batch_region_choices(items)
     image_choices = batch_image_choices(items)
     selected_image = batch_image_default_choice(items)
@@ -3231,7 +3743,7 @@ def retry_batch_item(
     yield (
         detection_progress_hide(),
         batch_task_list_html(records),
-        gr.update(value=[batch_result_row(record) for record in records], visible=True),
+        gr.update(value=batch_analysis_rows(records), visible=True),
         gr.skip(),
         gr.update(value=batch_image_explanation_markdown(records, batch_image_choices(records)[index]), visible=True),
         gr.update(value=batch_image_knowledge_html(records, batch_image_choices(records)[index])),
@@ -4574,8 +5086,10 @@ def chat_auxiliary_context(image: Any, preset: str, comparison: list[dict[str, A
         "image_quality_precheck": quality,
         "threshold_preset": preset or "未选择",
         "consistency_summary": {
-            "high_consistency_count": sum(1 for item in consistency if item["一致性等级"] == "高一致性疑似区域"),
-            "low_consistency_count": sum(1 for item in consistency if item["一致性等级"] == "低一致性疑似区域"),
+            "full_consensus_count": sum(1 for item in consistency if item["一致性等级"] == "全模型共识"),
+            "partial_consensus_count": sum(1 for item in consistency if item["一致性等级"] == "部分模型共识"),
+            "class_conflict_count": sum(1 for item in consistency if item["一致性等级"] == "类别冲突"),
+            "single_model_unique_count": sum(1 for item in consistency if item["一致性等级"] == "单模型独有"),
         },
         "model_difference_attribution": model_difference_attribution(comparison or [])[:12],
     }
@@ -4612,11 +5126,11 @@ def model_difference_attribution(results: list[dict[str, Any]], iou_threshold: f
         other_boxes = [box for other in valid if other is not result for box in other.get("boxes", [])]
         model_key = result.get("model_key", "")
         for box_index, box in enumerate(result.get("boxes", []), 1):
-            same_class_match = any(
-                box.get("class_name") == other_box.get("class_name") and bbox_iou(box["bbox_xyxy"], other_box["bbox_xyxy"]) >= iou_threshold
+            spatial_match = any(
+                bbox_iou(box["bbox_xyxy"], other_box["bbox_xyxy"]) >= iou_threshold
                 for other_box in other_boxes
             )
-            if same_class_match:
+            if spatial_match:
                 continue
             if model_key == "high_recall":
                 kind = "仅高召回模型检出"
@@ -4777,7 +5291,13 @@ def contextual_followup_questions(
             add(f"{most[0]}检出 {most[1]} 个、{least[0]}检出 {least[1]} 个，数量差异来自哪里？")
 
         consistency = analyze_model_consistency(valid_comparison)
-        high_consistency = next((item for item in consistency if item.get("一致性等级") == "高一致性疑似区域"), None)
+        high_consistency = next(
+            (
+                item for item in consistency
+                if item.get("一致性等级") in {"全模型共识", "部分模型共识"}
+            ),
+            None,
+        )
         if high_consistency:
             class_name = followup_short_text(high_consistency.get("类别") or "该类别", 16)
             model_names = followup_short_text(high_consistency.get("涉及模型") or "多个模型", 28)
@@ -9921,18 +10441,45 @@ def build_app() -> gr.Blocks:
                         )
                         det_explain = gr.Markdown("等待检测。", elem_classes="det-explain", visible=False)
                 with gr.Group(elem_classes="structured-result-panel"):
+                    det_structured_overview = gr.HTML(
+                        structured_result_overview_html(None),
+                        elem_classes=["result-analysis-overview", "single-structured-overview"],
+                    )
                     with gr.Row(elem_classes="result-filter-bar"):
                         det_search = gr.Textbox(label="搜索结果", placeholder="搜索类别、风险或建议", lines=1)
                         det_class_filter = gr.Dropdown(["全部类别", *CLASS_KNOWLEDGE.keys()], value="全部类别", label="类别筛选")
-                        det_risk_filter = gr.Dropdown(["全部风险", "强烈建议人工复核", "建议人工复核", "可信度较高"], value="全部风险", label="风险筛选")
-                        det_sort = gr.Dropdown(["按区域编号", "风险优先", "置信度从高到低", "置信度从低到高"], value="按区域编号", label="排序")
+                        det_risk_filter = gr.Dropdown(["全部风险", "强烈建议人工复核", "建议人工复核", "可信度较高"], value="全部风险", label="复核优先级")
+                        det_sort = gr.Dropdown(
+                            ["按区域编号", "风险优先", "置信度从高到低", "置信度从低到高", "区域占比从大到小", "区域占比从小到大"],
+                            value="按区域编号",
+                            label="排序",
+                        )
+                        det_filter_reset = gr.Button("重置筛选", elem_classes="analysis-filter-reset")
+                    det_filter_status = gr.HTML(
+                        detection_filter_status_html(None, []),
+                        elem_classes="analysis-filter-status-wrap",
+                    )
+                    gr.HTML(
+                        analysis_table_heading_html("区域明细", "坐标已合并展示，并补充区域面积占比；点击任一行可联动到局部复核。", "可筛选表格"),
+                        elem_classes="analysis-table-heading-wrap",
+                    )
                     det_table = gr.Dataframe(
-                        headers=["编号", "类别", "置信度", "坐标 x1", "坐标 y1", "坐标 x2", "坐标 y2", "风险等级", "复核建议"],
+                        headers=["区域", "类别", "置信度", "面积占比", "像素坐标", "复核优先级", "复核建议"],
                         label="结构化检测结果",
                         wrap=True,
                         visible=False,
+                        interactive=False,
+                        max_height=460,
+                        column_widths=[70, 150, 100, 100, 220, 170, 360],
+                        pinned_columns=2,
+                        buttons=["fullscreen", "copy"],
+                        elem_id="single-structured-table",
                     )
-                    det_knowledge = gr.HTML(class_knowledge_cards(None), visible=False)
+                    det_knowledge = gr.HTML(
+                        collapsible_class_knowledge_html(None),
+                        visible=False,
+                        elem_classes=["single-structured-knowledge", "analysis-knowledge-panel"],
+                    )
                 with gr.Row(
                     equal_height=False,
                     elem_classes=["detection-support-grid", "detection-support-review-only"],
@@ -9981,9 +10528,18 @@ def build_app() -> gr.Blocks:
                         )
                         single_report_gallery = gr.Gallery(label="单图报告图片预览", columns=3, height=320, visible=False)
                     with gr.Row(elem_classes="report-download-row"):
-                        single_report_md = gr.DownloadButton("下载 Markdown 图文包", elem_classes="report-download-action")
-                        single_report_pdf = gr.DownloadButton("下载高清 PDF", elem_classes="report-download-action")
-                        single_report_docx = gr.DownloadButton("下载可编辑 Word", elem_classes="report-download-action")
+                        single_report_md = gr.DownloadButton(
+                            "下载 Markdown 图文包",
+                            elem_classes=["report-download-action", "report-download-action--md"],
+                        )
+                        single_report_pdf = gr.DownloadButton(
+                            "下载高清 PDF",
+                            elem_classes=["report-download-action", "report-download-action--pdf"],
+                        )
+                        single_report_docx = gr.DownloadButton(
+                            "下载可编辑 Word",
+                            elem_classes=["report-download-action", "report-download-action--docx"],
+                        )
 
         with gr.Group(elem_id="page-compare", elem_classes=["dental-page"]):
             gr.HTML(
@@ -10066,17 +10622,56 @@ def build_app() -> gr.Blocks:
                         gr.HTML("<div class='model-tag'><b>03 高召回检测模型</b><span>减少漏检优先</span></div>")
                         cmp_img3 = gr.ImageSlider(label="高召回模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
                 with gr.Group(elem_classes=["compare-analysis-panel", "compare-result-analysis-panel"]):
+                    cmp_analysis_overview = gr.HTML(
+                        comparison_analysis_overview_html([]),
+                        elem_classes=["result-analysis-overview", "comparison-analysis-overview"],
+                    )
+                    gr.HTML(
+                        analysis_table_heading_html("模型运行表现", "对照三个模型的成功状态、候选区域数量、置信度与耗时。", "模型级"),
+                        elem_classes="analysis-table-heading-wrap",
+                    )
                     cmp_table = gr.Dataframe(
                         headers=["模型名称", "模型类型", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议数量", "推荐使用场景", "失败原因"],
                         label="多模型对比表",
                         wrap=True,
                         visible=False,
+                        interactive=False,
+                        max_height=320,
+                        pinned_columns=1,
+                        buttons=["fullscreen", "copy"],
+                        elem_id="comparison-model-table",
+                    )
+                    gr.HTML(
+                        analysis_table_heading_html("区域共识明细", "先按 IoU ≥ 0.35 聚合空间位置，再区分全模型共识、部分共识、类别冲突和单模型独有。", "区域级"),
+                        elem_classes="analysis-table-heading-wrap",
                     )
                     consistency_table = gr.Dataframe(
-                        headers=["区域编号", "涉及模型", "最高置信度", "平均置信度", "一致性等级", "复核建议"],
+                        headers=["区域", "类别", "模型票数", "涉及模型", "置信度范围", "置信度差", "平均置信度", "共识结论", "复核建议"],
                         label="多模型一致性分析",
                         wrap=True,
                         visible=False,
+                        interactive=False,
+                        max_height=430,
+                        column_widths=[70, 140, 90, 300, 140, 100, 110, 150, 360],
+                        pinned_columns=2,
+                        buttons=["fullscreen", "copy"],
+                        elem_id="comparison-consistency-table",
+                    )
+                    gr.HTML(
+                        analysis_table_heading_html("模型分歧归因", "集中列出类别冲突和仅单个模型检出的区域，便于优先复核。", "优先复核"),
+                        elem_classes="analysis-table-heading-wrap",
+                    )
+                    comparison_difference_table = gr.Dataframe(
+                        headers=["分歧类型", "模型 / 区域", "IoU", "现象说明", "建议"],
+                        label="模型分歧明细",
+                        wrap=True,
+                        visible=False,
+                        interactive=False,
+                        max_height=360,
+                        column_widths=[180, 320, 80, 360, 360],
+                        pinned_columns=1,
+                        buttons=["fullscreen", "copy"],
+                        elem_id="comparison-difference-table",
                     )
                     cmp_summary = gr.Markdown(
                         "等待对比。",
@@ -10136,9 +10731,18 @@ def build_app() -> gr.Blocks:
                         )
                         comparison_report_gallery = gr.Gallery(label="多模型报告图片预览", columns=3, height=320, visible=False)
                     with gr.Row(elem_classes="report-download-row"):
-                        comparison_report_md = gr.DownloadButton("下载 Markdown 图文包", elem_classes="report-download-action")
-                        comparison_report_pdf = gr.DownloadButton("下载高清 PDF", elem_classes="report-download-action")
-                        comparison_report_docx = gr.DownloadButton("下载可编辑 Word", elem_classes="report-download-action")
+                        comparison_report_md = gr.DownloadButton(
+                            "下载 Markdown 图文包",
+                            elem_classes=["report-download-action", "report-download-action--md"],
+                        )
+                        comparison_report_pdf = gr.DownloadButton(
+                            "下载高清 PDF",
+                            elem_classes=["report-download-action", "report-download-action--pdf"],
+                        )
+                        comparison_report_docx = gr.DownloadButton(
+                            "下载可编辑 Word",
+                            elem_classes=["report-download-action", "report-download-action--docx"],
+                        )
 
         with gr.Group(elem_id="page-batch", elem_classes=["dental-page"]):
             gr.HTML(
@@ -10218,13 +10822,20 @@ def build_app() -> gr.Blocks:
                 batch_progress = gr.HTML("", visible=False, elem_id="batch-progress")
                 batch_empty_state = gr.HTML(build_detection_empty_state("batch"), elem_classes="batch-empty-state-panel")
                 with gr.Row(equal_height=False, elem_classes=["batch-review-grid", "detection-result-overview"]):
-                    with gr.Column(scale=4, elem_classes="batch-result-sidebar"):
+                    with gr.Column(scale=3, elem_classes="batch-result-sidebar"):
                         batch_tasks = gr.HTML("", visible=False, elem_classes="batch-task-panel")
-                        batch_preview_page = gr.Dropdown(["第 1 / 1 页"], value="第 1 / 1 页", label="结果预览分页", interactive=False, visible=False)
+                        batch_preview_page = gr.Dropdown(
+                            ["第 1 / 1 页"],
+                            value="第 1 / 1 页",
+                            label="结果预览分页",
+                            interactive=False,
+                            visible=False,
+                            elem_classes="batch-preview-pagination",
+                        )
                         batch_preview = gr.Gallery(
                             label="批量检测结果预览",
                             columns=2,
-                            height=360,
+                            height=220,
                             visible=False,
                             elem_id="batch-result-preview-gallery",
                         )
@@ -10235,13 +10846,13 @@ def build_app() -> gr.Blocks:
                             with gr.Row(elem_classes="batch-retry-actions"):
                                 batch_retry_selector = gr.Dropdown(choices=[], label="选择失败图片", interactive=True, visible=False)
                                 batch_retry_btn = gr.Button("重新检测", visible=False)
-                    with gr.Column(scale=8, elem_classes="batch-result-main"):
+                    with gr.Column(scale=9, elem_classes="batch-result-main"):
                         batch_compare_slider = gr.ImageSlider(
                             label="所选图片：原图 / 检测结果滑动对比",
                             show_label=False,
                             visible=False,
                             slider_position=50,
-                            max_height=620,
+                            max_height=520,
                             buttons=["fullscreen", "download"],
                             elem_classes="result-compare-slider",
                             elem_id="batch-result-slider",
@@ -10257,11 +10868,43 @@ def build_app() -> gr.Blocks:
                                 elem_classes="batch-knowledge-panel",
                             )
                 with gr.Group(elem_classes="structured-result-panel"):
+                    batch_analysis_overview = gr.HTML(
+                        batch_analysis_overview_html([]),
+                        elem_classes=["result-analysis-overview", "batch-analysis-overview"],
+                    )
+                    with gr.Row(elem_classes=["result-filter-bar", "batch-summary-filter-bar"]):
+                        batch_summary_search = gr.Textbox(label="搜索批量结果", placeholder="搜索图片、类别、状态或失败原因", lines=1)
+                        batch_summary_status = gr.Dropdown(["全部状态", "成功", "失败或未完成"], value="全部状态", label="处理状态")
+                        batch_summary_review = gr.Dropdown(
+                            ["全部复核等级", "强烈建议人工复核", "建议人工复核", "常规人工复核", "当前阈值下无疑似区域", "无法评估"],
+                            value="全部复核等级",
+                            label="复核等级",
+                        )
+                        batch_summary_sort = gr.Dropdown(
+                            ["复核优先", "图片顺序", "疑似区域从多到少", "最高置信度从高到低", "推理耗时从长到短"],
+                            value="复核优先",
+                            label="排序",
+                        )
+                        batch_summary_reset = gr.Button("重置筛选", elem_classes="analysis-filter-reset")
+                    batch_filter_status = gr.HTML(
+                        batch_filter_status_html([], []),
+                        elem_classes="analysis-filter-status-wrap",
+                    )
+                    gr.HTML(
+                        analysis_table_heading_html("逐图汇总明细", "按影像展示处理状态、疑似区域、类别、置信度和复核等级。", "可筛选表格"),
+                        elem_classes="analysis-table-heading-wrap",
+                    )
                     batch_table = gr.Dataframe(
-                        headers=["图片名称", "推理状态", "检测框数量", "平均置信度", "最高置信度", "推理耗时", "复核建议等级", "失败原因"],
+                        headers=["序号", "图片名称", "处理状态", "疑似区域", "平均置信度", "最高置信度", "复核等级", "主要类别", "推理耗时(ms)", "失败或处理说明"],
                         label="批量检测汇总表",
                         wrap=True,
                         visible=False,
+                        interactive=False,
+                        max_height=520,
+                        column_widths=[54, 185, 86, 76, 92, 92, 145, 150, 108, 230],
+                        pinned_columns=1,
+                        buttons=["fullscreen", "copy"],
+                        elem_id="batch-summary-table",
                     )
                 with gr.Row(
                     equal_height=False,
@@ -10310,8 +10953,14 @@ def build_app() -> gr.Blocks:
                         )
                         batch_report_gallery = gr.Gallery(label="批量报告图片预览", columns=3, height=320, visible=False)
                     with gr.Row(elem_classes=["batch-download-row", "report-download-row"]):
-                        batch_md_file = gr.DownloadButton("下载 Markdown 图文包", elem_classes="report-download-action")
-                        batch_csv_file = gr.DownloadButton("下载结构化 CSV", elem_classes="report-download-action")
+                        batch_md_file = gr.DownloadButton(
+                            "下载 Markdown 图文包",
+                            elem_classes=["report-download-action", "report-download-action--md"],
+                        )
+                        batch_csv_file = gr.DownloadButton(
+                            "下载结构化 CSV",
+                            elem_classes=["report-download-action", "report-download-action--csv"],
+                        )
 
         with gr.Group(elem_id="page-history", elem_classes=["dental-page"]):
             gr.HTML(
@@ -10393,7 +11042,11 @@ def build_app() -> gr.Blocks:
                     history_export_file = gr.DownloadButton(
                         "下载历史 CSV",
                         elem_id="history-export-download",
-                        elem_classes=["history-export-download", "report-download-action"],
+                        elem_classes=[
+                            "history-export-download",
+                            "report-download-action",
+                            "report-download-action--csv",
+                        ],
                     )
                 with gr.Column(scale=8, elem_classes=["history-detail-preview"]):
                     gr.HTML("<div class='workspace-panel-heading workspace-panel-heading--compact'><span>任务回看</span><div><h3>记录详情</h3><p>展示任务参数、模型输出和复核提示。</p></div></div>")
@@ -10447,9 +11100,21 @@ def build_app() -> gr.Blocks:
                     report_gallery = gr.Gallery(label="报告图片预览", columns=3, height=340, visible=False)
                     report_preview = gr.Markdown(report_empty_state_markup(), elem_classes="report-preview-panel")
                     with gr.Row(visible=False, elem_classes="report-download-row") as report_download_row:
-                        report_file = gr.DownloadButton("下载 Markdown 图文包", visible=False, elem_classes="report-download-action")
-                        report_pdf_file = gr.DownloadButton("下载高清 PDF", visible=False, elem_classes="report-download-action")
-                        report_docx_file = gr.DownloadButton("下载可编辑 Word", visible=False, elem_classes="report-download-action")
+                        report_file = gr.DownloadButton(
+                            "下载 Markdown 图文包",
+                            visible=False,
+                            elem_classes=["report-download-action", "report-download-action--md"],
+                        )
+                        report_pdf_file = gr.DownloadButton(
+                            "下载高清 PDF",
+                            visible=False,
+                            elem_classes=["report-download-action", "report-download-action--pdf"],
+                        )
+                        report_docx_file = gr.DownloadButton(
+                            "下载可编辑 Word",
+                            visible=False,
+                            elem_classes=["report-download-action", "report-download-action--docx"],
+                        )
             archive_records_initial = report_archive_records()
             archive_choices_initial = [str(record["choice"]) for record in archive_records_initial]
             archive_record_initial = archive_records_initial[0] if archive_records_initial else None
@@ -10486,10 +11151,26 @@ def build_app() -> gr.Blocks:
                                 "Markdown 图文包" if archive_files_initial.get(".zip") else "Markdown 源文档",
                                 value=archive_files_initial.get(".zip") or archive_files_initial.get(".md"),
                                 visible=bool(archive_files_initial.get(".zip") or archive_files_initial.get(".md")),
+                                elem_classes=["report-download-action", "report-download-action--md"],
                             )
-                            report_archive_pdf = gr.DownloadButton("高清 PDF", value=archive_files_initial.get(".pdf"), visible=bool(archive_files_initial.get(".pdf")))
-                            report_archive_docx = gr.DownloadButton("可编辑 Word", value=archive_files_initial.get(".docx"), visible=bool(archive_files_initial.get(".docx")))
-                            report_archive_csv = gr.DownloadButton("结构化 CSV", value=archive_files_initial.get(".csv"), visible=bool(archive_files_initial.get(".csv")))
+                            report_archive_pdf = gr.DownloadButton(
+                                "高清 PDF",
+                                value=archive_files_initial.get(".pdf"),
+                                visible=bool(archive_files_initial.get(".pdf")),
+                                elem_classes=["report-download-action", "report-download-action--pdf"],
+                            )
+                            report_archive_docx = gr.DownloadButton(
+                                "可编辑 Word",
+                                value=archive_files_initial.get(".docx"),
+                                visible=bool(archive_files_initial.get(".docx")),
+                                elem_classes=["report-download-action", "report-download-action--docx"],
+                            )
+                            report_archive_csv = gr.DownloadButton(
+                                "结构化 CSV",
+                                value=archive_files_initial.get(".csv"),
+                                visible=bool(archive_files_initial.get(".csv")),
+                                elem_classes=["report-download-action", "report-download-action--csv"],
+                            )
                     with gr.Column(scale=8, elem_classes=["report-archive-preview-column"]):
                         report_archive_gallery_component = gr.Gallery(
                             value=archive_gallery_initial,
@@ -10542,6 +11223,18 @@ def build_app() -> gr.Blocks:
         )
         det_event.then(latest_single_compare_slider_update, outputs=det_compare_slider)
         det_event.then(
+            structured_result_overview_html,
+            inputs=current_detection,
+            outputs=det_structured_overview,
+            show_progress="hidden",
+        )
+        det_event.then(
+            filtered_detection_outputs,
+            inputs=[current_detection, det_search, det_class_filter, det_risk_filter, det_sort],
+            outputs=[det_table, det_filter_status],
+            show_progress="hidden",
+        )
+        det_event.then(
             render_linked_region_view,
             inputs=[det_image, current_detection, det_region_selector],
             outputs=[det_region_original, det_region_annotated, det_region_note],
@@ -10558,6 +11251,7 @@ def build_app() -> gr.Blocks:
         )
         det_image.change(image_quality_precheck, inputs=det_image, outputs=det_quality)
         det_image.change(single_empty_state_for_upload, inputs=det_image, outputs=det_empty_state)
+        det_image.change(lambda: structured_result_overview_html(None), outputs=det_structured_overview)
         det_preset.change(apply_threshold_preset, inputs=det_preset, outputs=[det_conf, det_iou, det_threshold_hint])
         det_conf.change(threshold_hint, inputs=[det_conf, det_iou], outputs=det_threshold_hint)
         det_iou.change(threshold_hint, inputs=[det_conf, det_iou], outputs=det_threshold_hint)
@@ -10568,10 +11262,20 @@ def build_app() -> gr.Blocks:
         )
         for filter_component in (det_search, det_class_filter, det_risk_filter, det_sort):
             filter_component.change(
-                filtered_detection_rows,
+                filtered_detection_outputs,
                 inputs=[current_detection, det_search, det_class_filter, det_risk_filter, det_sort],
-                outputs=det_table,
+                outputs=[det_table, det_filter_status],
             )
+        det_filter_reset_event = det_filter_reset.click(
+            lambda: ("", "全部类别", "全部风险", "按区域编号"),
+            outputs=[det_search, det_class_filter, det_risk_filter, det_sort],
+        )
+        det_filter_reset_event.then(
+            filtered_detection_outputs,
+            inputs=[current_detection, det_search, det_class_filter, det_risk_filter, det_sort],
+            outputs=[det_table, det_filter_status],
+            show_progress="hidden",
+        )
         det_table.select(
             detection_table_selected_region,
             inputs=current_detection,
@@ -10586,11 +11290,27 @@ def build_app() -> gr.Blocks:
             trigger_mode="once",
             show_progress="minimal",
         )
+        cmp_event.then(
+            comparison_analysis_overview_html,
+            inputs=current_comparison,
+            outputs=cmp_analysis_overview,
+            show_progress="hidden",
+        )
+        cmp_event.then(
+            comparison_difference_update,
+            inputs=current_comparison,
+            outputs=comparison_difference_table,
+            show_progress="hidden",
+        )
         cmp_image.clear(
             reset_model_comparison_outputs,
             outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
         )
         cmp_image.change(compare_empty_state_for_upload, inputs=cmp_image, outputs=cmp_empty_state)
+        cmp_image.change(
+            lambda: (comparison_analysis_overview_html([]), gr.update(value=[], visible=False)),
+            outputs=[cmp_analysis_overview, comparison_difference_table],
+        )
         cmp_event.then(
             render_comparison_linked_region_view,
             inputs=[cmp_image, current_comparison, cmp_region_selector],
@@ -10615,6 +11335,18 @@ def build_app() -> gr.Blocks:
             concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
             show_progress="minimal",
+        )
+        batch_event.then(
+            batch_analysis_overview_html,
+            inputs=current_batch,
+            outputs=batch_analysis_overview,
+            show_progress="hidden",
+        )
+        batch_event.then(
+            filtered_batch_analysis_outputs,
+            inputs=[current_batch, batch_summary_search, batch_summary_status, batch_summary_review, batch_summary_sort],
+            outputs=[batch_table, batch_filter_status],
+            show_progress="hidden",
         )
         batch_files.clear(
             reset_batch_detection_outputs,
@@ -10647,6 +11379,10 @@ def build_app() -> gr.Blocks:
             ],
         )
         batch_files.change(uploaded_batch_preview, inputs=batch_files, outputs=batch_upload_preview)
+        batch_files.change(
+            lambda: batch_analysis_overview_html([]),
+            outputs=batch_analysis_overview,
+        )
         batch_files.change(lambda: ("", gr.update(visible=False)), outputs=[batch_tasks, batch_preview_page])
         batch_files.change(lambda: gr.update(value=None, visible=False), outputs=batch_compare_slider)
         batch_files.change(
@@ -10694,6 +11430,22 @@ def build_app() -> gr.Blocks:
             outputs=[batch_explain, batch_knowledge],
         )
         batch_image_selector.change(batch_selected_compare_update, inputs=[current_batch, batch_image_selector], outputs=batch_compare_slider)
+        for filter_component in (batch_summary_search, batch_summary_status, batch_summary_review, batch_summary_sort):
+            filter_component.change(
+                filtered_batch_analysis_outputs,
+                inputs=[current_batch, batch_summary_search, batch_summary_status, batch_summary_review, batch_summary_sort],
+                outputs=[batch_table, batch_filter_status],
+            )
+        batch_summary_reset_event = batch_summary_reset.click(
+            lambda: ("", "全部状态", "全部复核等级", "复核优先"),
+            outputs=[batch_summary_search, batch_summary_status, batch_summary_review, batch_summary_sort],
+        )
+        batch_summary_reset_event.then(
+            filtered_batch_analysis_outputs,
+            inputs=[current_batch, batch_summary_search, batch_summary_status, batch_summary_review, batch_summary_sort],
+            outputs=[batch_table, batch_filter_status],
+            show_progress="hidden",
+        )
         batch_retry_event = batch_retry_btn.click(
             retry_batch_item,
             inputs=[current_batch, batch_retry_selector, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
@@ -10705,6 +11457,18 @@ def build_app() -> gr.Blocks:
         )
         batch_retry_event.then(batch_failed_retry_controls, inputs=current_batch, outputs=[batch_retry_selector, batch_retry_btn, batch_retry_panel])
         batch_retry_event.then(batch_selected_compare_update, inputs=[current_batch, batch_image_selector], outputs=batch_compare_slider)
+        batch_retry_event.then(
+            batch_analysis_overview_html,
+            inputs=current_batch,
+            outputs=batch_analysis_overview,
+            show_progress="hidden",
+        )
+        batch_retry_event.then(
+            filtered_batch_analysis_outputs,
+            inputs=[current_batch, batch_summary_search, batch_summary_status, batch_summary_review, batch_summary_sort],
+            outputs=[batch_table, batch_filter_status],
+            show_progress="hidden",
+        )
 
         single_report_event = single_report_btn.click(
             generate_single_detection_tab_report_with_progress,

@@ -64,7 +64,7 @@ $env:OLLAMA_API_KEY = "你的密钥"
 $env:OLLAMA_BASE_URL = "https://ollama.com/api/chat"
 $env:OLLAMA_MODEL = "gpt-oss:20b"
 $env:OLLAMA_FALLBACK_MODELS = "qwen3.5:397b,deepseek-v4-flash"
-python app.py
+.\start_project.cmd
 ```
 
 如果未配置密钥、网络异常或云端模型不可用，系统会降级为本地规则回答，不影响检测、对比、批量处理和报告生成。
@@ -77,6 +77,16 @@ python app.py
 - 智诊反馈：`outputs/chat_feedback.json`
 
 `outputs/` 为运行产物目录，通常不应提交到远程仓库。
+
+## Windows 启动与运行缓存
+
+推荐直接双击根目录的 `start_project.cmd`，或在 PowerShell 中运行：
+
+```powershell
+.\start_project.ps1
+```
+
+启动器会在 Python、Gradio 和 PyTorch 加载前，将临时文件及框架缓存定向到项目的 `.runtime/`（D 盘）。按 `Ctrl+C` 正常关闭后，只会自动清理 `.runtime/temp` 与 `.runtime/gradio`；模型缓存、检测结果和报告会保留。为避免缓存重新写入 C 盘，不再推荐直接执行旧的 `python app.py` 或裸 `uvicorn` 命令。
 
 ## 代码结构
 
@@ -100,8 +110,8 @@ services/               后续模型、历史、文件、云端接口服务目�
 
 本项目默认使用 CPU 推理，适合课程展示和普通 Windows 开发环境。
 
-```bash
-python app.py
+```powershell
+.\start_project.cmd
 ```
 
 生产或内网部署时建议：

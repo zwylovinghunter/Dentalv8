@@ -4,6 +4,17 @@ __pycache__/
 .pytest_cache/
 .cache/
 *.cache
+/.runtime/
+/.runtime/temp/
+/.runtime/gradio/
+/.runtime/torch/
+/.runtime/huggingface/
+/.runtime/cache/
+/.runtime/ultralytics/
+/.runtime/matplotlib/
+/.runtime/cuda/
+/.runtime/joblib/
+/.runtime/dentalv8-runtime.lock
 
 # Virtual/env/editor
 .venv/
