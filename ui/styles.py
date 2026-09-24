@@ -166,100 +166,6 @@ APP_CSS = """
   color: #ffffff;
   box-shadow: 0 10px 24px rgba(37, 99, 235, 0.23);
 }
-body[data-dental-theme="dark"] .gradio-container {
-  background:
-    radial-gradient(circle at 12% 0%, rgba(14,165,233,0.16), transparent 30%),
-    radial-gradient(circle at 88% 8%, rgba(249,115,22,0.13), transparent 32%),
-    linear-gradient(180deg, #0f172a 0%, #111827 320px, #020617 100%) !important;
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .app-hero,
-body[data-dental-theme="dark"] .dental-page,
-body[data-dental-theme="dark"] .dental-page-nav,
-body[data-dental-theme="dark"] .section-note,
-body[data-dental-theme="dark"] .gradio-container .block,
-body[data-dental-theme="dark"] .gradio-container .form,
-body[data-dental-theme="dark"] .gradio-container .panel,
-body[data-dental-theme="dark"] .gradio-container .accordion {
-  background: linear-gradient(180deg, rgba(15,23,42,0.94), rgba(17,24,39,0.88)) !important;
-  border-color: rgba(71,85,105,0.78) !important;
-  color: #e5e7eb !important;
-  box-shadow: 0 18px 42px rgba(0,0,0,0.28) !important;
-}
-body[data-dental-theme="dark"] .app-hero h1,
-body[data-dental-theme="dark"] .app-hero p,
-body[data-dental-theme="dark"] .gradio-container h1,
-body[data-dental-theme="dark"] .gradio-container h2,
-body[data-dental-theme="dark"] .gradio-container h3,
-body[data-dental-theme="dark"] .gradio-container label,
-body[data-dental-theme="dark"] .gradio-container .prose,
-body[data-dental-theme="dark"] .gradio-container .markdown,
-body[data-dental-theme="dark"] .gradio-container [data-testid="markdown"] {
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .dental-page-nav-item,
-body[data-dental-theme="dark"] .app-pref-btn,
-body[data-dental-theme="dark"] .gradio-container input,
-body[data-dental-theme="dark"] .gradio-container textarea,
-body[data-dental-theme="dark"] .gradio-container select {
-  background: rgba(15,23,42,0.9) !important;
-  border-color: rgba(71,85,105,0.82) !important;
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .dental-page-nav-item:hover,
-body[data-dental-theme="dark"] .app-pref-btn:hover {
-  background: rgba(30,41,59,0.96) !important;
-  color: #93c5fd !important;
-}
-body[data-dental-theme="dark"] .result-card,
-body[data-dental-theme="dark"] .metric-card,
-body[data-dental-theme="dark"] .knowledge-card,
-body[data-dental-theme="dark"] .quality-card,
-body[data-dental-theme="dark"] .report-preview-panel,
-body[data-dental-theme="dark"] .batch-knowledge-content,
-body[data-dental-theme="dark"] .det-explain {
-  background: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(30,41,59,0.86)) !important;
-  border-color: rgba(71,85,105,0.76) !important;
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .native-ai-assistant {
-  background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(17,24,39,0.96)) !important;
-  border-color: rgba(71,85,105,0.78) !important;
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .native-ai-top,
-body[data-dental-theme="dark"] .native-ai-messages,
-body[data-dental-theme="dark"] .native-ai-composer,
-body[data-dental-theme="dark"] .native-ai-empty-card,
-body[data-dental-theme="dark"] .native-ai-msg.assistant .native-ai-bubble {
-  background: linear-gradient(180deg, rgba(15,23,42,0.94), rgba(30,41,59,0.86)) !important;
-  border-color: rgba(71,85,105,0.76) !important;
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .native-ai-subtitle,
-body[data-dental-theme="dark"] .native-ai-empty-card p,
-body[data-dental-theme="dark"] .native-ai-md,
-body[data-dental-theme="dark"] .native-ai-suggestion-title,
-body[data-dental-theme="dark"] .native-ai-export-btn small {
-  color: #cbd5e1 !important;
-}
-body[data-dental-theme="dark"] .native-ai-assistant button.native-ai-suggestion,
-body[data-dental-theme="dark"] .native-ai-export-btn,
-body[data-dental-theme="dark"] #ask-ai-input textarea {
-  background: rgba(15,23,42,0.9) !important;
-  border-color: rgba(71,85,105,0.82) !important;
-  color: #e5e7eb !important;
-}
-body[data-dental-theme="dark"] .native-ai-export-btn::before {
-  background: rgba(30,41,59,0.92) !important;
-  border-color: rgba(96,165,250,0.42) !important;
-  color: #93c5fd !important;
-  box-shadow: inset 0 0 0 4px rgba(15,23,42,0.42) !important;
-}
-body[data-dental-theme="dark"] .native-ai-export-btn.export-pdf::before {
-  border-color: rgba(251,146,60,0.42) !important;
-  color: #fdba74 !important;
-}
 .dental-page {
   display: none !important;
 }
@@ -3892,42 +3798,6 @@ button.solid-primary-action:hover {
   border-radius: 8px;
   background: #f8fafc;
   color: #52667a;
-}
-
-body[data-dental-theme="dark"] #page-dashboard .dashboard-overview {
-  border-color: #334155;
-  background: linear-gradient(135deg, #0f2539, #102f49 60%, #123b45);
-}
-body[data-dental-theme="dark"] #page-dashboard .dashboard-overview h2,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-section-title h3 { color: #f8fafc; }
-body[data-dental-theme="dark"] #page-dashboard .dashboard-overview-copy > p,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-section-title > p { color: #cbd5e1; }
-body[data-dental-theme="dark"] #page-dashboard .dashboard-quick-link.dental-page-nav-item,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-kpi-card,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-compact-panel {
-  border-color: #405268 !important;
-  background: #111f30 !important;
-}
-body[data-dental-theme="dark"] #page-dashboard .dashboard-quick-link > b,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-kpi-card h3,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-compact-panel > header b,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-anomaly-list li b,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-empty-state b { color: #f1f5f9 !important; }
-body[data-dental-theme="dark"] #page-dashboard .dashboard-quick-link > small,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-kpi-card p,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-anomaly-list li small,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-trend-bar > span { color: #aebed0 !important; }
-body[data-dental-theme="dark"] #page-dashboard .dashboard-compact-panel > header {
-  border-bottom-color: #334155;
-  background: #16263a;
-}
-body[data-dental-theme="dark"] #page-dashboard .dashboard-trend-bar > b { color: #dbeafe; }
-body[data-dental-theme="dark"] #page-dashboard .dashboard-actions-row,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-analytics-panel,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-status-panel,
-body[data-dental-theme="dark"] #page-dashboard .dashboard-chart-row > * {
-  border-color: #405268 !important;
-  background: #111f30 !important;
 }
 
 @media (max-width: 1180px) {
@@ -8103,43 +7973,6 @@ button.solid-primary-action:hover,
   #page-assistant .native-ai-export-btn.export-pdf:hover { border-color: #f97316 !important; box-shadow: 0 11px 24px rgba(194, 65, 12, .18) !important; }
 }
 
-body[data-dental-theme="dark"] :is(#page-image, #page-compare, #page-batch, #page-history, #page-report) .report-download-action--md {
-  --download-bg-start: #0f3241;
-  --download-bg-end: #123c4d;
-  --download-border: #23647b;
-  --download-ink: #bae6fd;
-}
-body[data-dental-theme="dark"] :is(#page-image, #page-compare, #page-batch, #page-history, #page-report) .report-download-action--pdf {
-  --download-bg-start: #452317;
-  --download-bg-end: #55301d;
-  --download-border: #9a4d28;
-  --download-ink: #fed7aa;
-}
-body[data-dental-theme="dark"] :is(#page-image, #page-compare, #page-batch, #page-history, #page-report) .report-download-action--docx {
-  --download-bg-start: #172e58;
-  --download-bg-end: #1c3b70;
-  --download-border: #315b9f;
-  --download-ink: #dbeafe;
-}
-body[data-dental-theme="dark"] :is(#page-image, #page-compare, #page-batch, #page-history, #page-report) .report-download-action--csv {
-  --download-bg-start: #11382f;
-  --download-bg-end: #17483b;
-  --download-border: #28735d;
-  --download-ink: #bbf7d0;
-}
-body[data-dental-theme="dark"] #page-assistant .native-ai-export-btn.export-md {
-  border-color: #23647b !important;
-  background: linear-gradient(135deg, #0f3241, #123c4d) !important;
-  color: #bae6fd !important;
-}
-body[data-dental-theme="dark"] #page-assistant .native-ai-export-btn.export-pdf {
-  border-color: #9a4d28 !important;
-  background: linear-gradient(135deg, #452317, #55301d) !important;
-  color: #fed7aa !important;
-}
-body[data-dental-theme="dark"] #page-assistant .native-ai-export-btn.export-md small { color: #8bc5d8 !important; }
-body[data-dental-theme="dark"] #page-assistant .native-ai-export-btn.export-pdf small { color: #fdba74 !important; }
-
 @media (max-width: 620px) {
   #page-image .detection-report-panel .report-download-row,
   #page-image .detection-report-panel .report-download-row > .form,
@@ -8313,25 +8146,6 @@ body[data-dental-theme="dark"] #page-assistant .native-ai-export-btn.export-pdf 
   max-height: min(280px, 34vh) !important;
   margin: 0 0 10px !important;
   overflow-y: auto !important;
-}
-
-body[data-dental-theme="dark"] #page-batch .batch-result-main {
-  border-color: #2b455c !important;
-  background: #10283b !important;
-}
-body[data-dental-theme="dark"] #page-batch .batch-result-sidebar {
-  background: transparent !important;
-}
-body[data-dental-theme="dark"] #page-batch .batch-result-sidebar .batch-item-actions {
-  border-color: #2b455c !important;
-  background: #10283b !important;
-  box-shadow: none !important;
-}
-body[data-dental-theme="dark"] #page-batch .batch-result-sidebar .batch-task-list header {
-  background: #10283b !important;
-}
-body[data-dental-theme="dark"] #page-batch .batch-result-main #batch-result-slider {
-  background: #081827 !important;
 }
 
 @media (max-width: 900px) {
@@ -8940,43 +8754,6 @@ body[data-dental-theme="dark"] #page-batch .batch-result-main #batch-result-slid
   border-radius: 10px !important;
   background: linear-gradient(90deg, #f7f5ff, #fff) !important;
 }
-
-body[data-dental-theme="dark"] .result-analysis-dashboard {
-  border-color: #2b455c;
-  background: radial-gradient(circle at 94% -16%, rgba(14, 165, 233, .13), transparent 24rem), #0d2234;
-  box-shadow: none;
-}
-body[data-dental-theme="dark"] .analysis-dashboard-header { border-bottom-color: #294258; }
-body[data-dental-theme="dark"] .analysis-dashboard-header h3,
-body[data-dental-theme="dark"] .analysis-kpi > b,
-body[data-dental-theme="dark"] .analysis-insight-card > header b,
-body[data-dental-theme="dark"] .analysis-priority-row b,
-body[data-dental-theme="dark"] .analysis-filter-status b,
-body[data-dental-theme="dark"] .analysis-table-heading h4 { color: #e5eef6 !important; }
-body[data-dental-theme="dark"] .analysis-dashboard-header p,
-body[data-dental-theme="dark"] .analysis-kpi > span,
-body[data-dental-theme="dark"] .analysis-kpi > small,
-body[data-dental-theme="dark"] .analysis-priority-row small,
-body[data-dental-theme="dark"] .analysis-table-heading p { color: #91a6b8 !important; }
-body[data-dental-theme="dark"] :is(.analysis-kpi, .analysis-insight-card, .analysis-filter-status, .analysis-model-card) {
-  border-color: #294258;
-  background: #10283b;
-}
-body[data-dental-theme="dark"] .analysis-guidance { background: #0c302e; color: #a8c3c0; }
-body[data-dental-theme="dark"] .analysis-class-chips { border-top-color: #294258; }
-body[data-dental-theme="dark"] .analysis-class-chips > span { border-color: #36536a; background: #132e43; color: #c5d6e3; }
-body[data-dental-theme="dark"] .analysis-priority-row { background: color-mix(in srgb, var(--analysis-accent) 13%, #10283b); }
-body[data-dental-theme="dark"] :is(#page-image .structured-result-panel .result-filter-bar, #page-batch .batch-summary-filter-bar) {
-  border-color: #294258 !important;
-  background: #0d2234 !important;
-}
-body[data-dental-theme="dark"] :is(#page-image, #page-batch) .analysis-filter-reset {
-  border-color: #36536a !important;
-  background: #153148 !important;
-  color: #d7e4ed !important;
-}
-body[data-dental-theme="dark"] .analysis-knowledge-accordion,
-body[data-dental-theme="dark"] #page-compare .compare-summary-panel { border-color: #2b455c !important; background: #10283b !important; }
 
 @media (max-width: 1180px) {
   .analysis-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

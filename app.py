@@ -829,11 +829,12 @@ def empty_result(
 
 
 def risk_level(confidence: float) -> tuple[str, str]:
-    if confidence >= 0.75:
-        return "可信度较高", "该疑似区域可信度较高，仍建议由专业人员复核。"
-    if confidence >= 0.45:
-        return "建议人工复核", "该疑似区域可信度中等，建议人工复核。"
-    return "强烈建议人工复核", "该疑似区域可信度较低，强烈建议人工复核。"
+    # Workflow bands based on local score distribution, not diagnostic probabilities.
+    if confidence >= 0.50:
+        return "可信度较高", "置信度 ≥0.50，按常规流程核对原图；分档不代表确诊或病情严重程度。"
+    if confidence >= 0.30:
+        return "建议人工复核", "置信度 0.30–0.50，建议核对边界、类别和邻近结构。"
+    return "强烈建议人工复核", "置信度 <0.30，候选区域不确定性较大，请优先核对；不代表病情严重。"
 
 
 def normalize_image(image: Any) -> Image.Image:
@@ -1040,18 +1041,36 @@ def threshold_hint(conf: float, iou: float) -> str:
 def apply_threshold_preset(preset: str) -> tuple[float, float, str]:
     presets = {
         "高召回初筛（0.15 / 0.55）": (0.15, 0.55),
-        "均衡推荐（0.25 / 0.70）": (0.25, 0.70),
+        "均衡推荐（0.25 / 0.55）": (0.25, 0.55),
         "高精度复核（0.50 / 0.60）": (0.50, 0.60),
     }
-    conf, iou = presets.get(preset, (0.25, 0.70))
+    conf, iou = presets.get(preset, (0.25, 0.55))
     return conf, iou, threshold_hint(conf, iou)
+
+
+CLASS_DISPLAY_NAMES = {
+    "Caries": "疑似龋坏（Caries）",
+    "Periapical_Lesion": "疑似根尖周异常（Periapical Lesion）",
+    "Impacted": "疑似阻生或埋伏牙（Impacted）",
+}
 
 
 def normalize_class_name(class_name: str) -> str:
     normalized = str(class_name or "").strip()
     if normalized in CLASS_KNOWLEDGE:
         return normalized
+    for internal_name, display_name in CLASS_DISPLAY_NAMES.items():
+        if normalized == display_name:
+            return internal_name
     return CLASS_ALIASES.get(normalized.lower().replace(" ", "_"), normalized)
+
+
+def display_class_name(class_name: str) -> str:
+    value = str(class_name or "").strip()
+    if value in CLASS_DISPLAY_NAMES.values():
+        return value
+    normalized = normalize_class_name(value)
+    return CLASS_DISPLAY_NAMES.get(normalized, value.replace("_", " "))
 
 
 def box_color(box: dict[str, Any], idx: int, color_mode: str) -> tuple[int, int, int]:
@@ -1065,9 +1084,9 @@ def box_color(box: dict[str, Any], idx: int, color_mode: str) -> tuple[int, int,
         return class_palette.get(normalize_class_name(box.get("class_name", "")), palette[idx % len(palette)])
     if color_mode == "按置信度配色":
         confidence = float(box.get("confidence", 0.0))
-        if confidence >= 0.75:
+        if confidence >= 0.50:
             return (22, 163, 74)
-        if confidence >= 0.45:
+        if confidence >= 0.30:
             return (245, 158, 11)
         return (220, 38, 38)
     return palette[idx % len(palette)]
@@ -1132,7 +1151,7 @@ def draw_boxes(
     show_label: bool = True,
     show_confidence: bool = True,
     line_width: int = 3,
-    color_mode: str = "按目标编号配色",
+    color_mode: str = "按类别配色",
     minimum_font_size: int = 18,
 ) -> Image.Image:
     out = image.copy().convert("RGB")
@@ -1167,20 +1186,21 @@ def draw_boxes(
         draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
         label_parts = [f"{display_index}."]
         if show_label:
-            label_parts.append(str(box["class_name"]))
+            label_parts.append(display_class_name(box["class_name"]))
         if show_confidence:
             label_parts.append(f"{box['confidence']:.2f}")
         label = " ".join(label_parts).strip()
         if label and (show_label or show_confidence):
             labels.append(([x1, y1, x2, y2], label, color))
     occupied_labels: list[tuple[int, int, int, int]] = []
+    occupied_regions = [tuple(int(round(value)) for value in box["bbox_xyxy"]) for box in boxes]
     for bbox, label, color in labels:
         text_bbox = draw.textbbox((0, 0), label, font=font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
         label_width = max(font_size * 4, text_width + label_pad_x * 2)
         label_height = max(font_size + label_pad_y * 2, text_height + label_pad_y * 2)
-        label_rect = place_detection_label(bbox, (label_width, label_height), out.size, occupied_labels)
+        label_rect = place_detection_label(bbox, (label_width, label_height), out.size, [*occupied_regions, *occupied_labels])
         draw.rounded_rectangle(label_rect, radius=max(4, font_size // 4), fill=color)
         luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
         text_color = (15, 23, 42) if luminance >= 156 else (255, 255, 255)
@@ -1199,6 +1219,84 @@ def draw_boxes(
     return out
 
 
+def _box_iou_xyxy(first: list[float] | tuple[float, float, float, float], second: list[float] | tuple[float, float, float, float]) -> float:
+    """Return IoU for two xyxy boxes, guarding malformed/zero-area boxes."""
+    ax1, ay1, ax2, ay2 = [float(value) for value in first]
+    bx1, by1, bx2, by2 = [float(value) for value in second]
+    inter_width = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_height = max(0.0, min(ay2, by2) - max(ay1, by1))
+    intersection = inter_width * inter_height
+    first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = first_area + second_area - intersection
+    return intersection / union if union > 0.0 else 0.0
+
+
+def _box_containment_ratio(
+    first: list[float] | tuple[float, float, float, float],
+    second: list[float] | tuple[float, float, float, float],
+) -> float:
+    """Return the intersection divided by the smaller box area."""
+    ax1, ay1, ax2, ay2 = [float(value) for value in first]
+    bx1, by1, bx2, by2 = [float(value) for value in second]
+    first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    smaller_area = min(first_area, second_area)
+    if smaller_area <= 0.0:
+        return 0.0
+    inter_width = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_height = max(0.0, min(ay2, by2) - max(ay1, by1))
+    return (inter_width * inter_height) / smaller_area
+
+
+def suppress_redundant_boxes(
+    boxes: list[dict[str, Any]],
+    iou_threshold: float = 0.72,
+    containment_threshold: float = 0.88,
+) -> list[dict[str, Any]]:
+    """Remove near-duplicate boxes of the same class after model NMS.
+
+    Ultralytics already performs confidence/IoU NMS during prediction.  A
+    low confidence screening threshold can nevertheless leave two nearly
+    identical candidates around the same tooth.  Keep the higher-confidence
+    candidate for the *same* normalized class only; overlapping candidates
+    from different classes remain visible because they may represent a real
+    class disagreement that deserves review.
+    """
+    if len(boxes) < 2:
+        return boxes
+    ranked = sorted(
+        enumerate(boxes),
+        key=lambda item: (-float(item[1].get("confidence", 0.0) or 0.0), item[0]),
+    )
+    kept_indices: list[int] = []
+    for index, candidate in ranked:
+        candidate_class = normalize_class_name(candidate.get("class_name", ""))
+        candidate_box = candidate.get("bbox_xyxy")
+        if not candidate_box or len(candidate_box) != 4:
+            kept_indices.append(index)
+            continue
+        duplicate = False
+        for kept_index in kept_indices:
+            kept = boxes[kept_index]
+            if normalize_class_name(kept.get("class_name", "")) != candidate_class:
+                continue
+            kept_box = kept.get("bbox_xyxy")
+            if not kept_box or len(kept_box) != 4:
+                continue
+            if (
+                _box_iou_xyxy(candidate_box, kept_box) >= float(iou_threshold)
+                or _box_containment_ratio(candidate_box, kept_box) >= float(containment_threshold)
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            kept_indices.append(index)
+    # Restore the detector's spatial/order sequence for stable table rows and
+    # labels after confidence-ranked duplicate suppression.
+    return [boxes[index] for index in sorted(kept_indices)]
+
+
 def result_to_box_rows(result: dict[str, Any]) -> list[list[Any]]:
     rows = []
     for i, box in enumerate(result.get("boxes", []), 1):
@@ -1206,7 +1304,7 @@ def result_to_box_rows(result: dict[str, Any]) -> list[list[Any]]:
         rows.append(
             [
                 i,
-                box["class_name"],
+                display_class_name(box["class_name"]),
                 round(box["confidence"], 4),
                 f"{float(box.get('area_ratio', 0.0)) * 100:.2f}%",
                 f"({x1:.0f}, {y1:.0f}) → ({x2:.0f}, {y2:.0f})",
@@ -1229,7 +1327,8 @@ def filtered_detection_rows(
     if needle:
         rows = [row for row in rows if needle in " ".join(str(value) for value in row).casefold()]
     if class_filter and class_filter != "全部类别":
-        rows = [row for row in rows if str(row[1]) == class_filter]
+        selected_class = normalize_class_name(class_filter)
+        rows = [row for row in rows if normalize_class_name(str(row[1])) == selected_class]
     if risk_filter and risk_filter != "全部风险":
         rows = [row for row in rows if str(row[5]) == risk_filter]
     risk_rank = {"强烈建议人工复核": 0, "建议人工复核": 1, "可信度较高": 2}
@@ -1685,7 +1784,7 @@ def structured_result_overview_html(result: dict[str, Any] | None) -> str:
     classes: dict[str, int] = {}
     risk_counts = {"强烈建议人工复核": 0, "建议人工复核": 0, "可信度较高": 0}
     for box in boxes:
-        class_name = str(box.get("class_name") or "未命名类别")
+        class_name = display_class_name(box.get("class_name") or "未命名类别")
         classes[class_name] = classes.get(class_name, 0) + 1
         level = str(box.get("risk_level") or "")
         if level in risk_counts:
@@ -1717,7 +1816,7 @@ def structured_result_overview_html(result: dict[str, Any] | None) -> str:
         priority = "P1" if tone == "rose" else ("P2" if tone == "amber" else "P3")
         priority_rows.append(
             f"<article class='analysis-priority-row analysis-tone-{tone}'><span>{priority}</span>"
-            f"<div><b>区域 {index} · {xml_escape(str(box.get('class_name', '-')))}</b>"
+            f"<div><b>区域 {index} · {xml_escape(display_class_name(box.get('class_name', '-')))}</b>"
             f"<small>置信度 {float(box.get('confidence', 0.0)):.3f} · {xml_escape(level)}</small></div></article>"
         )
     if not priority_rows:
@@ -1752,7 +1851,7 @@ def region_choices(result: dict[str, Any] | None) -> list[str]:
     if not result or not result.get("boxes"):
         return []
     return [
-        f"区域 {idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0)):.3f}"
+        f"区域 {idx}｜{display_class_name(box.get('class_name', '-'))}｜置信度 {float(box.get('confidence', 0)):.3f}"
         for idx, box in enumerate(result["boxes"], 1)
     ]
 
@@ -1865,7 +1964,7 @@ def crop_region_pair(
                 show_label=bool(options.get("show_label", True)),
                 show_confidence=bool(options.get("show_confidence", True)),
                 line_width=int(options.get("line_width", 3)),
-                color_mode=str(options.get("color_mode", "按目标编号配色")),
+                color_mode=str(options.get("color_mode", "按类别配色")),
                 minimum_font_size=26,
             )
             return original_crop, annotated_crop
@@ -1911,7 +2010,7 @@ def result_original_and_annotated(image: Any, result: dict[str, Any] | None) -> 
             bool(result.get("visual_options", {}).get("show_label", True)),
             bool(result.get("visual_options", {}).get("show_confidence", True)),
             int(result.get("visual_options", {}).get("line_width", 3)),
-            str(result.get("visual_options", {}).get("color_mode", "按目标编号配色")),
+            str(result.get("visual_options", {}).get("color_mode", "按类别配色")),
         )
     return original, annotated
 
@@ -1938,7 +2037,7 @@ def render_linked_region_view(image: Any, result: dict[str, Any] | None, selecte
         )
         if original_crop is None or annotated_crop is None:
             return None, None, "所选区域的坐标无效或超出图片范围，无法生成联动放大图。"
-        note = f"已联动定位区域 {index + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。左侧保留原始细节，右侧显示同一位置的模型框。"
+        note = f"已联动定位区域 {index + 1}：{display_class_name(box.get('class_name', '-'))}，置信度 {float(box.get('confidence', 0)):.3f}。左侧保留原始细节，右侧显示同一位置的模型框。"
         return original_crop, annotated_crop, note
     except Exception as exc:
         return None, None, f"无法定位所选区域：{exc}"
@@ -1949,7 +2048,7 @@ def comparison_region_choices(results: list[dict[str, Any]] | None) -> list[str]
     for model_idx, result in enumerate(results or [], 1):
         model_name = result.get("model_name", f"模型{model_idx}") if isinstance(result, dict) else f"模型{model_idx}"
         for region_idx, box in enumerate((result or {}).get("boxes", []), 1):
-            choices.append(f"模型{model_idx}｜{model_name}｜区域 {region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0)):.3f}")
+            choices.append(f"模型{model_idx}｜{model_name}｜区域 {region_idx}｜{display_class_name(box.get('class_name', '-'))}｜置信度 {float(box.get('confidence', 0)):.3f}")
     return choices
 
 
@@ -1959,7 +2058,7 @@ def batch_region_choices(items: list[dict[str, Any]] | None) -> list[str]:
         result = item.get("result", {}) if isinstance(item, dict) else {}
         image_name = item.get("image_name") or result.get("image_name") or f"图片{image_idx}"
         for region_idx, box in enumerate(result.get("boxes", []), 1):
-            choices.append(f"图片{image_idx}｜{image_name}｜区域 {region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0)):.3f}")
+            choices.append(f"图片{image_idx}｜{image_name}｜区域 {region_idx}｜{display_class_name(box.get('class_name', '-'))}｜置信度 {float(box.get('confidence', 0)):.3f}")
     return choices
 
 
@@ -1990,7 +2089,7 @@ def render_comparison_linked_region_view(image: Any, results: list[dict[str, Any
         )
         if original_crop is None or annotated_crop is None:
             return None, None, "所选模型区域的坐标无效或超出图片范围，无法生成联动放大图。"
-        note = f"已定位模型{model_idx + 1}｜{result.get('model_name', '-')}｜区域 {region_idx + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。"
+        note = f"已定位模型{model_idx + 1}｜{result.get('model_name', '-')}｜区域 {region_idx + 1}：{display_class_name(box.get('class_name', '-'))}，置信度 {float(box.get('confidence', 0)):.3f}。"
         return original_crop, annotated_crop, note
     except Exception as exc:
         return None, None, f"无法定位多模型区域：{exc}"
@@ -2025,7 +2124,7 @@ def render_batch_linked_region_view(items: list[dict[str, Any]] | None, selected
         if original_crop is None or annotated_crop is None:
             return None, None, "所选批量区域的坐标无效或超出图片范围，无法生成联动放大图。"
         image_name = item.get("image_name") or result.get("image_name") or f"图片{image_idx + 1}"
-        note = f"已定位图片{image_idx + 1}｜{image_name}｜区域 {region_idx + 1}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}。"
+        note = f"已定位图片{image_idx + 1}｜{image_name}｜区域 {region_idx + 1}：{display_class_name(box.get('class_name', '-'))}，置信度 {float(box.get('confidence', 0)):.3f}。"
         return original_crop, annotated_crop, note
     except Exception as exc:
         return None, None, f"无法定位批量区域：{exc}"
@@ -2099,7 +2198,7 @@ def explanation_markdown(result: dict[str, Any]) -> str:
     for i, box in enumerate(result.get("boxes", []), 1):
         lines.extend(
             [
-                f"**目标 {i}：{box['class_name']}**",
+                f"**目标 {i}：{display_class_name(box.get('class_name', '-'))}**",
                 f"- 置信度：{box['confidence']:.3f}",
                 f"- 坐标：{box['bbox_xyxy']}",
                 f"- 面积占比：{box['area_ratio']:.2%}",
@@ -2120,7 +2219,7 @@ def run_detection_core(
     show_label: bool = True,
     show_confidence: bool = True,
     line_width: int = 3,
-    color_mode: str = "按目标编号配色",
+    color_mode: str = "按类别配色",
 ) -> tuple[dict[str, Any], Image.Image | None]:
     process_steps: list[dict[str, Any]] = []
     total_start = time.perf_counter()
@@ -2213,7 +2312,18 @@ def run_detection_core(
                     "review_suggestion": suggestion,
                 }
             )
-    finish_step(process_steps, "NMS 后处理", step, message=f"保留 {len(boxes)} 个疑似区域。")
+    raw_box_count = len(boxes)
+    boxes = suppress_redundant_boxes(boxes)
+    removed_box_count = raw_box_count - len(boxes)
+    finish_step(
+        process_steps,
+        "NMS 后处理",
+        step,
+        message=(
+            f"保留 {len(boxes)} 个疑似区域。"
+            + (f"已合并/去除 {removed_box_count} 个同类重叠候选框。" if removed_box_count else "")
+        ),
+    )
 
     step = start_step(process_steps, "结果渲染")
     rendered = draw_boxes(pil_image, boxes, show_label, show_confidence, line_width, color_mode)
@@ -2843,7 +2953,7 @@ def batch_image_explanation_markdown(items: list[dict[str, Any]] | None, selecte
     for region_idx, box in enumerate(boxes, 1):
         lines.extend(
             [
-                f"**图片 {image_idx + 1} - 目标 {region_idx}：{box.get('class_name', '-')}**",
+                f"**图片 {image_idx + 1} - 目标 {region_idx}：{display_class_name(box.get('class_name', '-'))}**",
                 f"- 置信度：{float(box.get('confidence', 0.0)):.3f}",
                 f"- 坐标：{box.get('bbox_xyxy', [])}",
                 f"- 面积占比：{float(box.get('area_ratio', 0.0)):.2%}",
@@ -2921,7 +3031,7 @@ def report_result_pairs(
 def report_scene_markdown(report_type: str, pairs: list[tuple[str, dict[str, Any]]]) -> str:
     success = [r for _, r in pairs if r.get("status") == "success" and r.get("runtime_mode") == "real_yolo_cpu"]
     boxes = [box for result in success for box in result.get("boxes", [])]
-    classes = sorted({normalize_class_name(box.get("class_name", "")) for box in boxes if box.get("class_name")})
+    classes = sorted({display_class_name(box.get("class_name", "")) for box in boxes if box.get("class_name")})
     high_review = sum(1 for box in boxes if box.get("risk_level") in {"建议人工复核", "强烈建议人工复核"})
     lines = [
         "## 报告场景摘要",
@@ -2960,7 +3070,7 @@ def class_summary_markdown(pairs: list[tuple[str, dict[str, Any]]]) -> str:
         )
         review_focus = f"{info['meaning']} {info['review']}"
         lines.append(
-            f"| {markdown_table_value(class_name)} | {len(confs)} | {sum(confs) / len(confs):.3f} / {max(confs):.3f} | "
+            f"| {markdown_table_value(display_class_name(class_name))} | {len(confs)} | {sum(confs) / len(confs):.3f} / {max(confs):.3f} | "
             f"{markdown_table_value(review_focus)} | {markdown_table_value(info['note'])} |"
         )
     return "\n".join(lines)
@@ -2975,7 +3085,7 @@ def review_worklist_markdown(pairs: list[tuple[str, dict[str, Any]]], limit: int
                 {
                     "source": source,
                     "region": idx,
-                    "class": box.get("class_name", "-"),
+                    "class": display_class_name(box.get("class_name", "-")),
                     "confidence": float(box.get("confidence", 0.0)),
                     "risk": box.get("risk_level", "常规人工复核"),
                     "bbox": box.get("bbox_xyxy", []),
@@ -3011,7 +3121,7 @@ def batch_priority_markdown(items: list[dict[str, Any]] | None, limit: int = 12)
     ranked.sort(reverse=True)
     lines = ["## 批量复核优先级", "| 排名 | 图片 | 复核等级 | 疑似区域数 | 最高置信度 | 主要类别 | 建议 |", "|---:|---|---|---:|---:|---|---|"]
     for rank, (_, _, _, image_name, result, level) in enumerate(ranked[:limit], 1):
-        classes = sorted({box.get("class_name", "-") for box in result.get("boxes", [])})
+        classes = sorted({display_class_name(box.get("class_name", "-")) for box in result.get("boxes", [])})
         advice = "优先打开原图与检测图人工复核。" if severity.get(level, 0) >= 2 else "常规复核或归档。"
         lines.append(
             f"| {rank} | {markdown_table_value(image_name)} | {markdown_table_value(level)} | {result.get('box_count', 0)} | "
@@ -3029,7 +3139,7 @@ def consistency_analysis_rows(results: list[dict[str, Any]] | None) -> list[list
         rows.append(
             [
                 item["区域编号"],
-                item.get("类别", "-"),
+                display_class_name(item.get("类别", "-")),
                 f"{votes}/{valid_count or 0}",
                 item["涉及模型"],
                 f"{float(item.get('最低置信度', 0.0)):.3f} – {float(item.get('最高置信度', 0.0)):.3f}",
@@ -3055,7 +3165,7 @@ def batch_analysis_rows(items: list[dict[str, Any]] | None) -> list[list[Any]]:
         result = item.get("result", {}) if isinstance(item, dict) and isinstance(item.get("result"), dict) else {}
         success = result.get("status") == "success" and result.get("runtime_mode") == "real_yolo_cpu"
         boxes = [box for box in result.get("boxes", []) if isinstance(box, dict)] if success else []
-        classes = "、".join(sorted({str(box.get("class_name")) for box in boxes if box.get("class_name")})) or "—"
+        classes = "、".join(sorted({display_class_name(box.get("class_name")) for box in boxes if box.get("class_name")})) or "—"
         rows.append(
             [
                 index,
@@ -3169,7 +3279,7 @@ def batch_analysis_overview_html(items: list[dict[str, Any]] | None) -> str:
         for box in result.get("boxes", []):
             if not isinstance(box, dict):
                 continue
-            name = str(box.get("class_name") or "未命名类别")
+            name = display_class_name(box.get("class_name") or "未命名类别")
             class_counts[name] = class_counts.get(name, 0) + 1
     focus_count = review_levels.get("强烈建议人工复核", 0) + review_levels.get("建议人工复核", 0)
     success_rate = len(successful) / len(items) * 100 if items else 0.0
@@ -3370,7 +3480,7 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
         average = round(float(result.get("avg_confidence", 0.0)), 4) if success and boxes else None
         maximum = round(float(result.get("max_confidence", 0.0)), 4) if success and boxes else None
         elapsed = round(float(result.get("inference_time_ms", 0.0)), 2) if success else None
-        classes = "、".join(sorted({csv_safe_text(box.get("class_name", "")) for box in boxes if box.get("class_name")}))
+        classes = "、".join(sorted({csv_safe_text(display_class_name(box.get("class_name", ""))) for box in boxes if box.get("class_name")}))
         summary_rows.append(
             [
                 image_name,
@@ -3399,7 +3509,7 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
                     "图片平均置信度": average,
                     "图片最高置信度": maximum,
                     "区域编号": region_index if boxes else None,
-                    "类别": csv_safe_text(box.get("class_name", "")),
+                    "类别": csv_safe_text(display_class_name(box.get("class_name", ""))),
                     "区域置信度": round(float(box.get("confidence", 0.0)), 4) if box else None,
                     "复核提示": csv_safe_text(box.get("risk_level", overall_review_level(result))),
                     "坐标x1": bbox[0],
@@ -4345,22 +4455,22 @@ def safe_treatment_answer(
         for result in ok:
             boxes = result.get("boxes", [])
             if requested_classes:
-                boxes = [b for b in boxes if b.get("class_name") in requested_classes]
+                boxes = [b for b in boxes if normalize_class_name(b.get("class_name", "")) in requested_classes]
             if not boxes:
                 continue
             any_box = True
             source = result.get("_chat_source", "")
             lines.append(f"- {source}｜{result['model_name']}：" if source else f"- {result['model_name']}：")
-            for class_name in sorted({b.get("class_name", "-") for b in boxes}):
-                class_boxes = [b for b in boxes if b.get("class_name") == class_name]
+            for class_name in sorted({normalize_class_name(b.get("class_name", "-")) for b in boxes}):
+                class_boxes = [b for b in boxes if normalize_class_name(b.get("class_name", "-")) == class_name]
                 review_count = sum(1 for b in class_boxes if b.get("risk_level") != "可信度较高")
                 confs = ", ".join(f"{float(b.get('confidence', 0.0)):.2f}" for b in class_boxes)
                 lines.append(
-                    f"  - {class_name} 疑似区域 {len(class_boxes)} 个，置信度：{confs}；"
+                    f"  - {display_class_name(class_name)} 疑似区域 {len(class_boxes)} 个，置信度：{confs}；"
                     f"建议人工复核 {review_count} 个。"
                 )
         if not any_box:
-            target_text = "、".join(requested_classes) if requested_classes else "相关类别"
+            target_text = "、".join(display_class_name(name) for name in requested_classes) if requested_classes else "相关类别"
             lines.append(f"- 当前成功推理结果中没有检出 {target_text} 的疑似区域。")
     lines.extend(
         [
@@ -4512,7 +4622,7 @@ def result_class_summary_text(result: dict[str, Any]) -> str:
         return "-"
     counts: dict[str, int] = {}
     for box in boxes:
-        class_name = normalize_class_name(box.get("class_name", "")) or str(box.get("class_name") or "未知类别")
+        class_name = display_class_name(box.get("class_name", "") or "未知类别")
         counts[class_name] = counts.get(class_name, 0) + 1
     return "、".join(f"{name}×{count}" for name, count in sorted(counts.items()))
 
@@ -4531,7 +4641,7 @@ def assistant_export_context_markdown(
     class_counts: dict[str, int] = {}
     for _, result in sources:
         for box in result.get("boxes", []) if isinstance(result.get("boxes", []), list) else []:
-            class_name = normalize_class_name(box.get("class_name", "")) or str(box.get("class_name") or "未知类别")
+            class_name = display_class_name(box.get("class_name", "") or "未知类别")
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
     class_text = "、".join(f"{name}×{count}" for name, count in sorted(class_counts.items())) if class_counts else "当前范围内未检出明确类别"
     lines = [
@@ -5053,7 +5163,7 @@ def retrieve_project_knowledge(question: str) -> list[dict[str, str]]:
     for class_name, info in CLASS_KNOWLEDGE.items():
         aliases = (class_name.lower(), info["title"].lower(), *(alias for alias, target in CLASS_ALIASES.items() if target == class_name))
         if any(token in text for token in aliases):
-            entries.append({"topic": class_name, "meaning": info["meaning"], "review": info["review"], "note": info["note"]})
+            entries.append({"topic": display_class_name(class_name), "meaning": info["meaning"], "review": info["review"], "note": info["note"]})
     if any(word in text for word in ("模型", "对比", "高召回", "高精度", "基线")):
         entries.extend({"topic": spec.name, "meaning": spec.description, "review": MODEL_USE_CASES.get(spec.key, ""), "note": MODEL_RECOMMEND_SCENES.get(spec.key, "")} for spec in MODEL_SPECS)
     if any(word in text for word in ("阈值", "iou", "置信度")):
@@ -5118,7 +5228,7 @@ def model_difference_attribution(results: list[dict[str, Any]], iou_threshold: f
                                 "类型": "类别冲突",
                                 "模型/区域": f"{left['model_name']} 区域 {left_box_index} ↔ {right['model_name']} 区域 {right_box_index}",
                                 "IoU": round(overlap, 3),
-                                "说明": f"相近位置分别预测为 {left_box.get('class_name')} 与 {right_box.get('class_name')}。",
+                                "说明": f"相近位置分别预测为 {display_class_name(left_box.get('class_name'))} 与 {display_class_name(right_box.get('class_name'))}。",
                                 "建议": "优先查看原图和局部放大图，人工判断类别。",
                             }
                         )
@@ -5146,7 +5256,7 @@ def model_difference_attribution(results: list[dict[str, Any]], iou_threshold: f
                     "类型": kind,
                     "模型/区域": f"{result['model_name']} 区域 {box_index}",
                     "IoU": "-",
-                    "说明": f"类别：{box.get('class_name')}，置信度：{float(box.get('confidence', 0)):.3f}。",
+                    "说明": f"类别：{display_class_name(box.get('class_name'))}，置信度：{float(box.get('confidence', 0)):.3f}。",
                     "建议": advice,
                 }
             )
@@ -5186,7 +5296,7 @@ def apply_role_view(content: str, role: str, results: list[dict[str, Any]], comp
         for result in results[:3]:
             for idx, box in enumerate(result.get("boxes", [])[:5], 1):
                 points.append(
-                    f"- 区域 {idx}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0.0) or 0.0):.3f}，{box.get('risk_level', '建议人工复核')}。"
+                    f"- 区域 {idx}：{display_class_name(box.get('class_name', '-'))}，置信度 {float(box.get('confidence', 0.0) or 0.0):.3f}，{box.get('risk_level', '建议人工复核')}。"
                 )
         if points:
             content += "\n\n### 复核重点\n" + "\n".join(points[:8])
@@ -5251,7 +5361,7 @@ def contextual_followup_questions(
                     "result": result,
                     "region_index": region_index,
                     "region_label": followup_region_label(result, region_index, scope),
-                    "class_name": followup_short_text(box.get("class_name") or "未知类别", 18),
+                    "class_name": followup_short_text(display_class_name(box.get("class_name") or "未知类别"), 22),
                     "confidence": confidence,
                     "risk_level": str(box.get("risk_level") or ""),
                 }
@@ -5299,7 +5409,7 @@ def contextual_followup_questions(
             None,
         )
         if high_consistency:
-            class_name = followup_short_text(high_consistency.get("类别") or "该类别", 16)
+            class_name = followup_short_text(display_class_name(high_consistency.get("类别") or "该类别"), 22)
             model_names = followup_short_text(high_consistency.get("涉及模型") or "多个模型", 28)
             add(f"“{class_name}”在{model_names}中一致检出，为什么仍需人工复核？")
 
@@ -5452,7 +5562,7 @@ def generate_consultation_card(
     for result in results:
         source = result.get("_chat_source", "当前结果")
         for index, box in enumerate(result.get("boxes", []), 1):
-            lines.append(f"- {source}｜{result.get('model_name', '-')}｜区域 {index}：疑似 {box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}，{box.get('risk_level', '建议人工复核')}。")
+            lines.append(f"- {source}｜{result.get('model_name', '-')}｜区域 {index}：疑似 {display_class_name(box.get('class_name', '-'))}，置信度 {float(box.get('confidence', 0)):.3f}，{box.get('risk_level', '建议人工复核')}。")
             item_count += 1
             if item_count >= 8:
                 lines.append("- 其余疑似区域请结合系统完整检测表查看。")
@@ -5532,7 +5642,7 @@ def evidence_markdown(scope: str, results: list[dict[str, Any]]) -> str:
     for result in results:
         source = result.get("_chat_source", "当前结果")
         for idx, box in enumerate(result.get("boxes", []), 1):
-            lines.append(f"- {source}｜{result.get('model_name', '-')}｜区域 {idx}：{box.get('class_name', '-')}，置信度 {float(box.get('confidence', 0)):.3f}，{box.get('risk_level', '建议人工复核')}。")
+            lines.append(f"- {source}｜{result.get('model_name', '-')}｜区域 {idx}：{display_class_name(box.get('class_name', '-'))}，置信度 {float(box.get('confidence', 0)):.3f}，{box.get('risk_level', '建议人工复核')}。")
             count += 1
             if count >= 12:
                 lines.append("- 其余区域已省略展示，但仍在本次上下文中供助手分析。")
@@ -5618,7 +5728,7 @@ def lifestyle_guidance_answer(
     detected_classes: list[str] = []
     for result in ok:
         for box in result.get("boxes", []):
-            class_name = box.get("class_name")
+            class_name = display_class_name(box.get("class_name"))
             if class_name and class_name not in detected_classes:
                 detected_classes.append(class_name)
 
@@ -5814,7 +5924,7 @@ def local_rule_answer(
             source = result.get("_chat_source", "")
             lines.append(f"{source}｜{result['model_name']} 检出 {result['box_count']} 个疑似区域。" if source else f"{result['model_name']} 检出 {result['box_count']} 个疑似区域。")
             for i, box in enumerate(result.get("boxes", []), 1):
-                lines.append(f"- 目标 {i}：{box['class_name']}，置信度 {box['confidence']:.3f}，{box['risk_level']}。")
+                lines.append(f"- 目标 {i}：{display_class_name(box.get('class_name', '-'))}，置信度 {box['confidence']:.3f}，{box['risk_level']}。")
     elif "复核" in question:
         for result in ok:
             review_boxes = [b for b in result.get("boxes", []) if b["risk_level"] != "可信度较高"]
@@ -6883,7 +6993,7 @@ def report_pair_metrics(pairs: list[tuple[str, dict[str, Any]]]) -> dict[str, An
     boxes = [box for result in success for box in result.get("boxes", [])]
     confs = [float(box.get("confidence", 0.0)) for box in boxes]
     review_boxes = sum(1 for box in boxes if box.get("risk_level") in {"建议人工复核", "强烈建议人工复核"})
-    classes = sorted({normalize_class_name(box.get("class_name", "")) for box in boxes if box.get("class_name")})
+    classes = sorted({display_class_name(box.get("class_name", "")) for box in boxes if box.get("class_name")})
     return {
         "groups": len(pairs),
         "success": len(success),
@@ -7041,7 +7151,7 @@ def report_region_crop_assets(
         caption = (
             f"{source} | Region {region_idx} | {box.get('class_name', '-')} | Confidence {float(box.get('confidence', 0.0)):.3f}"
             if report_language_is_en(language)
-            else f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
+            else f"{source}｜区域{region_idx}｜{display_class_name(box.get('class_name', '-'))}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
         )
         crops.append((caption, original_path, annotated_path))
     return crops
@@ -7082,7 +7192,7 @@ def report_visual_gallery(
             )
             if annotated_crop is None:
                 continue
-            caption = f"{source}｜区域{region_idx}｜{box.get('class_name', '-')}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
+            caption = f"{source}｜区域{region_idx}｜{display_class_name(box.get('class_name', '-'))}｜置信度 {float(box.get('confidence', 0.0)):.3f}"
             gallery.append((annotated_crop, caption))
             region_count += 1
             if region_count >= max_regions:
@@ -7201,7 +7311,7 @@ def make_report_markdown(
         )
         for i, box in enumerate(detection.get("boxes", []), 1):
             x1, y1, x2, y2 = box["bbox_xyxy"]
-            lines.append(markdown_table_row([i, box["class_name"], f"{box['confidence']:.3f}", f"{x1}, {y1}, {x2}, {y2}", box["risk_level"], box["review_suggestion"]]))
+            lines.append(markdown_table_row([i, display_class_name(box.get("class_name", "-")), f"{box['confidence']:.3f}", f"{x1}, {y1}, {x2}, {y2}", box["risk_level"], box["review_suggestion"]]))
         if not detection.get("boxes"):
             lines.append("| - | - | - | - | 常规人工复核 | 当前阈值下未检测到疑似区域 |")
         lines.append("")
@@ -8726,6 +8836,177 @@ def native_ai_assistant_html() -> str:
           align-items: start;
           min-height: 0;
         }}
+        #page-assistant #native-ai-assistant .native-ai-message-stage {{
+          position: relative;
+          min-width: 0;
+          isolation: isolate;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-message-stage.has-question-rail .native-ai-messages {{
+          padding-right: 52px;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail {{
+          position: absolute;
+          z-index: 8;
+          top: 24px;
+          right: 10px;
+          bottom: 24px;
+          width: 30px;
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          pointer-events: none;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail[hidden],
+        #page-assistant #native-ai-assistant .native-ai-question-rail-toggle[hidden],
+        #page-assistant #native-ai-assistant .native-ai-question-tooltip[hidden] {{
+          display: none !important;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-list {{
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 3px;
+          width: 30px;
+          max-height: 100%;
+          margin: 0;
+          padding: 4px 1px;
+          overflow-x: hidden;
+          overflow-y: auto;
+          list-style: none;
+          pointer-events: auto;
+          scrollbar-width: none;
+          overscroll-behavior: contain;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-list::-webkit-scrollbar {{
+          display: none;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-item {{
+          display: flex;
+          flex: 0 0 auto;
+          justify-content: flex-end;
+          width: 28px;
+          margin: 0;
+          padding: 0;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-question-marker {{
+          display: inline-flex !important;
+          align-items: center;
+          justify-content: flex-end;
+          width: 28px !important;
+          min-width: 28px !important;
+          height: 20px !important;
+          min-height: 20px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          border: 0 !important;
+          border-radius: 7px !important;
+          background: transparent !important;
+          box-shadow: none !important;
+          color: #64748b !important;
+          cursor: pointer;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-marker-line {{
+          display: block;
+          width: 21px;
+          height: 2px;
+          border-radius: 999px;
+          background: #b9c1cb;
+          transition: width 0.16s ease, height 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-question-marker:hover .native-ai-question-marker-line,
+        #page-assistant #native-ai-assistant button.native-ai-question-marker:focus-visible .native-ai-question-marker-line {{
+          width: 25px;
+          background: #475569;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-question-marker.is-active .native-ai-question-marker-line {{
+          width: 24px;
+          height: 3px;
+          background: #172033;
+          box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72);
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-question-marker:focus-visible {{
+          outline: 2px solid rgba(37, 99, 235, 0.72) !important;
+          outline-offset: 1px;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-tooltip {{
+          position: absolute;
+          z-index: 12;
+          right: 50px;
+          top: 50%;
+          width: min(300px, calc(100% - 86px));
+          max-height: 150px;
+          overflow: auto;
+          padding: 10px 12px;
+          border: 1px solid rgba(203, 213, 225, 0.92);
+          border-radius: 11px;
+          background: rgba(255, 255, 255, 0.98);
+          color: #24364a;
+          font-size: 12.5px;
+          font-weight: 760;
+          line-height: 1.55;
+          overflow-wrap: anywhere;
+          pointer-events: none;
+          opacity: 0;
+          transform: translate(6px, -50%);
+          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.14);
+          transition: opacity 0.14s ease, transform 0.14s ease;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-tooltip.is-visible {{
+          opacity: 1;
+          transform: translate(0, -50%);
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-tooltip::after {{
+          content: "";
+          position: absolute;
+          right: -5px;
+          top: 50%;
+          width: 8px;
+          height: 8px;
+          border-top: 1px solid rgba(203, 213, 225, 0.92);
+          border-right: 1px solid rgba(203, 213, 225, 0.92);
+          background: rgba(255, 255, 255, 0.98);
+          transform: translateY(-50%) rotate(45deg);
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-question-rail-toggle {{
+          position: absolute;
+          z-index: 9;
+          top: 12px;
+          right: 10px;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          width: 32px;
+          min-width: 32px;
+          height: 32px;
+          min-height: 32px;
+          padding: 0;
+          border: 1px solid rgba(203, 213, 225, 0.9);
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.94);
+          color: #64748b;
+          cursor: pointer;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.09);
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-toggle-lines {{
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 4px;
+          width: 18px;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-toggle-lines i {{
+          display: block;
+          width: 14px;
+          height: 2px;
+          border-radius: 999px;
+          background: currentColor;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-toggle-lines i:nth-child(2) {{
+          width: 18px;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-question-rail-toggle-lines i:nth-child(3) {{
+          width: 11px;
+        }}
         .native-ai-messages {{
           overflow-y: auto;
           height: clamp(500px, 62vh, 680px);
@@ -8904,38 +9185,61 @@ def native_ai_assistant_html() -> str:
         .native-ai-md tr:last-child td {{
           border-bottom: 0;
         }}
-        .native-ai-actions {{
+        #page-assistant #native-ai-assistant .native-ai-actions {{
           display: flex;
           align-items: center;
           gap: 8px;
           margin-top: 14px;
-          padding-top: 10px;
+          padding-top: 12px;
           border-top: 1px solid rgba(226, 232, 240, 0.68);
         }}
-        .native-ai-action {{
-          border: 1px solid rgba(226, 232, 240, 0.85);
-          border-radius: 13px;
-          min-width: 34px;
-          height: 34px;
-          padding: 0 10px;
-          background: rgba(255, 255, 255, 0.72);
-          color: #64748b;
+        #page-assistant #native-ai-assistant button.native-ai-action {{
+          display: inline-flex !important;
+          flex: 0 0 58px;
+          align-items: center;
+          justify-content: center;
+          width: 58px !important;
+          min-width: 58px !important;
+          height: 40px !important;
+          min-height: 40px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          border: 1px solid transparent !important;
+          border-radius: 14px !important;
+          background: #e6e8ec !important;
+          color: #111827 !important;
           cursor: pointer;
-          font-size: 16px;
+          font-family: "Segoe UI Emoji", "Segoe UI Symbol", "Microsoft YaHei", sans-serif;
+          font-size: 18px !important;
+          font-weight: 600 !important;
           line-height: 1;
-          box-shadow: 0 6px 16px rgba(15, 23, 42, 0.035);
-          transition: background 0.16s ease, color 0.16s ease, transform 0.16s ease, border-color 0.16s ease;
+          box-shadow: none !important;
+          transform: none !important;
+          transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease !important;
         }}
-        .native-ai-action:hover {{
-          background: #ffffff;
-          border-color: rgba(37, 99, 235, 0.28);
-          color: #0f172a;
-          transform: translateY(-1px);
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="copy"] {{
+          font-size: 21px !important;
+          letter-spacing: -1px;
         }}
-        .native-ai-action.active {{
-          background: #eff6ff;
-          border-color: rgba(37, 99, 235, 0.32);
-          color: #1d4ed8;
+        #page-assistant #native-ai-assistant button.native-ai-action:hover {{
+          border-color: rgba(148, 163, 184, 0.18) !important;
+          background: #dcdfe4 !important;
+          color: #0f172a !important;
+          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32) !important;
+          transform: none !important;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action:active {{
+          background: #d2d6dc !important;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action.active {{
+          border-color: rgba(37, 99, 235, 0.18) !important;
+          background: #dbe7f8 !important;
+          color: #1d4ed8 !important;
+          box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08) !important;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action:focus-visible {{
+          outline: 3px solid rgba(37, 99, 235, 0.28) !important;
+          outline-offset: 2px !important;
         }}
         .native-ai-reasons {{
           display: none;
@@ -9394,6 +9698,38 @@ def native_ai_assistant_html() -> str:
             padding: 14px;
             height: 420px;
           }}
+          #page-assistant #native-ai-assistant .native-ai-message-stage.has-question-rail .native-ai-messages {{
+            padding-right: 46px;
+          }}
+          #page-assistant #native-ai-assistant button.native-ai-question-rail-toggle {{
+            display: inline-flex;
+          }}
+          #page-assistant #native-ai-assistant .native-ai-question-rail {{
+            top: 52px;
+            right: 9px;
+            bottom: 18px;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateX(7px);
+            transition: opacity 0.16s ease, visibility 0.16s ease, transform 0.16s ease;
+          }}
+          #page-assistant #native-ai-assistant .native-ai-message-stage.is-question-rail-open .native-ai-question-rail {{
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(0);
+          }}
+          #page-assistant #native-ai-assistant .native-ai-message-stage.is-question-rail-open button.native-ai-question-rail-toggle {{
+            border-color: rgba(37, 99, 235, 0.42);
+            background: #eff6ff;
+            color: #1d4ed8;
+          }}
+          #page-assistant #native-ai-assistant .native-ai-question-tooltip {{
+            right: 47px;
+            width: min(240px, calc(100% - 74px));
+            max-height: 128px;
+            padding: 9px 11px;
+            font-size: 12px;
+          }}
           .native-ai-empty-card {{
             padding: 22px 20px 22px 72px;
           }}
@@ -9425,6 +9761,13 @@ def native_ai_assistant_html() -> str:
           }}
           .native-ai-bubble {{
             max-width: 94%;
+          }}
+        }}
+        @media (prefers-reduced-motion: reduce) {{
+          #page-assistant #native-ai-assistant .native-ai-question-marker-line,
+          #page-assistant #native-ai-assistant .native-ai-question-tooltip,
+          #page-assistant #native-ai-assistant .native-ai-question-rail {{
+            transition: none !important;
           }}
         }}
       </style>
@@ -9464,14 +9807,23 @@ def native_ai_assistant_html() -> str:
         </div>
       </header>
       <div class="native-ai-workbench">
-        <main id="native-ai-messages" class="native-ai-messages" aria-live="polite">
-          <div class="native-ai-empty">
-            <div class="native-ai-empty-card">
-              <h3>可以直接问我当前检测结果</h3>
-              <p>例如“哪些区域需要人工复核？”、“为什么某个区域置信度较低？”、“不同模型结果为什么不一致？”。如果还没有检测结果，我会先解释上传、阈值和报告流程。</p>
+        <div class="native-ai-message-stage">
+          <main id="native-ai-messages" class="native-ai-messages" aria-live="polite">
+            <div class="native-ai-empty">
+              <div class="native-ai-empty-card">
+                <h3>可以直接问我当前检测结果</h3>
+                <p>例如“哪些区域需要人工复核？”、“为什么某个区域置信度较低？”、“不同模型结果为什么不一致？”。如果还没有检测结果，我会先解释上传、阈值和报告流程。</p>
+              </div>
             </div>
-          </div>
-        </main>
+          </main>
+          <nav id="native-ai-question-rail" class="native-ai-question-rail" aria-label="本次提问位置导航" hidden>
+            <ol id="native-ai-question-rail-list" class="native-ai-question-rail-list"></ol>
+          </nav>
+          <div id="native-ai-question-tooltip" class="native-ai-question-tooltip" role="tooltip" hidden></div>
+          <button id="native-ai-question-rail-toggle" class="native-ai-question-rail-toggle" type="button" aria-label="展开本次提问位置导航" aria-controls="native-ai-question-rail" aria-expanded="false" hidden>
+            <span class="native-ai-question-rail-toggle-lines" aria-hidden="true"><i></i><i></i><i></i></span>
+          </button>
+        </div>
         <footer class="native-ai-composer">
           <div class="native-ai-composer-head">
             <div class="native-ai-suggestion-heading">
@@ -9504,7 +9856,12 @@ def native_ai_assistant_js() -> str:
   const root = element.querySelector("#native-ai-assistant");
   if (!root || root.dataset.installed === "true") return;
   root.dataset.installed = "true";
+  const messageStage = root.querySelector(".native-ai-message-stage");
   const messagesEl = root.querySelector("#native-ai-messages");
+  const questionRail = root.querySelector("#native-ai-question-rail");
+  const questionRailList = root.querySelector("#native-ai-question-rail-list");
+  const questionRailToggle = root.querySelector("#native-ai-question-rail-toggle");
+  const questionTooltip = root.querySelector("#native-ai-question-tooltip");
   const suggestionsEl = root.querySelector("#native-ai-suggestions");
   const suggestionCountEl = root.querySelector(".native-ai-suggestion-count");
   const input = root.querySelector("#ask-ai-input textarea");
@@ -9529,6 +9886,11 @@ def native_ai_assistant_js() -> str:
   let lastSuggestionContextAt = "";
   let lastSuggestionSignature = "";
   let refreshingSuggestions = false;
+  let questionSequence = 0;
+  let questionAnchors = [];
+  let activeQuestionId = "";
+  let questionScrollFrame = 0;
+  let tooltipAnchor = null;
 
   function makeSessionId() {
     try {
@@ -9698,7 +10060,154 @@ def native_ai_assistant_js() -> str:
   function scrollBottom() {
     requestAnimationFrame(() => {
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      syncActiveQuestion();
     });
+  }
+
+  function prefersReducedMotion() {
+    return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+  }
+
+  function isCompactQuestionRail() {
+    return window.matchMedia?.("(max-width: 860px)")?.matches === true;
+  }
+
+  function hideQuestionTooltip() {
+    tooltipAnchor = null;
+    if (!questionTooltip) return;
+    questionTooltip.classList.remove("is-visible");
+    questionTooltip.hidden = true;
+  }
+
+  function positionQuestionTooltip(anchor) {
+    if (!questionTooltip || !messageStage || !anchor?.button) return;
+    const stageRect = messageStage.getBoundingClientRect();
+    const buttonRect = anchor.button.getBoundingClientRect();
+    const tooltipHeight = questionTooltip.offsetHeight || 46;
+    const preferredTop = buttonRect.top - stageRect.top + buttonRect.height / 2;
+    const minTop = tooltipHeight / 2 + 8;
+    const maxTop = Math.max(minTop, messageStage.clientHeight - tooltipHeight / 2 - 8);
+    questionTooltip.style.top = Math.min(Math.max(preferredTop, minTop), maxTop) + "px";
+  }
+
+  function showQuestionTooltip(anchor) {
+    if (!questionTooltip || !anchor) return;
+    tooltipAnchor = anchor;
+    questionTooltip.textContent = anchor.text;
+    questionTooltip.hidden = false;
+    positionQuestionTooltip(anchor);
+    requestAnimationFrame(() => {
+      if (tooltipAnchor === anchor) questionTooltip.classList.add("is-visible");
+    });
+  }
+
+  function setQuestionRailOpen(open) {
+    if (!messageStage || !questionRailToggle) return;
+    const nextOpen = Boolean(open && questionAnchors.length && isCompactQuestionRail());
+    messageStage.classList.toggle("is-question-rail-open", nextOpen);
+    questionRailToggle.setAttribute("aria-expanded", String(nextOpen));
+    questionRailToggle.setAttribute("aria-label", nextOpen ? "收起本次提问位置导航" : "展开本次提问位置导航");
+    if (!nextOpen) hideQuestionTooltip();
+  }
+
+  function updateQuestionRailState() {
+    const hasQuestions = questionAnchors.length > 0;
+    if (messageStage) messageStage.classList.toggle("has-question-rail", hasQuestions);
+    if (questionRail) questionRail.hidden = !hasQuestions;
+    if (questionRailToggle) questionRailToggle.hidden = !hasQuestions;
+    if (!hasQuestions) {
+      activeQuestionId = "";
+      setQuestionRailOpen(false);
+    }
+  }
+
+  function keepQuestionMarkerVisible(button) {
+    if (!button || !questionRailList || questionRailList.scrollHeight <= questionRailList.clientHeight) return;
+    const markerTop = button.offsetTop;
+    const markerBottom = markerTop + button.offsetHeight;
+    const viewTop = questionRailList.scrollTop;
+    const viewBottom = viewTop + questionRailList.clientHeight;
+    if (markerTop < viewTop) questionRailList.scrollTop = markerTop - 8;
+    else if (markerBottom > viewBottom) questionRailList.scrollTop = markerBottom - questionRailList.clientHeight + 8;
+  }
+
+  function setActiveQuestion(questionId, ensureVisible = false) {
+    if (!questionId) return;
+    activeQuestionId = questionId;
+    questionAnchors.forEach(anchor => {
+      const active = anchor.id === questionId;
+      anchor.button.classList.toggle("is-active", active);
+      if (active) anchor.button.setAttribute("aria-current", "location");
+      else anchor.button.removeAttribute("aria-current");
+      if (active && ensureVisible) keepQuestionMarkerVisible(anchor.button);
+    });
+  }
+
+  function syncActiveQuestion() {
+    questionScrollFrame = 0;
+    if (!messagesEl || !questionAnchors.length) return;
+    const boxRect = messagesEl.getBoundingClientRect();
+    const targetLine = boxRect.top + messagesEl.clientHeight * 0.32;
+    let closest = questionAnchors[0];
+    let closestDistance = Number.POSITIVE_INFINITY;
+    questionAnchors.forEach(anchor => {
+      const rowRect = anchor.row.getBoundingClientRect();
+      const distance = Math.abs(rowRect.top - targetLine);
+      if (distance < closestDistance) {
+        closest = anchor;
+        closestDistance = distance;
+      }
+    });
+    setActiveQuestion(closest.id, closest.id !== activeQuestionId);
+  }
+
+  function scheduleQuestionSync() {
+    if (questionScrollFrame || !window.requestAnimationFrame) return;
+    questionScrollFrame = window.requestAnimationFrame(syncActiveQuestion);
+  }
+
+  function jumpToQuestion(anchor) {
+    if (!anchor?.row || !messagesEl) return;
+    const boxRect = messagesEl.getBoundingClientRect();
+    const rowRect = anchor.row.getBoundingClientRect();
+    const nextTop = Math.max(0, messagesEl.scrollTop + rowRect.top - boxRect.top - 18);
+    setActiveQuestion(anchor.id, true);
+    messagesEl.scrollTo({
+      top: nextTop,
+      behavior: prefersReducedMotion() ? "auto" : "smooth"
+    });
+    if (isCompactQuestionRail()) setQuestionRailOpen(false);
+    hideQuestionTooltip();
+  }
+
+  function registerQuestionAnchor(row, text) {
+    if (!row || !questionRailList) return;
+    const id = row.dataset.turnId || ("native-ai-turn-" + (++questionSequence));
+    row.id = id;
+    row.dataset.turnId = id;
+    const item = document.createElement("li");
+    item.className = "native-ai-question-rail-item";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "native-ai-question-marker";
+    button.dataset.turnId = id;
+    button.setAttribute("aria-controls", id);
+    button.setAttribute("aria-label", "跳转到第 " + (questionAnchors.length + 1) + " 个问题：" + text);
+    const line = document.createElement("span");
+    line.className = "native-ai-question-marker-line";
+    line.setAttribute("aria-hidden", "true");
+    button.appendChild(line);
+    item.appendChild(button);
+    questionRailList.appendChild(item);
+    const anchor = {id, row, button, text};
+    questionAnchors.push(anchor);
+    button.addEventListener("pointerenter", () => showQuestionTooltip(anchor));
+    button.addEventListener("pointerleave", hideQuestionTooltip);
+    button.addEventListener("focus", () => showQuestionTooltip(anchor));
+    button.addEventListener("blur", hideQuestionTooltip);
+    button.addEventListener("click", () => jumpToQuestion(anchor));
+    updateQuestionRailState();
+    setActiveQuestion(id, true);
   }
 
   function removeEmptyState() {
@@ -9726,9 +10235,14 @@ def native_ai_assistant_js() -> str:
     removeEmptyState();
     const row = document.createElement("div");
     row.className = "native-ai-msg user";
+    const turnId = "native-ai-turn-" + (++questionSequence);
+    row.id = turnId;
+    row.dataset.turnId = turnId;
     row.innerHTML = `<div class="native-ai-bubble">${escapeHtml(text).replace(/\n/g, "<br>")}</div>`;
     messagesEl.appendChild(row);
+    registerQuestionAnchor(row, String(text || "").trim());
     scrollBottom();
+    return row;
   }
 
   function addLoadingMessage() {
@@ -10222,6 +10736,17 @@ def native_ai_assistant_js() -> str:
   });
 
   sendBtn.addEventListener("click", () => sendMessage());
+  messagesEl.addEventListener("scroll", scheduleQuestionSync, {passive: true});
+  questionRailList?.addEventListener("scroll", hideQuestionTooltip, {passive: true});
+  questionRailToggle?.addEventListener("click", () => {
+    const opened = messageStage?.classList.contains("is-question-rail-open");
+    setQuestionRailOpen(!opened);
+  });
+  window.addEventListener("resize", () => {
+    if (!isCompactQuestionRail()) setQuestionRailOpen(false);
+    if (tooltipAnchor) positionQuestionTooltip(tooltipAnchor);
+    scheduleQuestionSync();
+  });
   root.addEventListener("dental-ai-submit", event => {
     const message = String(event.detail?.message || "").trim();
     if (!message || sending) return;
@@ -10250,6 +10775,10 @@ def native_ai_assistant_js() -> str:
   document.addEventListener("dental-page-change", event => {
     if (event.detail && event.detail.page === "assistant") {
       refreshSuggestions("page", {force: true});
+      requestAnimationFrame(() => {
+        if (!isCompactQuestionRail()) setQuestionRailOpen(false);
+        scheduleQuestionSync();
+      });
     }
   });
   document.addEventListener("visibilitychange", () => {
@@ -10377,15 +10906,15 @@ def build_app() -> gr.Blocks:
                         with gr.Row(equal_height=False, elem_classes="detection-model-preset-row"):
                             det_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
                             det_preset = gr.Radio(
-                                ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.70）", "高精度复核（0.50 / 0.60）"],
-                                value="均衡推荐（0.25 / 0.70）",
+                                ["高召回初筛（0.15 / 0.55）", "均衡推荐（0.25 / 0.55）", "高精度复核（0.50 / 0.60）"],
+                                value="均衡推荐（0.25 / 0.55）",
                                 label="阈值预设",
                                 elem_classes="threshold-preset-control",
                             )
                         with gr.Row(elem_classes="detection-threshold-row"):
                             det_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                            det_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
-                        det_threshold_hint = gr.Markdown(threshold_hint(0.25, 0.70))
+                            det_iou = gr.Slider(0.1, 0.9, value=0.55, step=0.05, label="IoU 阈值")
+                        det_threshold_hint = gr.Markdown(threshold_hint(0.25, 0.55))
                         with gr.Accordion("检测框可视化选项", open=True):
                             with gr.Row(elem_classes="visual-option-grid"):
                                 det_show_label = gr.Checkbox(
@@ -10408,7 +10937,7 @@ def build_app() -> gr.Blocks:
                                 )
                                 det_color_mode = gr.Dropdown(
                                     ["按目标编号配色", "按类别配色", "按置信度配色"],
-                                    value="按目标编号配色",
+                                    value="按类别配色",
                                     label="检测框配色方式",
                                     elem_classes=["visual-option-control", "visual-option-color-mode"],
                                 )
@@ -10447,7 +10976,7 @@ def build_app() -> gr.Blocks:
                     )
                     with gr.Row(elem_classes="result-filter-bar"):
                         det_search = gr.Textbox(label="搜索结果", placeholder="搜索类别、风险或建议", lines=1)
-                        det_class_filter = gr.Dropdown(["全部类别", *CLASS_KNOWLEDGE.keys()], value="全部类别", label="类别筛选")
+                        det_class_filter = gr.Dropdown(["全部类别", *(display_class_name(name) for name in CLASS_KNOWLEDGE)], value="全部类别", label="类别筛选")
                         det_risk_filter = gr.Dropdown(["全部风险", "强烈建议人工复核", "建议人工复核", "可信度较高"], value="全部风险", label="复核优先级")
                         det_sort = gr.Dropdown(
                             ["按区域编号", "风险优先", "置信度从高到低", "置信度从低到高", "区域占比从大到小", "区域占比从小到大"],
@@ -10560,7 +11089,7 @@ def build_app() -> gr.Blocks:
                     with gr.Group(elem_classes=["sticky-actionbar", "detection-controls"], elem_id="compare-controls"):
                         with gr.Row(elem_classes=["compare-threshold-row", "detection-threshold-row"], elem_id="compare-threshold-row"):
                             cmp_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                            cmp_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                            cmp_iou = gr.Slider(0.1, 0.9, value=0.55, step=0.05, label="IoU 阈值")
                         with gr.Accordion("检测框可视化选项", open=True):
                             with gr.Row(elem_classes="visual-option-grid"):
                                 cmp_show_label = gr.Checkbox(
@@ -10583,7 +11112,7 @@ def build_app() -> gr.Blocks:
                                 )
                                 cmp_color_mode = gr.Dropdown(
                                     ["按目标编号配色", "按类别配色", "按置信度配色"],
-                                    value="按目标编号配色",
+                                    value="按类别配色",
                                     label="检测框配色方式",
                                     elem_classes=["visual-option-control", "visual-option-color-mode"],
                                 )
@@ -10778,7 +11307,7 @@ def build_app() -> gr.Blocks:
                         batch_model = gr.Dropdown(model_options(), value=model_options()[0], label="选择模型")
                         with gr.Row(elem_classes="detection-threshold-row"):
                             batch_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="置信度阈值")
-                            batch_iou = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label="IoU 阈值")
+                            batch_iou = gr.Slider(0.1, 0.9, value=0.55, step=0.05, label="IoU 阈值")
                         with gr.Accordion("检测框可视化选项", open=True):
                             with gr.Row(elem_classes="visual-option-grid"):
                                 batch_show_label = gr.Checkbox(
@@ -10801,7 +11330,7 @@ def build_app() -> gr.Blocks:
                                 )
                                 batch_color_mode = gr.Dropdown(
                                     ["按目标编号配色", "按类别配色", "按置信度配色"],
-                                    value="按目标编号配色",
+                                    value="按类别配色",
                                     label="检测框配色方式",
                                     elem_classes=["visual-option-control", "visual-option-color-mode"],
                                 )
