@@ -7966,10 +7966,17 @@ def generate_report_with_progress(
     report_language: str = "中文",
 ):
     """Stream real report-generation stages to the in-page progress bar."""
-    skipped = lambda: tuple(gr.skip() for _ in range(5))
+    # Clear the previous gallery before a new run.  Keeping the old gallery
+    # visible while the Markdown is being rebuilt leaves an empty Gradio
+    # gallery shell over the bottom of the preview in some browser layouts.
+    reset_gallery = gr.update(value=[], visible=False)
     yield (
         detection_progress_update(6, "正在检查报告数据", "正在确认检测结果、报告类型和导出语言。"),
-        *skipped(),
+        gr.skip(),
+        reset_gallery,
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
     )
     source_error = report_source_error(report_type, detection, comparison, batch_items)
     if source_error:
@@ -7986,12 +7993,20 @@ def generate_report_with_progress(
         ensure_dirs()
         yield (
             detection_progress_update(22, "正在整理报告素材", "正在收集原图、检测结果图和区域级复核信息。"),
-            *skipped(),
+            gr.skip(),
+            reset_gallery,
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
         )
         gallery = report_visual_gallery(report_type, detection, comparison, batch_items)
         yield (
             detection_progress_update(42, "正在编排报告内容", "正在生成摘要、明细表、复核建议和模型追溯信息。"),
-            *skipped(),
+            gr.skip(),
+            reset_gallery,
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
         )
         markdown = make_report_markdown(detection, comparison, batch_items, report_type, report_language)
         report_prefix = {
@@ -8016,12 +8031,20 @@ def generate_report_with_progress(
             temp_md.write_text(markdown, encoding="utf-8")
             yield (
                 detection_progress_update(62, "正在生成 PDF 报告", "Markdown 内容已整理，正在排版并导出可检索 PDF。"),
-                *skipped(),
+                gr.skip(),
+                reset_gallery,
+                gr.skip(),
+                gr.skip(),
+                gr.skip(),
             )
             export_report_pdf(markdown, temp_pdf)
             yield (
                 detection_progress_update(84, "正在生成 Word 报告", "PDF 已完成，正在生成含原生表格的可编辑 Word 报告。"),
-                *skipped(),
+                gr.skip(),
+                reset_gallery,
+                gr.skip(),
+                gr.skip(),
+                gr.skip(),
             )
             export_report_docx(markdown, temp_docx)
             export_markdown_bundle(markdown, temp_bundle, REPORT_DIR)
@@ -8064,10 +8087,13 @@ def generate_model_comparison_tab_report_with_progress(
 
 def generate_batch_report_with_progress(items: list[dict[str, Any]] | None):
     """Generate the batch Markdown/CSV pair while streaming visible stages."""
-    skipped = lambda: tuple(gr.skip() for _ in range(4))
+    reset_gallery = gr.update(value=[], visible=False)
     yield (
         detection_progress_update(8, "正在检查批量结果", "正在确认批量任务和可导出的汇总数据。"),
-        *skipped(),
+        gr.skip(),
+        reset_gallery,
+        gr.skip(),
+        gr.skip(),
     )
     records = list(items or [])
     if not records:
@@ -8083,12 +8109,18 @@ def generate_batch_report_with_progress(items: list[dict[str, Any]] | None):
     try:
         yield (
             detection_progress_update(32, "正在整理批量明细", "正在汇总逐图状态、疑似区域和复核优先级。"),
-            *skipped(),
+            gr.skip(),
+            reset_gallery,
+            gr.skip(),
+            gr.skip(),
         )
         md_path, csv_path, bundle_path = export_batch_report(records)
         yield (
             detection_progress_update(86, "正在准备报告预览", "Markdown 图文包与结构化 CSV 已生成，正在加载页面预览。"),
-            *skipped(),
+            gr.skip(),
+            reset_gallery,
+            gr.skip(),
+            gr.skip(),
         )
         preview_raw = safe_read_text(Path(md_path), limit=24000) if md_path else "批量报告未能生成。"
         yield (

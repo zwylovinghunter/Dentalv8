@@ -3840,6 +3840,31 @@ button.solid-primary-action:hover {
 }
 #page-history .gallery,
 #page-report .gallery { border-radius: var(--radius-panel) !important; overflow: hidden !important; }
+#page-report .gallery:not(:has(img)),
+.detection-report-panel .gallery:not(:has(img)) {
+  /* Gradio can retain the Gallery shell while a report is being rebuilt.
+     An empty shell must not reserve space or sit above the Markdown paper. */
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  overflow: hidden !important;
+}
+#page-report .gallery:has(img),
+.detection-report-panel .gallery:has(img) {
+  position: static !important;
+  inset: auto !important;
+  clear: both !important;
+  width: 100% !important;
+  min-height: 0 !important;
+  height: auto !important;
+  margin: 14px 0 0 !important;
+  z-index: 0 !important;
+}
 #page-history .history-action-row,
 #page-history .history-filter-row,
 #page-report .report-controls-row,
@@ -5395,6 +5420,12 @@ button.solid-primary-action:hover {
   margin: 12px 0 0 !important;
 }
 .detection-report-panel .detection-report-preview {
+  position: relative !important;
+  z-index: 1 !important;
+  isolation: isolate !important;
+  display: block !important;
+  width: 100% !important;
+  min-height: 0 !important;
   margin: 0 !important;
   padding: 0 !important;
   overflow: auto !important;
@@ -5404,6 +5435,9 @@ button.solid-primary-action:hover {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .75) !important;
 }
 .detection-report-panel .detection-report-preview .prose {
+  position: relative !important;
+  z-index: 1 !important;
+  display: flow-root !important;
   margin: 0 !important;
   padding: 14px !important;
   border: 0 !important;
