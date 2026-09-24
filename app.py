@@ -74,14 +74,17 @@ from ui.styles import APP_CSS
 AI_CLOUD_PROVIDER = os.getenv("DENTAL_AI_PROVIDER", "google").strip().lower()
 GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")).strip()
 GOOGLE_BASE_URL = os.getenv("GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").strip().rstrip("/")
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.6-flash").strip()
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "auto").strip()
 GOOGLE_FALLBACK_MODELS = [
     model.strip()
-    for model in os.getenv("GOOGLE_FALLBACK_MODELS", "gemini-3.5-flash-lite").split(",")
+    for model in os.getenv("GOOGLE_FALLBACK_MODELS", "gemini-3.8-flash").split(",")
     if model.strip()
 ]
 GOOGLE_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TIMEOUT_SECONDS", "40"))
 GOOGLE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TOTAL_TIMEOUT_SECONDS", "55"))
+GOOGLE_MODEL_DISCOVERY_TTL_SECONDS = float(os.getenv("GOOGLE_MODEL_DISCOVERY_TTL_SECONDS", "300"))
+_GOOGLE_MODEL_DISCOVERY_LOCK = threading.Lock()
+_GOOGLE_MODEL_DISCOVERY_CACHE: tuple[float, str | None] = (0.0, None)
 
 # Ollama Cloud remains available as a selectable provider.
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
@@ -5967,13 +5970,85 @@ def cloud_source_display_name(source_note: str = "", provider: str | None = None
     return cloud_provider_display_name(provider)
 
 
-def google_model_candidates() -> list[str]:
+def google_model_is_auto() -> bool:
+    return str(GOOGLE_MODEL or "").strip().lower() in {"", "auto", "latest", "latest-flash", "dynamic"}
+
+
+def _clean_google_model_name(value: Any) -> str:
+    return str(value or "").strip().removeprefix("models/").strip()
+
+
+def _google_flash_version(model: str) -> tuple[int, int, int, int]:
+    """Rank Flash model ids while preferring stable over preview at one version."""
+    match = re.search(r"gemini-(\d+)(?:\.(\d+))?(?:\.(\d+))?", model.lower())
+    if not match:
+        return (-1, -1, -1, -1)
+    version = tuple(int(part or 0) for part in match.groups())
+    stable = 1 if "preview" not in model.lower() else 0
+    return (*version, stable)
+
+
+def discover_latest_google_flash_model(headers: dict[str, str], timeout: float) -> str | None:
+    """Discover the newest usable Gemini Flash model from the provider's model list.
+
+    The OpenAI-compatible Gemini endpoint exposes `/models` on supported
+    gateways. Discovery is best-effort and cached; the caller always retains
+    `gemini-3.8-flash` as a deterministic fallback when the endpoint is not
+    available.
+    """
+    global _GOOGLE_MODEL_DISCOVERY_CACHE
+    now = time.monotonic()
+    cached_at, cached_model = _GOOGLE_MODEL_DISCOVERY_CACHE
+    if now - cached_at < max(0.0, GOOGLE_MODEL_DISCOVERY_TTL_SECONDS):
+        return cached_model
+    with _GOOGLE_MODEL_DISCOVERY_LOCK:
+        cached_at, cached_model = _GOOGLE_MODEL_DISCOVERY_CACHE
+        if now - cached_at < max(0.0, GOOGLE_MODEL_DISCOVERY_TTL_SECONDS):
+            return cached_model
+        discovered: str | None = None
+        try:
+            response = requests.get(
+                f"{GOOGLE_BASE_URL}/models",
+                headers=headers,
+                timeout=max(1.0, float(timeout)),
+            )
+            if response.ok:
+                payload = response.json()
+                raw_models = payload.get("data") if isinstance(payload, dict) else None
+                if not isinstance(raw_models, list) and isinstance(payload, dict):
+                    raw_models = payload.get("models")
+                candidates: list[str] = []
+                for item in raw_models or []:
+                    if isinstance(item, dict):
+                        model = _clean_google_model_name(
+                            item.get("id") or item.get("name") or item.get("baseModelId")
+                        )
+                    else:
+                        model = _clean_google_model_name(item)
+                    lowered = model.lower()
+                    if (
+                        model
+                        and "gemini" in lowered
+                        and "flash" in lowered
+                        and not any(token in lowered for token in ("flash-lite", "flash_lite", "-live", "-tts", "-image"))
+                    ):
+                        candidates.append(model)
+                if candidates:
+                    discovered = max(candidates, key=_google_flash_version)
+        except Exception:
+            discovered = None
+        _GOOGLE_MODEL_DISCOVERY_CACHE = (time.monotonic(), discovered)
+        return discovered
+
+
+def google_model_candidates(discovered: str | None = None) -> list[str]:
     candidates: list[str] = []
-    for model in [GOOGLE_MODEL, *GOOGLE_FALLBACK_MODELS]:
-        model = str(model or "").strip().removeprefix("models/")
+    configured = [] if google_model_is_auto() else [GOOGLE_MODEL]
+    for model in [discovered, *configured, *GOOGLE_FALLBACK_MODELS]:
+        model = _clean_google_model_name(model)
         if model and model not in candidates:
             candidates.append(model)
-    return candidates or ["gemini-2.5-flash"]
+    return candidates or ["gemini-3.8-flash"]
 
 
 def ollama_model_candidates() -> list[str]:
@@ -6037,7 +6112,20 @@ def google_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[s
     }
     url = f"{GOOGLE_BASE_URL}/chat/completions"
     failures: list[str] = []
-    for model in google_model_candidates():
+    discovered_model = None
+    discovery_note = ""
+    if google_model_is_auto():
+        remaining_for_discovery = float(GOOGLE_TOTAL_TIMEOUT_SECONDS) - (time.perf_counter() - started)
+        if remaining_for_discovery > 1:
+            discovered_model = discover_latest_google_flash_model(
+                headers,
+                min(5.0, remaining_for_discovery),
+            )
+        if discovered_model:
+            discovery_note = "自动匹配最新 Flash"
+        else:
+            discovery_note = "自动匹配失败，已回退 gemini-3.8-flash"
+    for model in google_model_candidates(discovered_model):
         remaining = float(GOOGLE_TOTAL_TIMEOUT_SECONDS) - (time.perf_counter() - started)
         if remaining <= 0:
             failures.append(f"已达到总超时 {GOOGLE_TOTAL_TIMEOUT_SECONDS:g} 秒")
@@ -6072,6 +6160,8 @@ def google_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[s
         content = google_response_text(data)
         if content:
             note = f"Google Gemini 回答（{model}）"
+            if discovery_note:
+                note += f"；{discovery_note}"
             if failures:
                 note += "；已跳过不可用模型：" + "；".join(failures)
             return content, True, note, round((time.perf_counter() - started) * 1000, 1)
