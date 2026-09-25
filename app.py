@@ -13,6 +13,7 @@ from io import BytesIO
 import math
 import os
 import re
+import random
 import socket
 import threading
 import time
@@ -77,14 +78,35 @@ GOOGLE_BASE_URL = os.getenv("GOOGLE_BASE_URL", "https://generativelanguage.googl
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "auto").strip()
 GOOGLE_FALLBACK_MODELS = [
     model.strip()
-    for model in os.getenv("GOOGLE_FALLBACK_MODELS", "gemini-3.8-flash").split(",")
+    for model in os.getenv("GOOGLE_FALLBACK_MODELS", "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash").split(",")
     if model.strip()
 ]
 GOOGLE_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TIMEOUT_SECONDS", "40"))
 GOOGLE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TOTAL_TIMEOUT_SECONDS", "55"))
 GOOGLE_MODEL_DISCOVERY_TTL_SECONDS = float(os.getenv("GOOGLE_MODEL_DISCOVERY_TTL_SECONDS", "300"))
+GOOGLE_RETRY_ATTEMPTS = max(1, int(os.getenv("GOOGLE_RETRY_ATTEMPTS", "3")))
 _GOOGLE_MODEL_DISCOVERY_LOCK = threading.Lock()
 _GOOGLE_MODEL_DISCOVERY_CACHE: tuple[float, str | None] = (0.0, None)
+
+# Alibaba Cloud Model Studio (DashScope) uses the OpenAI-compatible endpoint.
+# The key is read only from the environment and is never embedded in source.
+ALIYUN_API_KEY = (os.getenv("DASHSCOPE_API_KEY") or os.getenv("ALIYUN_API_KEY", "")).strip()
+ALIYUN_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").strip().rstrip("/")
+ALIYUN_MODEL_LIST_URL = os.getenv("DASHSCOPE_MODEL_LIST_URL", "https://dashscope.aliyuncs.com/api/v1/models").strip().rstrip("/")
+ALIYUN_PREFERRED_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "DASHSCOPE_PREFERRED_MODELS",
+        "qwen3.8-flash,qwen3.7-plus,qwen3.7-flash,deepseek-v4-flash,qwen3.6-plus,qwen3.6-flash,glm-5.2,kimi-k3",
+    ).split(",")
+    if model.strip()
+]
+ALIYUN_TIMEOUT_SECONDS = float(os.getenv("DASHSCOPE_TIMEOUT_SECONDS", "35"))
+ALIYUN_TOTAL_TIMEOUT_SECONDS = float(os.getenv("DASHSCOPE_TOTAL_TIMEOUT_SECONDS", "75"))
+ALIYUN_MODEL_DISCOVERY_TTL_SECONDS = float(os.getenv("DASHSCOPE_MODEL_DISCOVERY_TTL_SECONDS", "300"))
+ALIYUN_RETRY_ATTEMPTS = max(1, int(os.getenv("DASHSCOPE_RETRY_ATTEMPTS", "2")))
+_ALIYUN_MODEL_DISCOVERY_LOCK = threading.Lock()
+_ALIYUN_MODEL_DISCOVERY_CACHE: tuple[float, list[str]] = (0.0, [])
 
 # Ollama Cloud remains available as a selectable provider.
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
@@ -5954,17 +5976,26 @@ def normalize_cloud_provider(provider: str | None = None) -> str:
     value = str(provider or AI_CLOUD_PROVIDER or "google").strip().lower()
     if value in {"ollama", "ollama cloud", "ollama_ai"}:
         return "ollama"
+    if value in {"aliyun", "alibaba", "dashscope", "bailian", "阿里云", "阿里云百炼"}:
+        return "aliyun"
     return "google"
 
 
 def cloud_provider_display_name(provider: str | None = None) -> str:
-    return "Ollama AI" if normalize_cloud_provider(provider) == "ollama" else "Google Gemini"
+    normalized = normalize_cloud_provider(provider)
+    if normalized == "ollama":
+        return "Ollama AI"
+    if normalized == "aliyun":
+        return "阿里云百炼"
+    return "Google Gemini"
 
 
 def cloud_source_display_name(source_note: str = "", provider: str | None = None) -> str:
     note = str(source_note or "")
     if "Google Gemini" in note or "Gemini" in note:
         return "Google Gemini"
+    if "阿里云" in note or "DashScope" in note or "百炼" in note:
+        return "阿里云百炼"
     if "Ollama" in note:
         return "Ollama AI"
     return cloud_provider_display_name(provider)
@@ -6103,6 +6134,70 @@ def google_response_text(data: dict[str, Any]) -> str:
     return ""
 
 
+def transient_cloud_status(status_code: int) -> bool:
+    return status_code in {408, 429} or status_code >= 500
+
+
+def transient_retry_delay(attempt: int) -> float:
+    """Small exponential backoff with jitter for transient provider errors."""
+    return min(8.0, 0.8 * (2**attempt)) + random.uniform(0.0, 0.35)
+
+
+def openai_compatible_chat_candidate(
+    url: str,
+    headers: dict[str, str],
+    model: str,
+    messages: list[dict[str, Any]],
+    started: float,
+    total_timeout: float,
+    request_timeout_limit: float,
+    retry_attempts: int,
+) -> tuple[str, str]:
+    """Call one OpenAI-compatible model with bounded transient retries."""
+    last_failure = ""
+    for attempt in range(max(1, retry_attempts)):
+        remaining = float(total_timeout) - (time.perf_counter() - started)
+        if remaining <= 0:
+            return "", f"{model}: 已达到总超时 {total_timeout:g} 秒"
+        request_timeout = max(3.0, min(float(request_timeout_limit), remaining))
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json={"model": model, "messages": messages, "max_tokens": 4096},
+                timeout=request_timeout,
+            )
+        except requests.Timeout:
+            last_failure = f"{model}: 请求超过 {request_timeout:g} 秒"
+        except requests.ConnectionError:
+            last_failure = f"{model}: 连接失败"
+        except Exception as exc:
+            return "", f"{model}: 请求失败（{type(exc).__name__}）"
+        else:
+            if transient_cloud_status(response.status_code):
+                detail = cloud_error_detail(response)
+                last_failure = f"{model}: HTTP {response.status_code}" + (f"：{detail}" if detail else "")
+            elif response.status_code in {400, 401, 403, 404}:
+                detail = cloud_error_detail(response)
+                return "", f"{model}: HTTP {response.status_code}" + (f"：{detail}" if detail else "")
+            else:
+                try:
+                    response.raise_for_status()
+                    content = google_response_text(response.json())
+                except Exception as exc:
+                    return "", f"{model}: 响应解析失败（{type(exc).__name__}）"
+                if content:
+                    return content, ""
+                last_failure = f"{model}: 响应缺少有效内容"
+        if attempt + 1 < max(1, retry_attempts):
+            delay = transient_retry_delay(attempt)
+            remaining = float(total_timeout) - (time.perf_counter() - started)
+            if remaining <= delay:
+                break
+            time.sleep(delay)
+    return "", last_failure or f"{model}: 未获得有效响应"
+
+
 def google_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[str, bool, str, float]:
     if not GOOGLE_API_KEY:
         return "", False, "当前使用 Google Gemini，但未配置 GOOGLE_API_KEY，已自动使用本地规则模式。", 0.0
@@ -6126,38 +6221,16 @@ def google_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[s
         else:
             discovery_note = "自动匹配失败，已回退 gemini-3.8-flash"
     for model in google_model_candidates(discovered_model):
-        remaining = float(GOOGLE_TOTAL_TIMEOUT_SECONDS) - (time.perf_counter() - started)
-        if remaining <= 0:
-            failures.append(f"已达到总超时 {GOOGLE_TOTAL_TIMEOUT_SECONDS:g} 秒")
-            break
-        request_timeout = max(3.0, min(float(GOOGLE_TIMEOUT_SECONDS), remaining))
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": 4096,
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=request_timeout)
-        except requests.Timeout:
-            failures.append(f"{model}: 请求超过 {request_timeout:g} 秒")
-            continue
-        except requests.ConnectionError:
-            failures.append(f"{model}: 连接失败")
-            continue
-        except Exception as exc:
-            failures.append(f"{model}: 请求失败（{type(exc).__name__}）")
-            continue
-        if response.status_code in {400, 401, 403, 404, 429} or response.status_code >= 500:
-            detail = cloud_error_detail(response)
-            failures.append(f"{model}: HTTP {response.status_code}" + (f"：{detail}" if detail else ""))
-            continue
-        try:
-            response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            failures.append(f"{model}: 响应解析失败（{type(exc).__name__}）")
-            continue
-        content = google_response_text(data)
+        content, failure = openai_compatible_chat_candidate(
+            url,
+            headers,
+            model,
+            messages,
+            started,
+            GOOGLE_TOTAL_TIMEOUT_SECONDS,
+            GOOGLE_TIMEOUT_SECONDS,
+            GOOGLE_RETRY_ATTEMPTS,
+        )
         if content:
             note = f"Google Gemini 回答（{model}）"
             if discovery_note:
@@ -6165,9 +6238,126 @@ def google_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[s
             if failures:
                 note += "；已跳过不可用模型：" + "；".join(failures)
             return content, True, note, round((time.perf_counter() - started) * 1000, 1)
-        failures.append(f"{model}: 响应缺少有效内容")
+        if failure:
+            failures.append(failure)
     detail = "；".join(failures) if failures else "未获得有效响应"
     return "", False, f"Google Gemini 候选模型均不可用：{detail}，已自动使用本地规则模式。", round((time.perf_counter() - started) * 1000, 1)
+
+
+def _aliyun_model_name(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("model") or item.get("id") or item.get("name") or "").strip()
+    return str(item or "").strip()
+
+
+def _aliyun_chat_model(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return True
+    capabilities = {str(value).lower() for value in (item.get("capabilities") or [])}
+    modality = item.get("inference_metadata") or {}
+    response_modality = {str(value).lower() for value in (modality.get("response_modality") or [])} if isinstance(modality, dict) else set()
+    name = _aliyun_model_name(item).lower()
+    excluded = ("embedding", "rerank", "image", "video", "audio", "speech", "tts", "asr", "ocr", "wanx", "kling", "omni")
+    if any(token in name for token in excluded):
+        return False
+    if capabilities and "tg" not in capabilities and "text" not in response_modality:
+        return False
+    return bool(name)
+
+
+def discover_aliyun_chat_models(headers: dict[str, str], timeout: float) -> list[str]:
+    """Read the user's accessible DashScope text-generation models when supported."""
+    global _ALIYUN_MODEL_DISCOVERY_CACHE
+    now = time.monotonic()
+    cached_at, cached_models = _ALIYUN_MODEL_DISCOVERY_CACHE
+    if now - cached_at < max(0.0, ALIYUN_MODEL_DISCOVERY_TTL_SECONDS):
+        return list(cached_models)
+    with _ALIYUN_MODEL_DISCOVERY_LOCK:
+        cached_at, cached_models = _ALIYUN_MODEL_DISCOVERY_CACHE
+        if now - cached_at < max(0.0, ALIYUN_MODEL_DISCOVERY_TTL_SECONDS):
+            return list(cached_models)
+        discovered: list[str] = []
+        try:
+            page_size = 100
+            total = None
+            fetched_count = 0
+            for page_no in range(1, 6):
+                remaining = float(timeout) - (time.monotonic() - now)
+                if remaining <= 0:
+                    break
+                response = requests.get(
+                    ALIYUN_MODEL_LIST_URL,
+                    headers=headers,
+                    params={"capabilities": "TG", "page_no": page_no, "page_size": page_size},
+                    timeout=max(1.0, min(5.0, remaining)),
+                )
+                if not response.ok:
+                    break
+                payload = response.json()
+                output = payload.get("output", {}) if isinstance(payload, dict) else {}
+                raw_models = output.get("models", []) if isinstance(output, dict) else []
+                fetched_count += len(raw_models)
+                discovered.extend(
+                    _aliyun_model_name(item)
+                    for item in raw_models
+                    if _aliyun_chat_model(item)
+                )
+                if isinstance(output, dict):
+                    try:
+                        total = int(output.get("total"))
+                    except (TypeError, ValueError):
+                        total = None
+                if not raw_models or (total is not None and fetched_count >= total) or len(raw_models) < page_size:
+                    break
+        except Exception:
+            discovered = []
+        _ALIYUN_MODEL_DISCOVERY_CACHE = (time.monotonic(), list(dict.fromkeys(discovered)))
+        return discovered
+
+
+def aliyun_model_candidates(discovered: list[str] | None = None) -> list[str]:
+    candidates: list[str] = []
+    for model in [*ALIYUN_PREFERRED_MODELS, *(discovered or [])]:
+        model = str(model or "").strip()
+        if model and model not in candidates:
+            candidates.append(model)
+    return candidates or ["qwen3.8-flash", "qwen3.7-plus", "qwen3.7-flash", "qwen3.6-flash"]
+
+
+def aliyun_cloud_chat(messages: list[dict[str, Any]], started: float) -> tuple[str, bool, str, float]:
+    if not ALIYUN_API_KEY:
+        return "", False, "当前使用阿里云百炼，但未配置 DASHSCOPE_API_KEY，已自动使用本地规则模式。", 0.0
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + ALIYUN_API_KEY,
+    }
+    discovered: list[str] = []
+    remaining = float(ALIYUN_TOTAL_TIMEOUT_SECONDS) - (time.perf_counter() - started)
+    if remaining > 1:
+        discovered = discover_aliyun_chat_models(headers, min(5.0, remaining))
+    failures: list[str] = []
+    for model in aliyun_model_candidates(discovered):
+        content, failure = openai_compatible_chat_candidate(
+            f"{ALIYUN_BASE_URL}/chat/completions",
+            headers,
+            model,
+            messages,
+            started,
+            ALIYUN_TOTAL_TIMEOUT_SECONDS,
+            ALIYUN_TIMEOUT_SECONDS,
+            ALIYUN_RETRY_ATTEMPTS,
+        )
+        if content:
+            note = f"阿里云百炼回答（{model}）"
+            if discovered:
+                note += "；已按可用文本模型列表优先尝试"
+            if failures:
+                note += "；已跳过不可用模型：" + "；".join(failures)
+            return content, True, note, round((time.perf_counter() - started) * 1000, 1)
+        if failure:
+            failures.append(failure)
+    detail = "；".join(failures) if failures else "未获得有效响应"
+    return "", False, f"阿里云百炼候选模型均不可用：{detail}，已自动使用本地规则模式。", round((time.perf_counter() - started) * 1000, 1)
 
 
 def cloud_chat(
@@ -6191,6 +6381,8 @@ def cloud_chat(
         return "", False, f"已选择仅本地规则模式，未调用{provider_name}。", 0.0
     if selected_provider == "ollama" and "ollama.com" in OLLAMA_BASE_URL.lower() and not OLLAMA_API_KEY:
         return "", False, "当前使用 Ollama 云端接口，但未配置 OLLAMA_API_KEY，已自动使用本地规则模式。", 0.0
+    if selected_provider == "aliyun" and not ALIYUN_API_KEY:
+        return "", False, "当前使用阿里云百炼，但未配置 DASHSCOPE_API_KEY，已自动使用本地规则模式。", 0.0
     question = chat_content_to_text(question)
     context = chat_context_payload(scope, detection, comparison, batch_items)
     context["project_knowledge"] = retrieve_project_knowledge(question)
@@ -6222,6 +6414,8 @@ def cloud_chat(
     messages.append({"role": "user", "content": f"检测上下文 JSON：{json.dumps(context, ensure_ascii=False)}\n\n用户问题：{question}"})
     if selected_provider == "google":
         return google_cloud_chat(messages, started)
+    if selected_provider == "aliyun":
+        return aliyun_cloud_chat(messages, started)
     try:
         headers = {"Content-Type": "application/json"}
         if OLLAMA_API_KEY:
@@ -8804,7 +8998,11 @@ def native_ai_assistant_html() -> str:
     default_provider = normalize_cloud_provider()
     options_provider = "".join(
         f"<option value='{value}'{' selected' if value == default_provider else ''}>{xml_escape(label)}</option>"
-        for value, label in (("google", "Google Gemini"), ("ollama", ollama_provider_label()))
+        for value, label in (
+            ("google", "Google Gemini"),
+            ("aliyun", "阿里云百炼"),
+            ("ollama", ollama_provider_label()),
+        )
     )
     starters = "".join(
         f"<button type='button' class='native-ai-suggestion' title='{html_attr(question)}' aria-label='推荐追问：{html_attr(question)}'>{xml_escape(question)}</button>"
@@ -9901,18 +10099,18 @@ def native_ai_assistant_html() -> str:
           <div class="native-ai-disclaimer">仅供辅助参考，不能替代医生诊断。</div>
         </div>
         <div class="native-ai-controls" aria-label="{xml_escape(AI_ASSISTANT_DISPLAY_NAME)}设置">
-          <label class="native-ai-control">
+          <div class="native-ai-control">
             <span class="native-ai-control-label">分析范围</span>
-            <select id="native-ai-scope">{options_scope}</select>
-          </label>
-          <label class="native-ai-control">
+            <select id="native-ai-scope" aria-label="分析范围">{options_scope}</select>
+          </div>
+          <div class="native-ai-control">
             <span class="native-ai-control-label">回答视图</span>
-            <select id="native-ai-role">{options_role}</select>
-          </label>
-          <label class="native-ai-control">
+            <select id="native-ai-role" aria-label="回答视图">{options_role}</select>
+          </div>
+          <div class="native-ai-control">
             <span class="native-ai-control-label">AI 服务 <span class="native-ai-control-hint">可随时切换</span></span>
-            <select id="native-ai-provider">{options_provider}</select>
-          </label>
+            <select id="native-ai-provider" aria-label="AI 服务">{options_provider}</select>
+          </div>
           <label class="native-ai-control">
             <span class="native-ai-control-label">AI 状态 <span class="native-ai-control-hint">已启用</span></span>
             <span class="native-ai-cloud-toggle">
@@ -10029,10 +10227,124 @@ def native_ai_assistant_js() -> str:
   sessionId = makeSessionId();
   try {
     const savedProvider = window.localStorage.getItem(providerKey);
-    if (providerSelect && ["google", "ollama"].includes(savedProvider)) {
+    if (providerSelect && ["google", "aliyun", "ollama"].includes(savedProvider)) {
       providerSelect.value = savedProvider;
     }
   } catch (_) {}
+
+  function enhanceAssistantSelect(select) {
+    if (!select || select.dataset.customized === "true" || !select.parentElement) return;
+    select.dataset.customized = "true";
+    const shell = document.createElement("div");
+    shell.className = "native-ai-select-shell";
+    select.parentElement.insertBefore(shell, select);
+    shell.appendChild(select);
+    select.classList.add("native-ai-native-select");
+
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "native-ai-select-trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-label", select.getAttribute("aria-label") || "选择");
+    shell.appendChild(trigger);
+
+    const menu = document.createElement("div");
+    menu.className = "native-ai-select-menu";
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    shell.appendChild(menu);
+
+    const optionButtons = [];
+    Array.from(select.options).forEach((option, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "native-ai-select-option";
+      button.textContent = option.textContent || option.value;
+      button.dataset.value = option.value;
+      button.setAttribute("role", "option");
+      button.addEventListener("click", event => {
+        event.preventDefault();
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        closeAssistantSelect();
+        trigger.focus();
+      });
+      button.addEventListener("keydown", event => {
+        if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+          event.preventDefault();
+          optionButtons[(index + 1) % optionButtons.length]?.focus();
+        } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+          event.preventDefault();
+          optionButtons[(index - 1 + optionButtons.length) % optionButtons.length]?.focus();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          closeAssistantSelect();
+          trigger.focus();
+        }
+      });
+      menu.appendChild(button);
+      optionButtons.push(button);
+    });
+
+    function syncAssistantSelect() {
+      const current = select.options[select.selectedIndex];
+      trigger.textContent = current ? (current.textContent || current.value) : "请选择";
+      optionButtons.forEach(button => {
+        const selected = button.dataset.value === select.value;
+        button.classList.toggle("is-selected", selected);
+        button.setAttribute("aria-selected", String(selected));
+      });
+    }
+    function openAssistantSelect() {
+      document.querySelectorAll(".native-ai-select-shell.is-open").forEach(other => {
+        if (other !== shell) {
+          other.classList.remove("is-open");
+          other.querySelector(".native-ai-select-menu")?.setAttribute("hidden", "");
+          other.querySelector(".native-ai-select-trigger")?.setAttribute("aria-expanded", "false");
+        }
+      });
+      shell.classList.add("is-open");
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      syncAssistantSelect();
+    }
+    function closeAssistantSelect() {
+      shell.classList.remove("is-open");
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+    }
+    window.closeAssistantSelect = closeAssistantSelect;
+    trigger.addEventListener("click", event => {
+      event.preventDefault();
+      if (menu.hidden) openAssistantSelect();
+      else closeAssistantSelect();
+    });
+    trigger.addEventListener("keydown", event => {
+      if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openAssistantSelect();
+        optionButtons[select.selectedIndex]?.focus();
+      } else if (event.key === "Escape") {
+        closeAssistantSelect();
+      }
+    });
+    select.addEventListener("change", syncAssistantSelect);
+    syncAssistantSelect();
+  }
+
+  [scopeSelect, roleSelect, providerSelect].forEach(enhanceAssistantSelect);
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".native-ai-select-shell")) {
+      document.querySelectorAll(".native-ai-select-shell.is-open").forEach(shell => {
+        shell.classList.remove("is-open");
+        const menu = shell.querySelector(".native-ai-select-menu");
+        const trigger = shell.querySelector(".native-ai-select-trigger");
+        if (menu) menu.hidden = true;
+        if (trigger) trigger.setAttribute("aria-expanded", "false");
+      });
+    }
+  });
 
   function syncInputHeight() {
     if (!input) return;

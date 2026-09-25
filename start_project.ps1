@@ -19,6 +19,18 @@ $lockStream = $null
 $locationPushed = $false
 $serverExitCode = 0
 
+# Allow local provider keys to be stored in the Windows user environment
+# without putting secrets in the repository or in the launcher arguments.
+foreach ($secretName in @("GOOGLE_API_KEY", "GEMINI_API_KEY", "DASHSCOPE_API_KEY", "ALIYUN_API_KEY")) {
+    $currentSecret = [System.Environment]::GetEnvironmentVariable($secretName, "Process")
+    if ([string]::IsNullOrWhiteSpace($currentSecret)) {
+        $userSecret = [System.Environment]::GetEnvironmentVariable($secretName, "User")
+        if (-not [string]::IsNullOrWhiteSpace($userSecret)) {
+            [System.Environment]::SetEnvironmentVariable($secretName, $userSecret, "Process")
+        }
+    }
+}
+
 function Resolve-ManagedCacheTarget {
     param([Parameter(Mandatory = $true)][string]$Name)
 
