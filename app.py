@@ -5701,8 +5701,21 @@ def strip_internal_answer_sections(content: str) -> str:
     return text.strip()
 
 
+def strip_repeated_analysis_scope_marker(content: str) -> str:
+    """Remove provider-echoed scope metadata before the UI adds its header.
+
+    Some cloud models repeat the scope line from the request context. The
+    application owns that metadata, so it is rendered exactly once by the
+    caller below instead of allowing a model echo to create duplicate lines.
+    """
+    text = str(content or "")
+    text = re.sub(r"(?im)^\s*>?\s*本次分析范围\s*[:：].*?(?:\r?\n|$)", "", text)
+    return text.strip()
+
+
 def format_structured_answer(scope: str, content: str, results: list[dict[str, Any]]) -> str:
     content = strip_internal_answer_sections(content)
+    content = strip_repeated_analysis_scope_marker(content)
     if not content:
         content = "### 结论\n当前没有生成有效回答，请稍后重试或切换为本地规则模式。"
     if not re.search(r"(?m)^#{2,4}\s+", content):
