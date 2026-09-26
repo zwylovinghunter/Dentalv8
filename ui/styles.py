@@ -8979,7 +8979,8 @@ button.solid-primary-action:hover,
   }
   .dental-nav-full-wrapper:hover > .dental-nav-full-item,
   .dental-nav-full-wrapper:hover > .detection-result-tab {
-    transform: scale(1.1) !important;
+    /* Keep the reference's subtle zoom without cropping the edge labels. */
+    transform: scale(1.01) !important;
   }
   .dental-nav-full-wrapper > .dental-nav-full-item::before,
   .dental-nav-full-wrapper > .detection-result-tab::before {
