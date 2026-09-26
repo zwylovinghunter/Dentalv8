@@ -8931,6 +8931,17 @@ button.solid-primary-action:hover,
   gap: 2px;
 }
 .detection-result-tab-copy small { display: none; }
+.detection-result-tab.active .detection-result-tab-copy,
+.detection-result-tab.active .detection-result-tab-copy b,
+.detection-result-tab.active .detection-result-tab-copy small,
+.detection-result-tab[aria-selected="true"] .detection-result-tab-copy,
+.detection-result-tab[aria-selected="true"] .detection-result-tab-copy b,
+.detection-result-tab[aria-selected="true"] .detection-result-tab-copy small {
+  color: #fff !important;
+}
+.detection-result-tab:is(.active, [aria-selected="true"]) > * {
+  color: #fff !important;
+}
 .dental-nav-full-wrapper,
 .dental-nav-full-wrapper[aria-hidden="true"] { display: none; }
 
