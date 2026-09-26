@@ -1459,10 +1459,35 @@ def workspace_page_intro(
 
 
 def detection_result_tabs(kind: str, tabs: tuple[tuple[str, str], ...]) -> str:
+    descriptions = {
+        "single": {
+            "overview": "查看原图、标注结果与本次检测的核心指标",
+            "structured": "按区域核对类别、置信度、坐标与复核优先级",
+            "review": "同步对照原始影像与检测框，逐区确认可疑区域",
+            "report": "生成含明细、图片和复核建议的可追溯检测报告",
+        },
+        "compare": {
+            "models": "并列查看三种模型的检测框、置信度与差异",
+            "analysis": "汇总模型一致性、分歧区域和复核重点",
+            "review": "联动定位多模型共同关注或意见不一致的区域",
+            "report": "整理模型对比结论并导出复核所需的报告",
+        },
+        "batch": {
+            "review": "按任务队列浏览图片并快速定位重点结果",
+            "table": "汇总批量图片的类别、置信度与复核等级",
+            "support": "查看类别释义，并联动复核批量检测区域",
+            "report": "生成包含任务概览、明细与建议的批量报告",
+        },
+    }
+    kind_descriptions = descriptions.get(kind, {})
     buttons = "".join(
         f"<button type='button' class='detection-result-tab' data-result-tab='{xml_escape(key)}' "
-        f"aria-selected='false' aria-expanded='false'>{xml_escape(label)}</button>"
-        for key, label in tabs
+        f"data-nav-description='{xml_escape(kind_descriptions.get(key, '查看此检测结果视图'))}' "
+        f"aria-selected='false' aria-expanded='false'>"
+        f"<span class='detection-result-tab-copy'><b>{xml_escape(label)}</b><small>{xml_escape(kind_descriptions.get(key, '查看此检测结果视图'))}</small></span>"
+        f"<span class='detection-result-tab-expanded' aria-hidden='true'><i>{index:02d}</i><span><b>{xml_escape(label)}</b><small>{xml_escape(kind_descriptions.get(key, '查看此检测结果视图'))}</small></span><em>进入此视图&nbsp;→</em></span>"
+        "</button>"
+        for index, (key, label) in enumerate(tabs, 1)
     )
     return (
         f"<nav class='detection-result-tabs' data-result-tabs-kind='{xml_escape(kind)}' "
@@ -11288,14 +11313,14 @@ def build_app() -> gr.Blocks:
             <nav class="dental-page-nav" aria-label="平台导航">
               <button type="button" class="dental-nav-toggle" aria-expanded="false" aria-controls="dental-nav-items"><span><b>功能导航</b><small>选择工作区</small></span><strong>☰</strong></button>
               <div id="dental-nav-items" class="dental-nav-items">
-                <button type="button" class="dental-page-nav-item" data-page="learn"><span class="dental-nav-icon">01</span><span class="dental-nav-copy"><b>牙病学习</b><small>知识图谱</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="dashboard"><span class="dental-nav-icon">02</span><span class="dental-nav-copy"><b>首页概览</b><small>运行态势</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="image"><span class="dental-nav-icon">03</span><span class="dental-nav-copy"><b>图像检测</b><small>单图精检</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="compare"><span class="dental-nav-icon">04</span><span class="dental-nav-copy"><b>多模型对比</b><small>三模复核</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="batch"><span class="dental-nav-icon">05</span><span class="dental-nav-copy"><b>批量检测</b><small>队列筛查</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="history"><span class="dental-nav-icon">06</span><span class="dental-nav-copy"><b>历史记录</b><small>任务追溯</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="assistant"><span class="dental-nav-icon">07</span><span class="dental-nav-copy"><b>{AI_ASSISTANT_DISPLAY_NAME}</b><small>智能协作</small></span></button>
-                <button type="button" class="dental-page-nav-item" data-page="report"><span class="dental-nav-icon">08</span><span class="dental-nav-copy"><b>报告中心</b><small>导出归档</small></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="learn" data-nav-description="浏览牙病类别知识、影像特征与复核提示"><span class="dental-nav-icon">01</span><span class="dental-nav-copy"><b>牙病学习</b><small>知识图谱</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>01</i><span><b>牙病学习</b><small>浏览牙病类别知识、影像特征与复核提示</small></span><em>进入知识工作区&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="dashboard" data-nav-description="快速掌握任务数量、模型状态与近期运行态势"><span class="dental-nav-icon">02</span><span class="dental-nav-copy"><b>首页概览</b><small>运行态势</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>02</i><span><b>首页概览</b><small>快速掌握任务数量、模型状态与近期运行态势</small></span><em>查看运行态势&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="image" data-nav-description="上传单张影像，完成单模型检测与结构化复核"><span class="dental-nav-icon">03</span><span class="dental-nav-copy"><b>图像检测</b><small>单图精检</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>03</i><span><b>图像检测</b><small>上传单张影像，完成单模型检测与结构化复核</small></span><em>开始单图精检&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="compare" data-nav-description="并列运行三种模型，定位一致结果与分歧区域"><span class="dental-nav-icon">04</span><span class="dental-nav-copy"><b>多模型对比</b><small>三模复核</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>04</i><span><b>多模型对比</b><small>并列运行三种模型，定位一致结果与分歧区域</small></span><em>进入三模复核&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="batch" data-nav-description="批量处理多张影像，按队列追踪筛查进度"><span class="dental-nav-icon">05</span><span class="dental-nav-copy"><b>批量检测</b><small>队列筛查</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>05</i><span><b>批量检测</b><small>批量处理多张影像，按队列追踪筛查进度</small></span><em>开始队列筛查&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="history" data-nav-description="按任务追溯历史影像、检测结果与导出记录"><span class="dental-nav-icon">06</span><span class="dental-nav-copy"><b>历史记录</b><small>任务追溯</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>06</i><span><b>历史记录</b><small>按任务追溯历史影像、检测结果与导出记录</small></span><em>查看任务追溯&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="assistant" data-nav-description="结合检测上下文解释重点区域，支持连续追问"><span class="dental-nav-icon">07</span><span class="dental-nav-copy"><b>{AI_ASSISTANT_DISPLAY_NAME}</b><small>智能协作</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>07</i><span><b>{AI_ASSISTANT_DISPLAY_NAME}</b><small>结合检测上下文解释重点区域，支持连续追问</small></span><em>继续智能问答&nbsp;→</em></span></button>
+                <button type="button" class="dental-page-nav-item" data-page="report" data-nav-description="整理检测明细、复核建议并导出归档报告"><span class="dental-nav-icon">08</span><span class="dental-nav-copy"><b>报告中心</b><small>导出归档</small></span><span class="dental-nav-expanded" aria-hidden="true"><i>08</i><span><b>报告中心</b><small>整理检测明细、复核建议并导出归档报告</small></span><em>进入报告中心&nbsp;→</em></span></button>
               </div>
             </nav>
             """

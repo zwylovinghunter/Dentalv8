@@ -8919,4 +8919,181 @@ button.solid-primary-action:hover,
   .analysis-model-card { grid-template-columns: minmax(0, 1fr); }
   .analysis-model-card small { grid-column: auto; }
 }
+
+/* Reference-style navigation preview: compact tiles grow into one clear,
+   banner-like feature while the pointer is over them.  The interaction is
+   limited to the two navigation rows and does not alter page layout or the
+   existing click/selection state. */
+.dental-nav-expanded,
+.detection-result-tab-expanded { display: none; }
+.detection-result-tab-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.detection-result-tab-copy small { display: none; }
+
+@media (min-width: 1050px) and (hover: hover) {
+  .dental-nav-items,
+  .detection-result-tab-list {
+    display: flex !important;
+    align-items: stretch !important;
+    gap: 6px !important;
+    overflow: hidden !important;
+  }
+  .dental-nav-items > .dental-page-nav-item,
+  .detection-result-tab-list > .detection-result-tab {
+    position: relative !important;
+    flex: 1 1 0 !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    overflow: hidden !important;
+    transition:
+      flex-basis .5s cubic-bezier(.455, .03, .515, .955),
+      opacity .32s ease,
+      border-color .32s ease,
+      background .5s ease,
+      box-shadow .5s ease,
+      transform .5s ease !important;
+  }
+  .dental-nav-items.nav-previewing,
+  .detection-result-tab-list.nav-previewing { gap: 0 !important; }
+  .dental-nav-items.nav-previewing > .dental-page-nav-item:not(.nav-preview-item),
+  .detection-result-tab-list.nav-previewing > .detection-result-tab:not(.nav-preview-item) {
+    flex: 0 0 0 !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    border-left-width: 0 !important;
+    border-right-width: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: scale(.98) !important;
+  }
+  .dental-nav-items > .dental-page-nav-item.nav-preview-item,
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item {
+    z-index: 2 !important;
+    flex: 1 1 100% !important;
+    min-height: 58px !important;
+    border-color: transparent !important;
+    border-radius: 11px !important;
+    background:
+      radial-gradient(circle at 82% 18%, rgba(117, 211, 255, .28) 0 8%, transparent 9%),
+      linear-gradient(112deg, #092a49 0%, #0e5674 49%, #157b78 100%) !important;
+    color: #fff !important;
+    box-shadow: 0 12px 24px rgba(10, 53, 79, .22) !important;
+    transform: scale(1.002) !important;
+  }
+  .dental-nav-items > .dental-page-nav-item.nav-preview-item::before,
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item::before {
+    content: "" !important;
+    position: absolute !important;
+    inset: 0 !important;
+    display: block !important;
+    width: auto !important;
+    height: auto !important;
+    border: 0 !important;
+    border-radius: inherit !important;
+    background:
+      linear-gradient(122deg, transparent 0 58%, rgba(255,255,255,.11) 58% 66%, transparent 66%),
+      linear-gradient(300deg, transparent 0 74%, rgba(255,255,255,.08) 74% 86%, transparent 86%) !important;
+    pointer-events: none !important;
+  }
+  .dental-nav-items > .dental-page-nav-item.nav-preview-item .dental-nav-icon,
+  .dental-nav-items > .dental-page-nav-item.nav-preview-item .dental-nav-copy,
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item .detection-result-tab-copy,
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item::after {
+    display: none !important;
+  }
+  .dental-nav-expanded,
+  .detection-result-tab-expanded {
+    position: relative;
+    z-index: 1;
+    display: none;
+    align-items: center;
+    gap: 13px;
+    width: 100%;
+    min-width: 0;
+    color: #fff;
+    text-align: left;
+  }
+  .dental-nav-items > .dental-page-nav-item.nav-preview-item .dental-nav-expanded,
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item .detection-result-tab-expanded {
+    display: flex !important;
+  }
+  .dental-nav-expanded > i,
+  .detection-result-tab-expanded > i {
+    display: grid;
+    flex: 0 0 38px;
+    width: 38px;
+    height: 38px;
+    place-items: center;
+    border: 1px solid rgba(255,255,255,.38);
+    border-radius: 11px;
+    background: rgba(255,255,255,.14);
+    color: #a8edff;
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 900;
+    letter-spacing: .08em;
+  }
+  .dental-nav-expanded > span,
+  .detection-result-tab-expanded > span {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+  }
+  .dental-nav-expanded b,
+  .detection-result-tab-expanded b {
+    overflow: hidden;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 900;
+    line-height: 1.15;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dental-nav-expanded small,
+  .detection-result-tab-expanded small {
+    overflow: hidden;
+    color: rgba(232, 249, 255, .86);
+    font-size: 11px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dental-nav-expanded em,
+  .detection-result-tab-expanded em {
+    display: inline-flex;
+    align-items: center;
+    margin-left: auto;
+    padding: 7px 10px;
+    border: 1px solid rgba(255,255,255,.22);
+    border-radius: 999px;
+    background: rgba(255,255,255,.11);
+    color: #e9fbff;
+    font-size: 11px;
+    font-style: normal;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item {
+    display: flex !important;
+    align-items: center !important;
+    padding: 10px 16px !important;
+    text-align: left !important;
+  }
+  .detection-result-tab-list > .detection-result-tab.nav-preview-item .detection-result-tab-expanded {
+    gap: 13px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dental-nav-items > .dental-page-nav-item,
+  .detection-result-tab-list > .detection-result-tab {
+    transition: none !important;
+  }
+}
 """

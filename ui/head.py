@@ -97,6 +97,72 @@ ASK_AI_HEAD = r"""
     });
   }
 
+  // The reference graduate-admissions strip uses a compact tile that grows
+  // into a full-width artistic banner while the pointer is over it.  Keep
+  // this purely presentational layer separate from the existing click
+  // handlers so page switching and result tabs remain unchanged.
+  function installNavPreviewBanners() {
+    if (window.__dentalNavPreviewBannersInstalled) return;
+    window.__dentalNavPreviewBannersInstalled = true;
+    const itemSelector = ".dental-page-nav-item, .detection-result-tab";
+    const isDesktopPreview = () => {
+      try {
+        return window.matchMedia("(hover: hover) and (min-width: 1050px)").matches;
+      } catch (_) {
+        return window.innerWidth >= 1050;
+      }
+    };
+    const containerFor = item => item?.closest?.(".dental-nav-items, .detection-result-tab-list");
+    const itemsIn = container => Array.from(container?.children || [])
+      .filter(child => child.matches?.(itemSelector));
+    const clearPreview = container => {
+      if (!container) return;
+      container.classList.remove("nav-previewing");
+      itemsIn(container).forEach(item => item.classList.remove("nav-preview-item"));
+    };
+    const setPreview = (item, focus = false) => {
+      const container = containerFor(item);
+      if (!container || !isDesktopPreview()) return;
+      container.classList.add("nav-previewing");
+      itemsIn(container).forEach(candidate => {
+        candidate.classList.toggle("nav-preview-item", candidate === item);
+        candidate.setAttribute("aria-expanded", candidate === item ? "true" : "false");
+      });
+      if (focus) item.dataset.navPreviewFocus = "true";
+    };
+    document.addEventListener("pointerover", event => {
+      const item = event.target?.closest?.(itemSelector);
+      if (!item || !isDesktopPreview()) return;
+      if (event.relatedTarget && item.contains(event.relatedTarget)) return;
+      setPreview(item);
+    }, true);
+    document.addEventListener("pointerout", event => {
+      const item = event.target?.closest?.(itemSelector);
+      if (!item) return;
+      const container = containerFor(item);
+      if (event.relatedTarget && container?.contains(event.relatedTarget)) return;
+      clearPreview(container);
+    }, true);
+    document.addEventListener("focusin", event => {
+      const item = event.target?.closest?.(itemSelector);
+      if (item && isDesktopPreview()) setPreview(item, true);
+    }, true);
+    document.addEventListener("focusout", event => {
+      const item = event.target?.closest?.(itemSelector);
+      if (!item) return;
+      const container = containerFor(item);
+      const next = event.relatedTarget;
+      if (next && container?.contains(next)) return;
+      setTimeout(() => {
+        if (!container?.querySelector?.(":focus")) clearPreview(container);
+      }, 0);
+    }, true);
+    window.addEventListener("resize", () => {
+      if (isDesktopPreview()) return;
+      document.querySelectorAll(".nav-previewing").forEach(clearPreview);
+    }, {passive: true});
+  }
+
   function installImageMagnifier() {
     if (window.__dentalImageMagnifierInstalled) return;
     window.__dentalImageMagnifierInstalled = true;
@@ -1246,6 +1312,7 @@ ASK_AI_HEAD = r"""
       localStorage.removeItem("dental-ui-language");
     } catch (_) {}
     installPageNavigation();
+    installNavPreviewBanners();
     installImageMagnifier();
     installBatchPreviewFullscreen();
     installComparisonFullscreen();
