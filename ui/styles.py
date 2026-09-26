@@ -9033,25 +9033,37 @@ button.solid-primary-action:hover,
   }
   .dental-nav-full-wrapper .dental-nav-expanded > span,
   .dental-nav-full-wrapper .detection-result-tab-expanded > span {
-    display: grid;
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
     min-width: 0;
-    gap: 3px;
+    gap: 18px;
+    overflow: hidden;
   }
   .dental-nav-full-wrapper .dental-nav-expanded b,
   .dental-nav-full-wrapper .detection-result-tab-expanded b {
+    flex: 0 0 auto;
     overflow: hidden;
+    padding-right: 18px;
+    border-right: 1px solid rgba(255,255,255,.32);
     color: #fff;
     font-size: 15px;
     font-weight: 900;
-    line-height: 1.15;
+    letter-spacing: .04em;
+    line-height: 1.25;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-shadow: 0 1px 5px rgba(0, 24, 43, .28);
   }
   .dental-nav-full-wrapper .dental-nav-expanded small,
   .dental-nav-full-wrapper .detection-result-tab-expanded small {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     color: rgba(232, 249, 255, .86);
-    font-size: 11px;
+    font-size: 14px;
+    font-weight: 650;
+    letter-spacing: .01em;
     line-height: 1.35;
     text-overflow: ellipsis;
     white-space: nowrap;
