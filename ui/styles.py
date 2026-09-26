@@ -8920,10 +8920,9 @@ button.solid-primary-action:hover,
   .analysis-model-card small { grid-column: auto; }
 }
 
-/* Reference-style navigation preview: compact tiles grow into one clear,
-   banner-like feature while the pointer is over them.  The interaction is
-   limited to the two navigation rows and does not alter page layout or the
-   existing click/selection state. */
+/* PicNav-compatible navigation: the compact list is replaced by one full
+   banner on mouseover.  Unlike a flex carousel, this deliberately has no
+   sibling resize, slide, opacity, or delayed hover animation. */
 .dental-nav-expanded,
 .detection-result-tab-expanded { display: none; }
 .detection-result-tab-copy {
@@ -8932,62 +8931,58 @@ button.solid-primary-action:hover,
   gap: 2px;
 }
 .detection-result-tab-copy small { display: none; }
+.dental-nav-full-wrapper,
+.dental-nav-full-wrapper[aria-hidden="true"] { display: none; }
 
 @media (min-width: 1050px) and (hover: hover) {
-  .dental-nav-items,
-  .detection-result-tab-list {
-    display: flex !important;
-    align-items: stretch !important;
-    gap: 6px !important;
-    overflow: hidden !important;
-  }
   .dental-nav-items > .dental-page-nav-item,
   .detection-result-tab-list > .detection-result-tab {
-    position: relative !important;
-    flex: 1 1 0 !important;
-    width: auto !important;
-    min-width: 0 !important;
-    max-width: none !important;
+    transition: none !important;
+  }
+  .dental-nav-full-wrapper {
+    display: none !important;
+    height: 58px !important;
+    width: 100% !important;
     overflow: hidden !important;
-    transition:
-      flex-basis .5s cubic-bezier(.455, .03, .515, .955),
-      opacity .32s ease,
-      border-color .32s ease,
-      background .5s ease,
-      box-shadow .5s ease,
-      transform .5s ease !important;
+    border-radius: 10px !important;
   }
-  .dental-nav-items.nav-previewing,
-  .detection-result-tab-list.nav-previewing { gap: 0 !important; }
-  .dental-nav-items.nav-previewing > .dental-page-nav-item:not(.nav-preview-item),
-  .detection-result-tab-list.nav-previewing > .detection-result-tab:not(.nav-preview-item) {
-    flex: 0 0 0 !important;
-    width: 0 !important;
-    min-width: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    border-left-width: 0 !important;
-    border-right-width: 0 !important;
-    opacity: 0 !important;
-    pointer-events: none !important;
-    transform: scale(.98) !important;
+  .dental-page-nav.nav-picnav-show-full > .dental-nav-items,
+  .detection-result-tabs.nav-picnav-show-full > .detection-result-tab-list {
+    display: none !important;
   }
-  .dental-nav-items > .dental-page-nav-item.nav-preview-item,
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item {
-    z-index: 2 !important;
-    flex: 1 1 100% !important;
+  .dental-page-nav.nav-picnav-show-full > .dental-nav-full-wrapper,
+  .detection-result-tabs.nav-picnav-show-full > .dental-nav-full-wrapper {
+    display: block !important;
+  }
+  .dental-nav-full-wrapper > .dental-nav-full-item,
+  .dental-nav-full-wrapper > .detection-result-tab {
+    position: relative !important;
+    display: flex !important;
+    align-items: center !important;
+    width: 100% !important;
+    min-width: 100% !important;
+    height: 58px !important;
     min-height: 58px !important;
-    border-color: transparent !important;
-    border-radius: 11px !important;
+    margin: 0 !important;
+    padding: 9px 16px !important;
+    overflow: hidden !important;
+    border: 0 !important;
+    border-radius: 4px !important;
     background:
-      radial-gradient(circle at 82% 18%, rgba(117, 211, 255, .28) 0 8%, transparent 9%),
+      radial-gradient(circle at 83% 18%, rgba(117, 211, 255, .3) 0 8%, transparent 9%),
       linear-gradient(112deg, #092a49 0%, #0e5674 49%, #157b78 100%) !important;
     color: #fff !important;
-    box-shadow: 0 12px 24px rgba(10, 53, 79, .22) !important;
-    transform: scale(1.002) !important;
+    box-shadow: none !important;
+    text-align: left !important;
+    transform: none !important;
+    transition: transform .5s ease !important;
   }
-  .dental-nav-items > .dental-page-nav-item.nav-preview-item::before,
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item::before {
+  .dental-nav-full-wrapper:hover > .dental-nav-full-item,
+  .dental-nav-full-wrapper:hover > .detection-result-tab {
+    transform: scale(1.1) !important;
+  }
+  .dental-nav-full-wrapper > .dental-nav-full-item::before,
+  .dental-nav-full-wrapper > .detection-result-tab::before {
     content: "" !important;
     position: absolute !important;
     inset: 0 !important;
@@ -9001,17 +8996,17 @@ button.solid-primary-action:hover,
       linear-gradient(300deg, transparent 0 74%, rgba(255,255,255,.08) 74% 86%, transparent 86%) !important;
     pointer-events: none !important;
   }
-  .dental-nav-items > .dental-page-nav-item.nav-preview-item .dental-nav-icon,
-  .dental-nav-items > .dental-page-nav-item.nav-preview-item .dental-nav-copy,
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item .detection-result-tab-copy,
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item::after {
+  .dental-nav-full-wrapper > .dental-nav-full-item .dental-nav-icon,
+  .dental-nav-full-wrapper > .dental-nav-full-item .dental-nav-copy,
+  .dental-nav-full-wrapper > .detection-result-tab .detection-result-tab-copy,
+  .dental-nav-full-wrapper > .detection-result-tab::after {
     display: none !important;
   }
-  .dental-nav-expanded,
-  .detection-result-tab-expanded {
+  .dental-nav-full-wrapper .dental-nav-expanded,
+  .dental-nav-full-wrapper .detection-result-tab-expanded {
     position: relative;
     z-index: 1;
-    display: none;
+    display: flex !important;
     align-items: center;
     gap: 13px;
     width: 100%;
@@ -9019,12 +9014,8 @@ button.solid-primary-action:hover,
     color: #fff;
     text-align: left;
   }
-  .dental-nav-items > .dental-page-nav-item.nav-preview-item .dental-nav-expanded,
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item .detection-result-tab-expanded {
-    display: flex !important;
-  }
-  .dental-nav-expanded > i,
-  .detection-result-tab-expanded > i {
+  .dental-nav-full-wrapper .dental-nav-expanded > i,
+  .dental-nav-full-wrapper .detection-result-tab-expanded > i {
     display: grid;
     flex: 0 0 38px;
     width: 38px;
@@ -9039,14 +9030,14 @@ button.solid-primary-action:hover,
     font-weight: 900;
     letter-spacing: .08em;
   }
-  .dental-nav-expanded > span,
-  .detection-result-tab-expanded > span {
+  .dental-nav-full-wrapper .dental-nav-expanded > span,
+  .dental-nav-full-wrapper .detection-result-tab-expanded > span {
     display: grid;
     min-width: 0;
     gap: 3px;
   }
-  .dental-nav-expanded b,
-  .detection-result-tab-expanded b {
+  .dental-nav-full-wrapper .dental-nav-expanded b,
+  .dental-nav-full-wrapper .detection-result-tab-expanded b {
     overflow: hidden;
     color: #fff;
     font-size: 15px;
@@ -9055,8 +9046,8 @@ button.solid-primary-action:hover,
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .dental-nav-expanded small,
-  .detection-result-tab-expanded small {
+  .dental-nav-full-wrapper .dental-nav-expanded small,
+  .dental-nav-full-wrapper .detection-result-tab-expanded small {
     overflow: hidden;
     color: rgba(232, 249, 255, .86);
     font-size: 11px;
@@ -9064,8 +9055,8 @@ button.solid-primary-action:hover,
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .dental-nav-expanded em,
-  .detection-result-tab-expanded em {
+  .dental-nav-full-wrapper .dental-nav-expanded em,
+  .dental-nav-full-wrapper .detection-result-tab-expanded em {
     display: inline-flex;
     align-items: center;
     margin-left: auto;
@@ -9079,20 +9070,11 @@ button.solid-primary-action:hover,
     font-weight: 800;
     white-space: nowrap;
   }
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item {
-    display: flex !important;
-    align-items: center !important;
-    padding: 10px 16px !important;
-    text-align: left !important;
-  }
-  .detection-result-tab-list > .detection-result-tab.nav-preview-item .detection-result-tab-expanded {
-    gap: 13px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dental-nav-items > .dental-page-nav-item,
-  .detection-result-tab-list > .detection-result-tab {
+  .dental-nav-full-wrapper > .dental-nav-full-item,
+  .dental-nav-full-wrapper > .detection-result-tab {
     transition: none !important;
   }
 }

@@ -97,17 +97,13 @@ ASK_AI_HEAD = r"""
     });
   }
 
-  // The reference graduate-admissions strip uses a compact tile that grows
-  // into a full-width artistic banner while the pointer is over it.  Keep
-  // this purely presentational layer separate from the existing click
-  // handlers so page switching and result tabs remain unchanged.
+  // Match the reference PicNav behavior: keep a compact list and swap it
+  // synchronously for one full-width panel on mouseover.  There is no flex
+  // resizing, sibling slide, debounce, or delayed hover state here.
   function installNavPreviewBanners() {
     if (window.__dentalNavPreviewBannersInstalled) return;
     window.__dentalNavPreviewBannersInstalled = true;
     const itemSelector = ".dental-page-nav-item, .detection-result-tab";
-    const containerSelector = ".dental-nav-items, .detection-result-tab-list";
-    const states = new WeakMap();
-    const activeContainers = new Set();
     const isDesktopPreview = () => {
       try {
         return window.matchMedia("(hover: hover) and (min-width: 1050px)").matches;
@@ -115,153 +111,58 @@ ASK_AI_HEAD = r"""
         return window.innerWidth >= 1050;
       }
     };
-    const containerFor = item => item?.closest?.(".dental-nav-items, .detection-result-tab-list");
-    const itemsIn = container => Array.from(container?.children || [])
-      .filter(child => child.matches?.(itemSelector));
-    const stateFor = container => {
-      if (!states.has(container)) {
-        states.set(container, {active: null, timer: null, focused: false, x: null, y: null});
-      }
-      return states.get(container);
+    const hosts = new Set();
+    const restore = host => {
+      if (!host) return;
+      host.classList.remove("nav-picnav-show-full");
+      const full = host.querySelector(":scope > .dental-nav-full-wrapper");
+      if (full) full.replaceChildren();
     };
-    const cancelClear = container => {
-      const state = container && states.get(container);
-      if (state?.timer) {
-        clearTimeout(state.timer);
-        state.timer = null;
-      }
+    const show = (host, item) => {
+      if (!host || !item || !isDesktopPreview()) return;
+      const full = host.querySelector(":scope > .dental-nav-full-wrapper");
+      if (!full) return;
+      const clone = item.cloneNode(true);
+      clone.classList.remove("active", "nav-preview-item");
+      clone.classList.add("dental-nav-full-item");
+      clone.setAttribute("aria-expanded", "true");
+      full.replaceChildren(clone);
+      host.classList.add("nav-picnav-show-full");
     };
-    const clearPreview = container => {
-      if (!container) return;
-      const state = states.get(container);
-      cancelClear(container);
-      if (state) {
-        state.active = null;
-        state.focused = false;
-      }
-      activeContainers.delete(container);
-      container.classList.remove("nav-previewing");
-      itemsIn(container).forEach(item => {
-        item.classList.remove("nav-preview-item");
-        item.removeAttribute("aria-expanded");
+    const prepare = list => {
+      if (!list || list.dataset.picnavReady === "true") return;
+      const host = list.parentElement;
+      if (!host) return;
+      const full = document.createElement("div");
+      full.className = "dental-nav-full-wrapper";
+      full.setAttribute("aria-hidden", "true");
+      list.insertAdjacentElement("afterend", full);
+      list.dataset.picnavReady = "true";
+      hosts.add(host);
+      list.addEventListener("mouseover", event => {
+        if (!isDesktopPreview()) return;
+        const item = event.target?.closest?.(itemSelector);
+        if (!item || item.parentElement !== list) return;
+        if (event.relatedTarget && item.contains(event.relatedTarget)) return;
+        show(host, item);
       });
-    };
-    const pointInside = (container, x, y) => {
-      if (!container || x == null || y == null) return false;
-      const rect = container.getBoundingClientRect();
-      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-    };
-    const scheduleClear = (container, delay = 160) => {
-      if (!container) return;
-      const state = stateFor(container);
-      cancelClear(container);
-      state.timer = setTimeout(() => {
-        state.timer = null;
-        if (state.focused) return;
-        // A flex transition can emit pointerout while the active item is
-        // changing width.  Keep the preview when the pointer is still over
-        // the same nav container; clear only after a real leave is confirmed.
-        const element = state.x == null ? null : document.elementFromPoint(state.x, state.y);
-        if (pointInside(container, state.x, state.y) && element && container.contains(element)) return;
-        clearPreview(container);
-      }, delay);
-    };
-    const setPreview = (item, focus = false, event = null) => {
-      const container = containerFor(item);
-      if (!container || !isDesktopPreview()) return;
-      const state = stateFor(container);
-      cancelClear(container);
-      if (event && Number.isFinite(event.clientX)) {
-        state.x = event.clientX;
-        state.y = event.clientY;
-      }
-      state.active = item;
-      state.focused = Boolean(focus || container.querySelector(":focus"));
-      activeContainers.add(container);
-      container.classList.add("nav-previewing");
-      itemsIn(container).forEach(candidate => {
-        candidate.classList.toggle("nav-preview-item", candidate === item);
-        candidate.setAttribute("aria-expanded", candidate === item ? "true" : "false");
+      full.addEventListener("mouseout", event => {
+        if (event.relatedTarget && full.contains(event.relatedTarget)) return;
+        restore(host);
       });
+      full.addEventListener("click", () => requestAnimationFrame(() => restore(host)), true);
     };
-    document.addEventListener("pointerover", event => {
-      const item = event.target?.closest?.(itemSelector);
-      if (!item || !isDesktopPreview()) return;
-      if (event.relatedTarget && item.contains(event.relatedTarget)) return;
-      setPreview(item, false, event);
-    }, true);
-    document.addEventListener("pointerout", event => {
-      const item = event.target?.closest?.(itemSelector);
-      if (!item) return;
-      const container = containerFor(item);
-      const state = container && stateFor(container);
-      if (state && Number.isFinite(event.clientX)) {
-        state.x = event.clientX;
-        state.y = event.clientY;
-      }
-      // Moving between descendants or to another item must not collapse the
-      // banner synchronously; the next pointerover will select the new item.
-      if (event.relatedTarget && item.contains(event.relatedTarget)) return;
-      scheduleClear(container);
-    }, true);
-    document.addEventListener("pointermove", event => {
-      if (!isDesktopPreview()) return;
-      const item = event.target?.closest?.(itemSelector);
-      const container = item ? containerFor(item) : event.target?.closest?.(containerSelector);
-      activeContainers.forEach(activeContainer => {
-        const state = states.get(activeContainer);
-        if (!state?.active) return;
-        state.x = event.clientX;
-        state.y = event.clientY;
-        if (activeContainer !== container) scheduleClear(activeContainer, 90);
-      });
-      if (!container) return;
-      const state = states.get(container);
-      if (!state?.active) return;
-      if (item) {
-        if (state.active !== item) setPreview(item, false, event);
-        else cancelClear(container);
-      } else {
-        scheduleClear(container, 120);
-      }
-    }, true);
-    document.addEventListener("focusin", event => {
-      const item = event.target?.closest?.(itemSelector);
-      if (item && isDesktopPreview()) setPreview(item, true, event);
-    }, true);
-    document.addEventListener("focusout", event => {
-      const item = event.target?.closest?.(itemSelector);
-      if (!item) return;
-      const container = containerFor(item);
-      const next = event.relatedTarget;
-      if (next && container?.contains(next)) return;
-      const state = container && stateFor(container);
-      if (state) state.focused = false;
-      scheduleClear(container, 0);
-    }, true);
-    document.addEventListener("click", event => {
-      const item = event.target?.closest?.(itemSelector);
-      if (!item) return;
-      const container = containerFor(item);
-      // Clicking still follows the existing page/tab handler.  Release the
-      // visual preview on the next frame so a smooth page scroll cannot leave
-      // an orphaned expanded banner behind.
-      requestAnimationFrame(() => clearPreview(container));
-    }, true);
-    document.addEventListener("pointercancel", event => {
-      const item = event.target?.closest?.(itemSelector);
-      if (item) clearPreview(containerFor(item));
-    }, true);
+    const prepareAll = () => {
+      document.querySelectorAll(".dental-nav-items, .detection-result-tab-list").forEach(prepare);
+    };
+    prepareAll();
+    // Gradio may replace an HTML block after a streamed result update.
+    new MutationObserver(prepareAll).observe(document.body, {subtree: true, childList: true});
     window.addEventListener("resize", () => {
       if (isDesktopPreview()) return;
-      document.querySelectorAll(".nav-previewing").forEach(clearPreview);
+      hosts.forEach(restore);
     }, {passive: true});
-    window.addEventListener("blur", () => {
-      document.querySelectorAll(".nav-previewing").forEach(clearPreview);
-    });
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) document.querySelectorAll(".nav-previewing").forEach(clearPreview);
-    });
+    window.addEventListener("blur", () => hosts.forEach(restore));
   }
 
   function installImageMagnifier() {
@@ -1308,7 +1209,7 @@ ASK_AI_HEAD = r"""
       shell.classList.toggle('detection-before-run', !running && !ready);
       shell.classList.toggle('detection-running', running);
       tabs.hidden = !ready;
-      const buttons = Array.from(tabs.querySelectorAll('.detection-result-tab'));
+      const buttons = Array.from(tabs.querySelectorAll('.detection-result-tab-list > .detection-result-tab'));
       const targetKeys = buttons.map(button => button.dataset.resultTab).filter(Boolean);
       if (forceDefault || running) {
         tabs.dataset.activeTab = targetKeys[0] || '';
