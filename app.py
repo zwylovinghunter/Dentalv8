@@ -352,7 +352,12 @@ BATCH_MAX_IMAGES = max(1, min(24, int(os.getenv("BATCH_MAX_IMAGES", "6"))))
 INFERENCE_JOB_LOCK = threading.Lock()
 INFERENCE_STATE_LOCK = threading.Lock()
 INFERENCE_ACTIVE_JOB: dict[str, Any] | None = None
-INFERENCE_JOB_STALE_SECONDS = 45
+# A batch job can legitimately run for several minutes on CPU.  The old
+# 45-second watchdog could mark a healthy job as stale while it was still
+# inside YOLO, which made the queue status misleading.  The Gradio event
+# time-limit remains the final escape hatch for a genuinely hung callback.
+INFERENCE_TIME_LIMIT_SECONDS = max(120, int(os.getenv("INFERENCE_TIME_LIMIT_SECONDS", "900")))
+INFERENCE_JOB_STALE_SECONDS = max(INFERENCE_TIME_LIMIT_SECONDS + 60, int(os.getenv("INFERENCE_JOB_STALE_SECONDS", "960")))
 INFERENCE_CONCURRENCY_ID = "yolo_inference"
 INFERENCE_CONCURRENCY_LIMIT = 1
 
@@ -363,8 +368,8 @@ def begin_inference_job(kind: str, title: str) -> tuple[dict[str, Any] | None, d
     now = time.perf_counter()
     with INFERENCE_STATE_LOCK:
         if INFERENCE_ACTIVE_JOB:
-            elapsed = now - float(INFERENCE_ACTIVE_JOB.get("started_at", now))
-            if elapsed < INFERENCE_JOB_STALE_SECONDS:
+            heartbeat = float(INFERENCE_ACTIVE_JOB.get("heartbeat_at", INFERENCE_ACTIVE_JOB.get("started_at", now)))
+            if now - heartbeat < INFERENCE_JOB_STALE_SECONDS:
                 return None, copy.deepcopy(INFERENCE_ACTIVE_JOB)
             INFERENCE_ACTIVE_JOB = None
         job = {
@@ -372,6 +377,7 @@ def begin_inference_job(kind: str, title: str) -> tuple[dict[str, Any] | None, d
             "kind": kind,
             "title": title,
             "started_at": now,
+            "heartbeat_at": now,
             "created_at": now_iso(),
         }
         INFERENCE_ACTIVE_JOB = job
@@ -387,19 +393,65 @@ def finish_inference_job(job: dict[str, Any] | None) -> None:
             INFERENCE_ACTIVE_JOB = None
 
 
+def touch_inference_job(job: dict[str, Any] | None) -> None:
+    """Refresh the watchdog while a long CPU inference is still healthy."""
+    if not job:
+        return
+    now = time.perf_counter()
+    with INFERENCE_STATE_LOCK:
+        if INFERENCE_ACTIVE_JOB and INFERENCE_ACTIVE_JOB.get("id") == job.get("id"):
+            INFERENCE_ACTIVE_JOB["heartbeat_at"] = now
+
+
+def touch_active_inference_job() -> None:
+    with INFERENCE_STATE_LOCK:
+        if INFERENCE_ACTIVE_JOB:
+            INFERENCE_ACTIVE_JOB["heartbeat_at"] = time.perf_counter()
+
+
+def active_inference_job() -> dict[str, Any] | None:
+    """Return a safe snapshot for the immediate queue-status callback."""
+    global INFERENCE_ACTIVE_JOB
+    now = time.perf_counter()
+    with INFERENCE_STATE_LOCK:
+        active = INFERENCE_ACTIVE_JOB
+        if not active:
+            return None
+        heartbeat = float(active.get("heartbeat_at", active.get("started_at", now)))
+        if now - heartbeat >= INFERENCE_JOB_STALE_SECONDS:
+            # A crashed/cancelled callback must not leave the next request
+            # showing an eternal "in progress" message.
+            INFERENCE_ACTIVE_JOB = None
+            return None
+        return copy.deepcopy(active)
+
+
 def inference_busy_detail(active_job: dict[str, Any] | None) -> str:
     if not active_job:
         return "已有检测任务正在运行，请等待当前任务结束后再启动新的检测。"
     elapsed = max(0, int(time.perf_counter() - float(active_job.get("started_at", time.perf_counter()))))
     title = str(active_job.get("title") or "检测任务")
-    return f"{title} 已运行约 {elapsed}s。为避免 YOLO CPU 推理互相抢占，当前仅允许一个检测任务运行。"
+    return f"{title} 已运行约 {elapsed}s。您的任务已加入队列，前一个任务完成后会自动开始，请不要重复点击。"
 
 
 def detection_busy_outputs(output_count: int, active_job: dict[str, Any] | None) -> tuple[Any, ...]:
     return (
-        detection_progress_update(0, "已有检测任务运行中", inference_busy_detail(active_job)),
+        detection_progress_update(0, "已加入检测队列", inference_busy_detail(active_job)),
         *[gr.skip() for _ in range(output_count - 1)],
     )
+
+
+def inference_queue_notice(title: str) -> Any:
+    """Update the progress panel immediately, before Gradio's queue runs."""
+    active = active_inference_job()
+    if active:
+        active_title = str(active.get("title") or "其他检测任务")
+        detail = (
+            f"当前正在处理“{active_title}”。您的“{title}”已加入检测队列，"
+            "系统会自动按顺序执行，请不要重复点击。"
+        )
+        return detection_progress_update(0, "已加入检测队列", detail)
+    return detection_progress_update(0, "检测任务已提交", f"“{title}”正在等待检测工作槽，很快开始。")
 
 
 def deferred_dashboard_outputs() -> tuple[Any, ...]:
@@ -423,7 +475,9 @@ def gated_inference_job(output_count: int, kind: str, title: str):
                         SESSION_ID_CONTEXT.reset(session_token)
                 return
             try:
-                yield from func(*args, **kwargs)
+                for update in func(*args, **kwargs):
+                    touch_inference_job(job)
+                    yield update
             finally:
                 finish_inference_job(job)
                 if session_token is not None:
@@ -2631,7 +2685,9 @@ def run_single_detection(
         gr.skip(),
     )
     with INFERENCE_JOB_LOCK:
+        touch_active_inference_job()
         result, rendered = run_detection_core(image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        touch_active_inference_job()
     progress(0.9, desc="正在整理单图检测结果…")
     yield (
         detection_progress_update(88, "正在整理检测结果", "正在生成检测框、结构化表格、类别解释和复核建议。"),
@@ -2930,6 +2986,7 @@ def run_model_comparison(
         # blocked unrelated UI callbacks while the next model was preparing.
         try:
             with INFERENCE_JOB_LOCK:
+                touch_active_inference_job()
                 result, rendered = run_detection_core(
                     image,
                     spec.key,
@@ -2940,6 +2997,7 @@ def run_model_comparison(
                     line_width,
                     color_mode,
                 )
+                touch_active_inference_job()
         except Exception:
             try:
                 fallback_image = normalize_image(image)
@@ -3883,7 +3941,9 @@ def run_batch_detection(
         try:
             if prepared_image is not None:
                 with INFERENCE_JOB_LOCK:
+                    touch_active_inference_job()
                     result, rendered = run_detection_core(prepared_image, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+                    touch_active_inference_job()
         except Exception as exc:
             try:
                 fallback_image = prepared_image or normalize_image(file_obj)
@@ -4039,7 +4099,9 @@ def retry_batch_item(
     )
     model_key = model_name_to_key(model_name)
     with INFERENCE_JOB_LOCK:
+        touch_active_inference_job()
         result, rendered = run_detection_core(original, model_key, conf, iou, show_label, show_confidence, line_width, color_mode)
+        touch_active_inference_job()
     result["thresholds"] = {"conf": float(conf), "iou": float(iou)}
     result["visual_options"] = {"show_label": bool(show_label), "show_confidence": bool(show_confidence), "line_width": int(line_width), "color_mode": color_mode}
     result["image_name"] = item.get("image_name", f"图片{index + 1}")
@@ -12400,7 +12462,13 @@ def build_app() -> gr.Blocks:
         clear_history_event.then(reset_history_pagination, outputs=history_pagination_outputs)
         clear_history_page_event.then(reset_history_pagination, outputs=history_pagination_outputs)
 
-        det_event = det_btn.click(
+        det_notice_event = det_btn.click(
+            lambda: inference_queue_notice("单图精检"),
+            outputs=det_progress,
+            queue=False,
+            show_progress="hidden",
+        )
+        det_event = det_notice_event.then(
             run_single_detection,
             inputs=[det_image, det_model, det_conf, det_iou, det_show_label, det_show_conf, det_line_width, det_color_mode],
             outputs=[det_progress, det_empty_state, det_output, det_summary, det_table, det_explain, det_knowledge, current_detection, det_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
@@ -12408,6 +12476,7 @@ def build_app() -> gr.Blocks:
             concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
             show_progress="minimal",
+            time_limit=INFERENCE_TIME_LIMIT_SECONDS,
         )
         det_event.then(latest_single_compare_slider_update, outputs=det_compare_slider)
         det_event.then(
@@ -12469,7 +12538,13 @@ def build_app() -> gr.Blocks:
             inputs=current_detection,
             outputs=[det_region_selector, det_region_original, det_region_annotated, det_region_note],
         )
-        cmp_event = cmp_btn.click(
+        cmp_notice_event = cmp_btn.click(
+            lambda: inference_queue_notice("多模型会诊"),
+            outputs=cmp_progress,
+            queue=False,
+            show_progress="hidden",
+        )
+        cmp_event = cmp_notice_event.then(
             run_model_comparison,
             inputs=[cmp_image, cmp_conf, cmp_iou, cmp_show_label, cmp_show_conf, cmp_line_width, cmp_color_mode],
             outputs=[cmp_progress, cmp_empty_state, cmp_img1, cmp_img2, cmp_img3, cmp_table, consistency_table, cmp_summary, current_comparison, cmp_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
@@ -12477,6 +12552,7 @@ def build_app() -> gr.Blocks:
             concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
             show_progress="minimal",
+            time_limit=INFERENCE_TIME_LIMIT_SECONDS,
         )
         cmp_event.then(
             comparison_analysis_overview_html,
@@ -12515,7 +12591,13 @@ def build_app() -> gr.Blocks:
             outputs=[cmp_region_original, cmp_region_annotated, cmp_region_note],
         )
 
-        batch_event = batch_btn.click(
+        batch_notice_event = batch_btn.click(
+            lambda: inference_queue_notice("批量筛查"),
+            outputs=batch_progress,
+            queue=False,
+            show_progress="hidden",
+        )
+        batch_event = batch_notice_event.then(
             run_batch_detection,
             inputs=[batch_files, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
             outputs=[batch_progress, batch_empty_state, batch_table, batch_preview, batch_image_selector, batch_explain, batch_knowledge, batch_report_preview, batch_report_gallery, batch_md_file, batch_csv_file, current_batch, batch_region_selector, dashboard, kpi_chart, risk_chart, time_chart, conf_chart, model_status, history_table],
@@ -12523,6 +12605,7 @@ def build_app() -> gr.Blocks:
             concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
             show_progress="minimal",
+            time_limit=INFERENCE_TIME_LIMIT_SECONDS,
         )
         batch_event.then(
             batch_analysis_overview_html,
@@ -12634,7 +12717,13 @@ def build_app() -> gr.Blocks:
             outputs=[batch_table, batch_filter_status],
             show_progress="hidden",
         )
-        batch_retry_event = batch_retry_btn.click(
+        batch_retry_notice_event = batch_retry_btn.click(
+            lambda: inference_queue_notice("批量单项重试"),
+            outputs=batch_progress,
+            queue=False,
+            show_progress="hidden",
+        )
+        batch_retry_event = batch_retry_notice_event.then(
             retry_batch_item,
             inputs=[current_batch, batch_retry_selector, batch_model, batch_conf, batch_iou, batch_show_label, batch_show_conf, batch_line_width, batch_color_mode],
             outputs=[batch_progress, batch_tasks, batch_table, batch_preview, batch_explain, batch_knowledge, current_batch],
@@ -12642,6 +12731,7 @@ def build_app() -> gr.Blocks:
             concurrency_limit=INFERENCE_CONCURRENCY_LIMIT,
             trigger_mode="once",
             show_progress="minimal",
+            time_limit=INFERENCE_TIME_LIMIT_SECONDS,
         )
         batch_retry_event.then(batch_failed_retry_controls, inputs=current_batch, outputs=[batch_retry_selector, batch_retry_btn, batch_retry_panel])
         batch_retry_event.then(batch_selected_compare_update, inputs=[current_batch, batch_image_selector], outputs=batch_compare_slider)

@@ -9,6 +9,7 @@
 - 不保存真实 API 密钥。AI 密钥只从服务器环境变量读取，参考 `.env.example`。
 - 仅保留三个实际运行模型权重，训练数据、实验文档、旧报告和无关脚本不在此分支。
 - `outputs/` 是运行时目录，不应提交到仓库；可通过 `OUTPUT_RETENTION_DAYS` 和 `OUTPUT_MAX_GB` 自动清理。
+- 多位老师同时点击检测时，页面会立即显示“已加入检测队列”；YOLO 仍按单进程 CPU 队列顺序执行，任务最长运行时间由 `INFERENCE_TIME_LIMIT_SECONDS` 控制，异常任务会自动结束并释放队列。
 
 ## Linux 服务器部署
 
