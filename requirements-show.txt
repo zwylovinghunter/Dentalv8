@@ -1,0 +1,14 @@
+# DentalV8 答辩演示部署依赖（Python 3.12，CPU 运行）
+gradio==6.14.0
+fastapi==0.136.1
+uvicorn==0.46.0
+opencv-python==4.13.0.92
+pillow==12.0.0
+requests==2.32.5
+numpy==2.3.4
+pandas==2.3.3
+pyyaml==6.0.3
+torch==2.9.0
+ultralytics==8.4.56
+python-docx>=1.1.2
+reportlab>=4.2.5

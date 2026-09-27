@@ -14,12 +14,14 @@ import math
 import os
 import re
 import random
+import secrets
 import socket
 import threading
 import time
 import tempfile
 import uuid
 import zipfile
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
@@ -27,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 import gradio as gr
 import numpy as np
@@ -128,8 +130,12 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
 REPORT_DIR = OUTPUT_DIR / "reports"
 REPORT_ASSET_DIR = OUTPUT_DIR / "report_assets"
-HISTORY_PATH = OUTPUT_DIR / "history.json"
-CHAT_FEEDBACK_PATH = OUTPUT_DIR / "chat_feedback.json"
+SESSION_OUTPUT_DIR = OUTPUT_DIR / "sessions"
+SESSION_COOKIE_NAME = "dentalv8_session"
+SESSION_HEADER_NAME = "x-dental-session"
+SESSION_COOKIE_MAX_AGE = max(300, int(os.getenv("DENTAL_SESSION_MAX_AGE", "86400")))
+SESSION_COOKIE_SECURE = os.getenv("DENTAL_SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes"}
+SESSION_ID_CONTEXT: ContextVar[str] = ContextVar("dentalv8_session_id", default="")
 OUTPUT_RETENTION_DAYS = max(1, int(os.getenv("OUTPUT_RETENTION_DAYS", "30")))
 OUTPUT_MAX_BYTES = max(256 * 1024 * 1024, int(float(os.getenv("OUTPUT_MAX_GB", "2")) * 1024**3))
 OUTPUT_KEEP_RECENT_FILES = max(50, int(os.getenv("OUTPUT_KEEP_RECENT_FILES", "300")))
@@ -188,15 +194,77 @@ OUTPUT_CLEANUP_LOCK = threading.Lock()
 OUTPUT_LAST_CLEANUP_AT = time.time()
 OUTPUT_STORAGE_CACHE: dict[str, Any] = {"value": None, "checked_at": time.time()}
 HISTORY_CACHE: dict[str, Any] = {"mtime_ns": None, "data": None}
-LATEST_AI_CONTEXT: dict[str, Any] = {
-    "detection": {},
-    "comparison": [],
-    "batch_items": [],
-    "last_scope": "",
-    "updated_at": "",
-}
+SESSION_AI_CONTEXTS: dict[str, dict[str, Any]] = {}
 LATEST_AI_CONTEXT_LOCK = threading.RLock()
 api_app = FastAPI(title="Dental AI Assistant API")
+
+
+def new_anonymous_session_id() -> str:
+    return f"session-{secrets.token_urlsafe(24)}"
+
+
+def session_storage_key(session_id: str | None = None) -> str:
+    """Return a filesystem-safe opaque key without exposing the browser token."""
+    value = str(session_id or SESSION_ID_CONTEXT.get() or "anonymous").strip()
+    return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+def current_session_id(request: Any | None = None, fallback: str | None = None) -> str:
+    """Resolve the server-issued anonymous session before accepting client data."""
+    candidates: list[Any] = []
+    if request is not None:
+        for owner in (request, getattr(request, "request", None)):
+            if owner is None:
+                continue
+            session_hash = getattr(owner, "session_hash", None)
+            if session_hash:
+                candidates.append(session_hash)
+            headers = getattr(owner, "headers", None)
+            if headers:
+                candidates.append(headers.get(SESSION_HEADER_NAME))
+            cookies = getattr(owner, "cookies", None)
+            if cookies:
+                candidates.append(cookies.get(SESSION_COOKIE_NAME))
+            if headers:
+                cookie_header = headers.get("cookie", "")
+                for item in str(cookie_header).split(";"):
+                    name, _, value = item.strip().partition("=")
+                    if name == SESSION_COOKIE_NAME:
+                        candidates.append(value)
+    candidates.extend([SESSION_ID_CONTEXT.get(), fallback])
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value:
+            return normalize_session_id(value)
+    return new_anonymous_session_id()
+
+
+@api_app.middleware("http")
+async def attach_anonymous_session(request: Request, call_next):
+    incoming = str(request.headers.get(SESSION_HEADER_NAME) or request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    session_id = normalize_session_id(incoming) if incoming else new_anonymous_session_id()
+    token = SESSION_ID_CONTEXT.set(session_id)
+    try:
+        response = await call_next(request)
+    finally:
+        SESSION_ID_CONTEXT.reset(token)
+    if not incoming:
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            session_id,
+            max_age=SESSION_COOKIE_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=SESSION_COOKIE_SECURE,
+            path="/",
+        )
+    return response
+
+
+@api_app.get("/healthz")
+async def healthz() -> dict[str, Any]:
+    """Lightweight probe for reverse proxies and process supervisors."""
+    return {"ok": True, "service": "dentalv8", "version": APP_VERSION}
 MODEL_USE_CASES = {
     "lightweight": "作为默认对照基线，兼顾速度和基础检测效果。",
     "high_precision": "强调定位精度和结果稳定性，适合精细辅助分析。",
@@ -344,21 +412,89 @@ def gated_inference_job(output_count: int, kind: str, title: str):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            request = callback_request(args, kwargs)
+            session_token = SESSION_ID_CONTEXT.set(current_session_id(request)) if request is not None else None
             job, active_job = begin_inference_job(kind, title)
             if active_job:
-                yield detection_busy_outputs(output_count, active_job)
+                try:
+                    yield detection_busy_outputs(output_count, active_job)
+                finally:
+                    if session_token is not None:
+                        SESSION_ID_CONTEXT.reset(session_token)
                 return
             try:
                 yield from func(*args, **kwargs)
             finally:
                 finish_inference_job(job)
+                if session_token is not None:
+                    SESSION_ID_CONTEXT.reset(session_token)
         return wrapper
     return decorator
+
+
+def session_request_bound(func):
+    """Bind a Gradio/FastAPI request's anonymous session to callback work."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        request = callback_request(args, kwargs)
+        if request is None:
+            return func(*args, **kwargs)
+        token = SESSION_ID_CONTEXT.set(current_session_id(request))
+        try:
+            result = func(*args, **kwargs)
+        except Exception:
+            SESSION_ID_CONTEXT.reset(token)
+            raise
+        if hasattr(result, "__next__"):
+            def stream():
+                try:
+                    yield from result
+                finally:
+                    SESSION_ID_CONTEXT.reset(token)
+            return stream()
+        SESSION_ID_CONTEXT.reset(token)
+        return result
+    return wrapper
+
+
+def callback_request(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any | None:
+    request = kwargs.get("request")
+    if request is not None:
+        return request
+    for value in reversed(args):
+        if hasattr(value, "session_hash") and hasattr(value, "request"):
+            return value
+    return None
 
 def ensure_dirs() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def session_report_dir(session_id: str | None = None) -> Path:
+    path = REPORT_DIR / session_storage_key(session_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def session_asset_dir(session_id: str | None = None) -> Path:
+    path = REPORT_ASSET_DIR / session_storage_key(session_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def session_history_path(session_id: str | None = None) -> Path:
+    path = SESSION_OUTPUT_DIR / session_storage_key(session_id) / "history.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def session_feedback_path(session_id: str | None = None) -> Path:
+    path = SESSION_OUTPUT_DIR / session_storage_key(session_id) / "chat_feedback.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def cleanup_output_artifacts(force: bool = False) -> dict[str, Any]:
@@ -372,7 +508,7 @@ def cleanup_output_artifacts(force: bool = False) -> dict[str, Any]:
     try:
         ensure_dirs()
         report_groups: dict[str, list[tuple[Path, float, int]]] = {}
-        for path in REPORT_DIR.glob("*"):
+        for path in REPORT_DIR.rglob("*"):
             try:
                 if not path.is_file():
                     continue
@@ -607,18 +743,20 @@ def safe_read_text(path: Path, limit: int = 6000) -> str:
 def load_history() -> dict[str, Any]:
     with HISTORY_LOCK:
         ensure_dirs()
-        if not HISTORY_PATH.exists():
+        history_path = session_history_path()
+        cache_key = str(history_path)
+        if not history_path.exists():
             data = {"events": []}
             save_history(data)
             return data
         try:
-            mtime_ns = HISTORY_PATH.stat().st_mtime_ns
-            if HISTORY_CACHE.get("mtime_ns") == mtime_ns and isinstance(HISTORY_CACHE.get("data"), dict):
+            mtime_ns = history_path.stat().st_mtime_ns
+            if HISTORY_CACHE.get("path") == cache_key and HISTORY_CACHE.get("mtime_ns") == mtime_ns and isinstance(HISTORY_CACHE.get("data"), dict):
                 return copy.deepcopy(HISTORY_CACHE["data"])
-            data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            data = json.loads(history_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or not isinstance(data.get("events", []), list):
                 raise ValueError("invalid history")
-            HISTORY_CACHE.update({"mtime_ns": mtime_ns, "data": copy.deepcopy(data)})
+            HISTORY_CACHE.update({"path": cache_key, "mtime_ns": mtime_ns, "data": copy.deepcopy(data)})
             return copy.deepcopy(data)
         except Exception:
             data = {"events": []}
@@ -629,15 +767,18 @@ def load_history() -> dict[str, Any]:
 def save_history(history: dict[str, Any]) -> None:
     with HISTORY_LOCK:
         ensure_dirs()
-        temp_path = HISTORY_PATH.with_suffix(".json.tmp")
+        history_path = session_history_path()
+        temp_path = history_path.with_suffix(".json.tmp")
         temp_path.write_text(json.dumps(history, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        temp_path.replace(HISTORY_PATH)
-        HISTORY_CACHE.update({"mtime_ns": HISTORY_PATH.stat().st_mtime_ns, "data": copy.deepcopy(history)})
+        temp_path.replace(history_path)
+        HISTORY_CACHE.update({"path": str(history_path), "mtime_ns": history_path.stat().st_mtime_ns, "data": copy.deepcopy(history)})
 
 
 def append_history(event: dict[str, Any]) -> dict[str, Any]:
     with HISTORY_LOCK:
         history = load_history()
+        event = copy.deepcopy(event)
+        event.setdefault("session_id", current_session_id())
         history.setdefault("events", []).append(event)
         history["events"] = history["events"][-300:]
         save_history(history)
@@ -943,7 +1084,7 @@ def save_image_asset(image: Image.Image, prefix: str, suffix: str) -> str:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     is_annotated = suffix in {"result", "crop_result"}
     extension = "png" if is_annotated else "jpg"
-    path = REPORT_ASSET_DIR / f"{safe_asset_stem(prefix)}_{suffix}_{stamp}.{extension}"
+    path = session_asset_dir() / f"{safe_asset_stem(prefix)}_{suffix}_{stamp}.{extension}"
     browser_asset = display_image(image, 4096)
     if browser_asset is None:
         raise ValueError("无法生成浏览器显示图像。")
@@ -2431,6 +2572,7 @@ def run_single_detection(
     line_width: int,
     color_mode: str,
     progress=gr.Progress(track_tqdm=False),
+    request: gr.Request | None = None,
 ):
     if image is None:
         update_latest_ai_context(detection={})
@@ -2767,6 +2909,7 @@ def run_model_comparison(
     line_width: int,
     color_mode: str,
     progress=gr.Progress(track_tqdm=False),
+    request: gr.Request | None = None,
 ):
     yield model_comparison_progress_outputs(5, "多模型会诊准备中", "正在读取上传影像，并准备依次运行三个模型。", original_image=image)
     results = []
@@ -3514,10 +3657,11 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     if not items:
         return None, None, None
     ensure_dirs()
+    report_dir = session_report_dir()
     ts = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
-    csv_path = REPORT_DIR / f"batch_detection_{ts}.csv"
-    md_path = REPORT_DIR / f"batch_detection_{ts}.md"
-    bundle_path = REPORT_DIR / f"batch_detection_{ts}.zip"
+    csv_path = report_dir / f"batch_detection_{ts}.csv"
+    md_path = report_dir / f"batch_detection_{ts}.md"
+    bundle_path = report_dir / f"batch_detection_{ts}.zip"
     summary_rows: list[list[Any]] = []
     region_rows: list[dict[str, Any]] = []
     for item_index, item in enumerate(items, 1):
@@ -3608,7 +3752,7 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
         FULL_DISCLAIMER,
     ]
     markdown = "\n".join(lines)
-    with tempfile.TemporaryDirectory(prefix=".batch-report-build-", dir=REPORT_DIR) as temp_dir:
+    with tempfile.TemporaryDirectory(prefix=".batch-report-build-", dir=report_dir) as temp_dir:
         temp_root = Path(temp_dir)
         temp_csv = temp_root / csv_path.name
         temp_md = temp_root / md_path.name
@@ -3622,7 +3766,8 @@ def export_batch_report(items: list[dict[str, Any]]) -> tuple[str | None, str | 
     return str(md_path), str(csv_path), str(bundle_path)
 
 
-def generate_batch_report_outputs(items: list[dict[str, Any]] | None) -> tuple[Any, ...]:
+@session_request_bound
+def generate_batch_report_outputs(items: list[dict[str, Any]] | None, request: gr.Request | None = None) -> tuple[Any, ...]:
     """Generate downloadable reports after the detection result is already visible."""
     if not items:
         return "尚未生成批量报告预览。", gr.update(value=[], visible=False), None, None
@@ -3660,6 +3805,7 @@ def run_batch_detection(
     line_width: int,
     color_mode: str,
     progress=gr.Progress(track_tqdm=False),
+    request: gr.Request | None = None,
 ):
     if not files:
         update_latest_ai_context(batch_items=[])
@@ -3873,6 +4019,7 @@ def retry_batch_item(
     show_confidence: bool,
     line_width: int,
     color_mode: str,
+    request: gr.Request | None = None,
 ):
     records = copy.deepcopy(items or [])
     match = re.search(r"图片\s*(\d+)", str(selected_image or ""))
@@ -4176,7 +4323,7 @@ def history_thumbnail_gallery(limit: int = 12) -> list[tuple[str, str]]:
 def recent_reports_html(limit: int = 10) -> str:
     ensure_dirs()
     files = []
-    for path in REPORT_DIR.glob("*"):
+    for path in session_report_dir().glob("*"):
         try:
             if path.is_file() and path.suffix.lower() in {".md", ".pdf", ".docx", ".csv"}:
                 stat = path.stat()
@@ -4263,7 +4410,7 @@ def report_archive_records(limit: int = 30) -> list[dict[str, Any]]:
     ensure_dirs()
     grouped: dict[str, dict[str, Any]] = {}
     allowed_extensions = {".md", ".zip", ".pdf", ".docx", ".csv"}
-    for path in REPORT_DIR.glob("*"):
+    for path in session_report_dir().glob("*"):
         try:
             if not path.is_file() or path.suffix.lower() not in allowed_extensions:
                 continue
@@ -4410,13 +4557,14 @@ def refresh_report_archive() -> tuple[Any, ...]:
     return (gr.update(choices=choices, value=selected, interactive=bool(choices)), *load_report_archive(selected))
 
 
-def export_history_csv() -> str | None:
+@session_request_bound
+def export_history_csv(request: gr.Request | None = None) -> str | None:
     rows = history_rows()
     if not rows:
         return None
     ensure_dirs()
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
-    path = REPORT_DIR / f"detection_history_{stamp}.csv"
+    path = session_report_dir() / f"detection_history_{stamp}.csv"
     frame = pd.DataFrame(
         rows,
         columns=["时间", "任务类型", "图片名称", "使用模型", "检测框数量", "平均置信度", "最高置信度", "推理耗时(ms)", "复核提示"],
@@ -4425,7 +4573,7 @@ def export_history_csv() -> str | None:
         frame[column] = frame[column].map(csv_safe_text)
     for column in ("检测框数量", "平均置信度", "最高置信度", "推理耗时(ms)"):
         frame[column] = pd.to_numeric(frame[column].replace("-", pd.NA), errors="coerce")
-    with tempfile.TemporaryDirectory(prefix=".history-export-", dir=REPORT_DIR) as temp_dir:
+    with tempfile.TemporaryDirectory(prefix=".history-export-", dir=session_report_dir()) as temp_dir:
         temp_path = Path(temp_dir) / path.name
         frame.to_csv(temp_path, index=False, encoding="utf-8-sig", na_rep="")
         temp_path.replace(path)
@@ -4760,10 +4908,11 @@ def normalize_chat_history(history: list[Any] | None, limit: int = 6, max_chars:
 
 def load_chat_feedback() -> list[dict[str, Any]]:
     ensure_dirs()
-    if not CHAT_FEEDBACK_PATH.exists():
+    feedback_path = session_feedback_path()
+    if not feedback_path.exists():
         return []
     try:
-        data = json.loads(CHAT_FEEDBACK_PATH.read_text(encoding="utf-8"))
+        data = json.loads(feedback_path.read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
     except Exception:
         return []
@@ -4771,7 +4920,16 @@ def load_chat_feedback() -> list[dict[str, Any]]:
 
 def save_chat_feedback(items: list[dict[str, Any]]) -> None:
     ensure_dirs()
-    CHAT_FEEDBACK_PATH.write_text(json.dumps(items[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+    feedback_path = session_feedback_path()
+    normalized: list[dict[str, Any]] = []
+    for item in items[-500:]:
+        if isinstance(item, dict):
+            record = copy.deepcopy(item)
+            record.setdefault("session_id", current_session_id())
+            normalized.append(record)
+    temp_path = feedback_path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(feedback_path)
 
 
 def normalize_cloud_feedback_state(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -4879,38 +5037,49 @@ def update_latest_ai_context(
     comparison: list[dict[str, Any]] | None = None,
     batch_items: list[dict[str, Any]] | None = None,
     reset: bool = False,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     with LATEST_AI_CONTEXT_LOCK:
+        sid = current_session_id(fallback=session_id)
+        context = SESSION_AI_CONTEXTS.setdefault(
+            sid,
+            {"detection": {}, "comparison": [], "batch_items": [], "last_scope": "", "updated_at": now_iso()},
+        )
         if reset:
-            LATEST_AI_CONTEXT.update({"detection": {}, "comparison": [], "batch_items": [], "last_scope": "", "updated_at": now_iso()})
+            context = {"detection": {}, "comparison": [], "batch_items": [], "last_scope": "", "updated_at": now_iso()}
+            SESSION_AI_CONTEXTS[sid] = context
         if detection is not None:
-            LATEST_AI_CONTEXT["detection"] = copy.deepcopy(detection)
+            context["detection"] = copy.deepcopy(detection)
             if detection:
-                LATEST_AI_CONTEXT["last_scope"] = "当前单图"
+                context["last_scope"] = "当前单图"
         if comparison is not None:
-            LATEST_AI_CONTEXT["comparison"] = copy.deepcopy(comparison)
+            context["comparison"] = copy.deepcopy(comparison)
             if comparison:
-                LATEST_AI_CONTEXT["last_scope"] = "当前多模型对比"
+                context["last_scope"] = "当前多模型对比"
         if batch_items is not None:
-            LATEST_AI_CONTEXT["batch_items"] = copy.deepcopy(batch_items)
+            context["batch_items"] = copy.deepcopy(batch_items)
             if batch_items:
-                LATEST_AI_CONTEXT["last_scope"] = "当前批量任务"
-        if not selected_chat_sources(str(LATEST_AI_CONTEXT.get("last_scope") or ""), LATEST_AI_CONTEXT["detection"], LATEST_AI_CONTEXT["comparison"], LATEST_AI_CONTEXT["batch_items"]):
-            if LATEST_AI_CONTEXT["batch_items"]:
-                LATEST_AI_CONTEXT["last_scope"] = "当前批量任务"
-            elif LATEST_AI_CONTEXT["comparison"]:
-                LATEST_AI_CONTEXT["last_scope"] = "当前多模型对比"
-            elif LATEST_AI_CONTEXT["detection"]:
-                LATEST_AI_CONTEXT["last_scope"] = "当前单图"
+                context["last_scope"] = "当前批量任务"
+        if not selected_chat_sources(str(context.get("last_scope") or ""), context["detection"], context["comparison"], context["batch_items"]):
+            if context["batch_items"]:
+                context["last_scope"] = "当前批量任务"
+            elif context["comparison"]:
+                context["last_scope"] = "当前多模型对比"
+            elif context["detection"]:
+                context["last_scope"] = "当前单图"
             else:
-                LATEST_AI_CONTEXT["last_scope"] = ""
-        LATEST_AI_CONTEXT["updated_at"] = now_iso()
-        return copy.deepcopy(LATEST_AI_CONTEXT)
+                context["last_scope"] = ""
+        context["updated_at"] = now_iso()
+        return copy.deepcopy(context)
 
 
-def get_latest_ai_context() -> dict[str, Any]:
+def get_latest_ai_context(session_id: str | None = None) -> dict[str, Any]:
     with LATEST_AI_CONTEXT_LOCK:
-        return copy.deepcopy(LATEST_AI_CONTEXT)
+        sid = current_session_id(fallback=session_id)
+        context = SESSION_AI_CONTEXTS.get(sid)
+        if not context:
+            return {"detection": {}, "comparison": [], "batch_items": [], "last_scope": "", "updated_at": ""}
+        return copy.deepcopy(context)
 
 
 def normalize_session_id(session_id: str | None) -> str:
@@ -5681,7 +5850,7 @@ def export_chat_session_summary(history: list[Any] | None, scope: str, role: str
     summary = make_chat_session_summary(history, scope, role, source_status)
     ensure_dirs()
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
-    path = REPORT_DIR / f"chat_session_{stamp}.md"
+    path = session_report_dir() / f"chat_session_{stamp}.md"
     path.write_text(summary, encoding="utf-8")
     return summary, str(path)
 
@@ -6775,6 +6944,7 @@ class CloudChatRequest(BaseModel):
 
 
 class AssistantSuggestionRequest(BaseModel):
+    session_id: str = Field(default="")
     scope: str = Field(default="全部最新结果")
     last_user_message: str = Field(default="")
     last_assistant_answer: str = Field(default="")
@@ -6782,6 +6952,7 @@ class AssistantSuggestionRequest(BaseModel):
 
 
 class AssistantExportContextRequest(BaseModel):
+    session_id: str = Field(default="")
     scope: str = Field(default="全部最新结果")
 
 
@@ -7086,7 +7257,7 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
 
     scope = payload.scope if payload.scope in CHAT_SCOPE_OPTIONS else "全部最新结果"
     role = payload.role if payload.role in CHAT_ROLE_OPTIONS else "患者易懂版"
-    latest = get_latest_ai_context()
+    latest = get_latest_ai_context(session_id)
     detection = latest.get("detection") if isinstance(latest.get("detection"), dict) else {}
     comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
     batch_items = latest.get("batch_items") if isinstance(latest.get("batch_items"), list) else []
@@ -7161,8 +7332,8 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
 
 
 @api_app.post("/api/cloud_feedback")
-async def api_cloud_feedback(payload: CloudFeedbackRequest) -> dict[str, Any]:
-    session_id = normalize_session_id(payload.session_id)
+async def api_cloud_feedback(payload: CloudFeedbackRequest, request: Request) -> dict[str, Any]:
+    session_id = current_session_id(request, payload.session_id)
     current = get_cached_cloud_feedback(session_id)
     feedback = str(payload.feedback or "").strip().lower()
     if feedback == "like":
@@ -7186,9 +7357,9 @@ async def api_cloud_feedback(payload: CloudFeedbackRequest) -> dict[str, Any]:
 
 
 @api_app.post("/api/assistant_suggestions")
-async def api_assistant_suggestions(payload: AssistantSuggestionRequest) -> dict[str, Any]:
+async def api_assistant_suggestions(payload: AssistantSuggestionRequest, request: Request) -> dict[str, Any]:
     try:
-        latest = get_latest_ai_context()
+        latest = get_latest_ai_context(current_session_id(request, payload.session_id))
         scope = effective_suggestion_scope(payload.scope, latest)
         detection = latest.get("detection") if isinstance(latest.get("detection"), dict) else {}
         comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
@@ -7221,9 +7392,9 @@ async def api_assistant_suggestions(payload: AssistantSuggestionRequest) -> dict
 
 
 @api_app.post("/api/assistant_export_context")
-async def api_assistant_export_context(payload: AssistantExportContextRequest) -> dict[str, Any]:
+async def api_assistant_export_context(payload: AssistantExportContextRequest, request: Request) -> dict[str, Any]:
     try:
-        latest = get_latest_ai_context()
+        latest = get_latest_ai_context(current_session_id(request, payload.session_id))
         scope = effective_suggestion_scope(payload.scope, latest)
         detection = latest.get("detection") if isinstance(latest.get("detection"), dict) else {}
         comparison = latest.get("comparison") if isinstance(latest.get("comparison"), list) else []
@@ -7252,8 +7423,9 @@ async def api_assistant_export_context(payload: AssistantExportContextRequest) -
 
 
 @api_app.post("/api/cloud_chat")
-async def api_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
+async def api_cloud_chat(payload: CloudChatRequest, request: Request) -> dict[str, Any]:
     try:
+        payload.session_id = current_session_id(request, payload.session_id)
         return await run_in_threadpool(run_native_cloud_chat, payload)
     except Exception as exc:
         return {
@@ -8172,14 +8344,17 @@ def report_empty_state_markup(
     )
 
 
+@session_request_bound
 def generate_report(
     report_type: str,
     detection: dict[str, Any],
     comparison: list[dict[str, Any]],
     batch_items: list[dict[str, Any]],
     report_language: str = "中文",
+    request: gr.Request | None = None,
 ):
     ensure_dirs()
+    report_dir = session_report_dir()
     has_detection = bool(detection)
     has_comparison = bool(comparison)
     has_batch = bool(batch_items)
@@ -8202,11 +8377,11 @@ def generate_report(
     language_tag = "en" if report_language_is_en(report_language) else "zh"
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
     stem = f"{report_prefix}_{language_tag}_{stamp}"
-    md_path = REPORT_DIR / f"{stem}.md"
-    bundle_path = REPORT_DIR / f"{stem}.zip"
-    pdf_path = REPORT_DIR / f"{stem}.pdf"
-    docx_path = REPORT_DIR / f"{stem}.docx"
-    with tempfile.TemporaryDirectory(prefix=".report-build-", dir=REPORT_DIR) as temp_dir:
+    md_path = report_dir / f"{stem}.md"
+    bundle_path = report_dir / f"{stem}.zip"
+    pdf_path = report_dir / f"{stem}.pdf"
+    docx_path = report_dir / f"{stem}.docx"
+    with tempfile.TemporaryDirectory(prefix=".report-build-", dir=report_dir) as temp_dir:
         temp_root = Path(temp_dir)
         temp_md = temp_root / md_path.name
         temp_bundle = temp_root / bundle_path.name
@@ -8223,11 +8398,13 @@ def generate_report(
     return markdown_for_gradio_preview(markdown), gr.update(value=gallery, visible=bool(gallery)), str(bundle_path), str(pdf_path), str(docx_path)
 
 
+@session_request_bound
 def generate_report_center(
     detection: dict[str, Any],
     comparison: list[dict[str, Any]],
     batch_items: list[dict[str, Any]],
     report_language: str = "中文",
+    request: gr.Request | None = None,
 ):
     preview, gallery, md_path, pdf_path, docx_path = generate_report(
         "综合报告",
@@ -8255,12 +8432,14 @@ def generate_report_center(
     )
 
 
-def generate_single_detection_tab_report(detection: dict[str, Any], report_language: str = "中文"):
+@session_request_bound
+def generate_single_detection_tab_report(detection: dict[str, Any], report_language: str = "中文", request: gr.Request | None = None):
     """Generate the rich, single-image report directly from the detection tab."""
     return generate_report("单图检测报告", detection, [], [], report_language)
 
 
-def generate_model_comparison_tab_report(comparison: list[dict[str, Any]], report_language: str = "中文"):
+@session_request_bound
+def generate_model_comparison_tab_report(comparison: list[dict[str, Any]], report_language: str = "中文", request: gr.Request | None = None):
     """Generate the rich, comparison-specific report directly from the comparison tab."""
     return generate_report("多模型对比报告", {}, comparison, [], report_language)
 
@@ -8280,12 +8459,14 @@ def report_source_error(
     return None
 
 
+@session_request_bound
 def generate_report_with_progress(
     report_type: str,
     detection: dict[str, Any],
     comparison: list[dict[str, Any]],
     batch_items: list[dict[str, Any]],
     report_language: str = "中文",
+    request: gr.Request | None = None,
 ):
     """Stream real report-generation stages to the in-page progress bar."""
     # Clear the previous gallery before a new run.  Keeping the old gallery
@@ -8313,6 +8494,7 @@ def generate_report_with_progress(
         return
     try:
         ensure_dirs()
+        report_dir = session_report_dir()
         yield (
             detection_progress_update(22, "正在整理报告素材", "正在收集原图、检测结果图和区域级复核信息。"),
             gr.skip(),
@@ -8340,11 +8522,11 @@ def generate_report_with_progress(
         language_tag = "en" if report_language_is_en(report_language) else "zh"
         stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{uuid.uuid4().hex[:6]}"
         stem = f"{report_prefix}_{language_tag}_{stamp}"
-        md_path = REPORT_DIR / f"{stem}.md"
-        bundle_path = REPORT_DIR / f"{stem}.zip"
-        pdf_path = REPORT_DIR / f"{stem}.pdf"
-        docx_path = REPORT_DIR / f"{stem}.docx"
-        with tempfile.TemporaryDirectory(prefix=".report-build-", dir=REPORT_DIR) as temp_dir:
+        md_path = report_dir / f"{stem}.md"
+        bundle_path = report_dir / f"{stem}.zip"
+        pdf_path = report_dir / f"{stem}.pdf"
+        docx_path = report_dir / f"{stem}.docx"
+        with tempfile.TemporaryDirectory(prefix=".report-build-", dir=report_dir) as temp_dir:
             temp_root = Path(temp_dir)
             temp_md = temp_root / md_path.name
             temp_bundle = temp_root / bundle_path.name
@@ -8393,21 +8575,26 @@ def generate_report_with_progress(
         )
 
 
+@session_request_bound
 def generate_single_detection_tab_report_with_progress(
     detection: dict[str, Any],
     report_language: str = "中文",
+    request: gr.Request | None = None,
 ):
     yield from generate_report_with_progress("单图检测报告", detection, [], [], report_language)
 
 
+@session_request_bound
 def generate_model_comparison_tab_report_with_progress(
     comparison: list[dict[str, Any]],
     report_language: str = "中文",
+    request: gr.Request | None = None,
 ):
     yield from generate_report_with_progress("多模型对比报告", {}, comparison, [], report_language)
 
 
-def generate_batch_report_with_progress(items: list[dict[str, Any]] | None):
+@session_request_bound
+def generate_batch_report_with_progress(items: list[dict[str, Any]] | None, request: gr.Request | None = None):
     """Generate the batch Markdown/CSV pair while streaming visible stages."""
     reset_gallery = gr.update(value=[], visible=False)
     yield (
@@ -10252,10 +10439,10 @@ def native_ai_assistant_js() -> str:
 
   function makeSessionId() {
     try {
-      const existing = window.localStorage.getItem(sessionKey);
+      const existing = window.sessionStorage.getItem(sessionKey);
       if (existing) return existing;
       const id = "session-" + (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
-      window.localStorage.setItem(sessionKey, id);
+      window.sessionStorage.setItem(sessionKey, id);
       return id;
     } catch (_) {
       return "session-" + Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -10975,7 +11162,7 @@ def native_ai_assistant_js() -> str:
   function postJson(url, payload) {
     return fetch(url, {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: {"Content-Type": "application/json", "X-Dental-Session": sessionId},
       body: JSON.stringify(payload || {})
     }).then(async response => {
       let data = {};
@@ -12608,4 +12795,6 @@ if __name__ == "__main__":
         # per-model inference path still reports a readable failure state.
         pass
     schedule_output_cleanup()
-    uvicorn.run(app, host="127.0.0.1", port=find_free_port())
+    bind_host = os.getenv("DENTAL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    configured_port = int(os.getenv("DENTAL_PORT", "7860"))
+    uvicorn.run(app, host=bind_host, port=find_free_port(configured_port))

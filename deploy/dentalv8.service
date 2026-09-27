@@ -1,0 +1,21 @@
+[Unit]
+Description=DentalV8 anonymous defense demo
+After=network.target
+
+[Service]
+Type=simple
+User=dentalv8
+Group=dentalv8
+WorkingDirectory=/srv/Dentalv8
+EnvironmentFile=/etc/dentalv8/dentalv8.env
+ExecStart=/srv/Dentalv8/.venv/bin/python /srv/Dentalv8/app.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/Dentalv8/outputs /var/lib/dentalv8
+
+[Install]
+WantedBy=multi-user.target
