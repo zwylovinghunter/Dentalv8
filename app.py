@@ -7373,6 +7373,7 @@ def run_native_cloud_chat(payload: CloudChatRequest) -> dict[str, Any]:
 
     return {
         "ok": bool(ok),
+        "retryable": bool(payload.allow_cloud) and not bool(ok),
         "answer": content,
         "elapsed_seconds": elapsed_seconds,
         "message_id": f"assistant-{uuid.uuid4().hex}",
@@ -9828,6 +9829,16 @@ def native_ai_assistant_html() -> str:
           font-size: 21px !important;
           letter-spacing: -1px;
         }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="retry"] {{
+          flex: 0 0 auto;
+          width: auto !important;
+          padding: 0 12px !important;
+          font-size: 14px !important;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action:disabled {{
+          opacity: 0.5;
+          cursor: wait;
+        }}
         #page-assistant #native-ai-assistant button.native-ai-action:hover {{
           border-color: rgba(148, 163, 184, 0.18) !important;
           background: #dcdfe4 !important;
@@ -10948,6 +10959,7 @@ def native_ai_assistant_js() -> str:
 
   function setSending(value) {
     sending = value;
+    root.querySelectorAll('[data-action="retry"]').forEach(button => { button.disabled = value; });
     sendBtn.disabled = value;
     sendBtn.textContent = value ? "发送中…" : "发送";
   }
@@ -11208,6 +11220,17 @@ def native_ai_assistant_js() -> str:
       </div>`;
     messagesEl.appendChild(row);
     const evidenceRoot = row.querySelector(".native-ai-evidence-links");
+    if (options.retryPayload) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "native-ai-action";
+      retry.dataset.action = "retry";
+      retry.textContent = "↻ 重试一次";
+      retry.setAttribute("aria-label", "重新发送这条问题");
+      retry.disabled = sending;
+      row.retryPayload = options.retryPayload;
+      row.querySelector(".native-ai-actions").appendChild(retry);
+    }
     (Array.isArray(options.evidenceLinks) ? options.evidenceLinks : []).forEach(item => {
       const button = document.createElement("button");
       button.type = "button";
@@ -11366,33 +11389,35 @@ def native_ai_assistant_js() -> str:
     } catch (_) {}
   }
 
-  async function sendMessage(prefilled) {
+  async function sendMessage(prefilled, retryPayload = null) {
     const text = String(prefilled || input.value || "").trim();
     if (!text || sending) return;
     const outgoingHistory = chatHistory.slice(-8).map(item => ({role: item.role, content: item.content}));
+    const requestPayload = retryPayload || {
+      session_id: sessionId,
+      message: text,
+      history: outgoingHistory,
+      asked_questions: [...askedQuestionPayload(), text],
+      scope: scopeSelect.value,
+      role: roleSelect.value,
+      allow_cloud: allowCloud.checked,
+      provider: providerSelect ? providerSelect.value : "google"
+    };
     addUserMessage(text);
     chatHistory.push({role: "user", content: text});
-    input.value = "";
+    if (!retryPayload) input.value = "";
     syncInputHeight();
     setSending(true);
     setStatus("正在整理检测信息，并生成更清晰的回答…");
     const loading = addLoadingMessage();
     await waitForFeedbackSave();
     try {
-      const data = await postJson("/api/cloud_chat", {
-        session_id: sessionId,
-        message: text,
-        history: outgoingHistory,
-        asked_questions: askedQuestionPayload(),
-        scope: scopeSelect.value,
-        role: roleSelect.value,
-        allow_cloud: allowCloud.checked,
-        provider: providerSelect ? providerSelect.value : "google"
-      });
+      const data = await postJson("/api/cloud_chat", requestPayload);
       loading.remove();
       addAssistantMessage(data.answer || "未获得有效回复。", {
         elapsedSeconds: data.elapsed_seconds || 1,
         messageId: data.message_id,
+        retryPayload: data.retryable ? requestPayload : null,
         evidenceLinks: data.evidence_links || []
       });
       chatHistory.push({role: "assistant", content: data.answer || ""});
@@ -11404,7 +11429,7 @@ def native_ai_assistant_js() -> str:
     } catch (error) {
       loading.remove();
       const answer = "### 请求失败\n智诊管家暂时无法完成回答。\n\n你可以稍后重试，或先查看检测结果与报告。";
-      addAssistantMessage(answer, {elapsedSeconds: 1});
+      addAssistantMessage(answer, {elapsedSeconds: 1, retryPayload: requestPayload});
       chatHistory.push({role: "assistant", content: answer});
       setStatus("请求失败：" + error.message);
     } finally {
@@ -11419,7 +11444,9 @@ def native_ai_assistant_js() -> str:
       const row = action.closest(".native-ai-msg.assistant");
       if (!row) return;
       const type = action.dataset.action;
-      if (type === "copy") {
+      if (type === "retry") {
+        if (!sending && row.retryPayload) await sendMessage(row.retryPayload.message, row.retryPayload);
+      } else if (type === "copy") {
         const text = plainTextFromMarkdown(row.dataset.answer || "");
         try {
           await navigator.clipboard.writeText(text);

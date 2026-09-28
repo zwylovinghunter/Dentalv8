@@ -708,6 +708,8 @@ ASK_AI_HEAD = r"""
         if (feedback) feedback.textContent = '';
       });
       input?.addEventListener('keydown', event => {
+        // Keep editing shortcuts local; let the browser perform copy/paste.
+        event.stopPropagation();
         if (composing || event.isComposing || event.keyCode === 229) return;
         if (event.key === 'Escape') {
           event.preventDefault();
@@ -723,6 +725,7 @@ ASK_AI_HEAD = r"""
         event.preventDefault();
         closeSelectionPopover(true);
       });
+      input?.addEventListener('paste', event => event.stopPropagation());
       ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchend'].forEach(type => {
         pop.addEventListener(type, event => event.stopPropagation());
       });
@@ -797,7 +800,9 @@ ASK_AI_HEAD = r"""
     const send = pop.querySelector('#ask-ai-selection-send');
     if (input) input.value = '';
     if (send) send.disabled = true;
-    positionSelectionPopover(pop, rect);
+    // Do not steal focus from the selection: Ctrl+C must still copy it.
+    // Clicking the question field enables normal Ctrl+V editing.
+    positionSelectionPopover(pop, rect, false);
   }
 
   function selectionGestureExcludedTarget(target) {
