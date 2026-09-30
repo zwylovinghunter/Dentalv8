@@ -318,23 +318,23 @@ MODEL_SPECS = [
         name="均衡型基线模型",
         model_type="YOLOv8n baseline e50",
         description="使用 yolov8n+baseline_e50 权重，作为其它优化模型的对照基线。",
-        preferred_terms=("yolov8n+baseline_e50",),
+        preferred_terms=("yolov8m+piou",),
     ),
     ModelSpec(
         key="high_precision",
         name="高精度牙齿病变定位模型",
         model_type="YOLOv8m + PIoU",
         description="强调定位精度和结果稳定性，适合高精度辅助分析展示。",
-        preferred_terms=("yolov8m+piou",),
-        fallback_terms=("yolov8m", "piou"),
+        preferred_terms=("yolov8n+ciou-nwd",),
+        fallback_terms=("ciou-nwd",),
     ),
     ModelSpec(
         key="high_recall",
         name="高召回牙齿病变检测模型",
         model_type="YOLOv8n + Gated-SPDConv-neck-P4",
         description="使用 yolov8n+Gated-SPDConv-neck-P4 权重，强调召回率和减少漏检，适合初筛和复核优先的展示场景。",
-        preferred_terms=("yolov8n+gated-spdconv-neck-p4", "gated-spdconv-neck-p4"),
-        fallback_terms=("gated", "spdconv-neck-p4"),
+        preferred_terms=("yolov8m+p2-highrecall_mosaic05_e200_p30",),
+        fallback_terms=("p2-highrecall", "highrecall"),
     ),
 ]
 
