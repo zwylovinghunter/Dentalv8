@@ -198,19 +198,19 @@ LATEST_AI_CONTEXT: dict[str, Any] = {
 LATEST_AI_CONTEXT_LOCK = threading.RLock()
 api_app = FastAPI(title="Dental AI Assistant API")
 MODEL_USE_CASES = {
-    "lightweight": "作为默认对照基线，兼顾速度和基础检测效果。",
-    "high_precision": "强调定位精度和结果稳定性，适合精细辅助分析。",
-    "high_recall": "强调减少漏检，适合初筛和人工复核前的辅助提示。",
+    "lightweight": "作为默认均衡模型，兼顾精度、召回率与定位质量，适合常规检测和综合复核。",
+    "high_precision": "强调较高 Precision 与减少误报，适合误检成本较高的保守复核。",
+    "high_recall": "强调较高 Recall 与小目标检测，适合初筛、小病灶优先和减少漏检。",
 }
 MODEL_RECOMMEND_SCENES = {
-    "lightweight": "速度优先、默认基线",
-    "high_precision": "精细定位优先",
-    "high_recall": "初筛和减少漏检优先",
+    "lightweight": "常规检测、综合复核",
+    "high_precision": "保守精查、减少误报",
+    "high_recall": "初筛、小病灶优先、减少漏检",
 }
 MODEL_RECOMMEND_SCENES_EN = {
-    "lightweight": "Speed-first baseline",
-    "high_precision": "Precision-focused localization",
-    "high_recall": "Screening with fewer missed candidates",
+    "lightweight": "Balanced general-purpose detection",
+    "high_precision": "Conservative review with fewer false positives",
+    "high_recall": "Small-lesion screening with fewer missed candidates",
 }
 
 
@@ -247,24 +247,24 @@ class ModelSpec:
 MODEL_SPECS = [
     ModelSpec(
         key="lightweight",
-        name="均衡型基线模型",
-        model_type="YOLOv8n baseline e50",
-        description="使用 yolov8n+baseline_e50 权重，作为其它优化模型的对照基线。",
+        name="均衡型牙齿病变检测模型",
+        model_type="YOLOv8m + PIoU",
+        description="使用 YOLOv8m + PIoU 权重，兼顾 Precision、Recall 与 mAP50-95，适合常规检测和综合复核。",
         preferred_terms=("yolov8m+piou",),
     ),
     ModelSpec(
         key="high_precision",
         name="高精度牙齿病变定位模型",
-        model_type="YOLOv8m + PIoU",
-        description="强调定位精度和结果稳定性，适合高精度辅助分析展示。",
+        model_type="YOLOv8n + CIoU-NWD",
+        description="使用 YOLOv8n + CIoU-NWD 权重，突出较高 Precision 和较少误报，适合误检成本较高的保守复核。",
         preferred_terms=("yolov8n+ciou-nwd",),
         fallback_terms=("ciou-nwd",),
     ),
     ModelSpec(
         key="high_recall",
         name="高召回牙齿病变检测模型",
-        model_type="YOLOv8n + Gated-SPDConv-neck-P4",
-        description="使用 yolov8n+Gated-SPDConv-neck-P4 权重，强调召回率和减少漏检，适合初筛和复核优先的展示场景。",
+        model_type="YOLOv8m + P2 High-Recall",
+        description="使用 YOLOv8m + P2 High-Recall 权重，通过 P2 小目标检测尺度提高 Recall，适合初筛、小病灶优先和减少漏检。",
         preferred_terms=("yolov8m+p2-highrecall_mosaic05_e200_p30",),
         fallback_terms=("p2-highrecall", "highrecall"),
     ),
@@ -2570,7 +2570,7 @@ def compare_summary(results: list[dict[str, Any]]) -> str:
         f"- 速度最快：{fastest['model_name']}，耗时 {fastest['inference_time_ms']:.2f} ms。",
         f"- 检出目标最多：{most_boxes['model_name']}，疑似区域 {most_boxes['box_count']} 个。",
         f"- 平均置信度最高：{best_conf['model_name']}，平均置信度 {best_conf['avg_confidence']:.3f}。",
-        "- 快速筛查更适合选择高召回牙齿病变检测模型；常规对照可选择均衡型基线模型。",
+        "- 快速筛查更适合选择高召回牙齿病变检测模型；常规检测和综合复核可选择均衡型牙齿病变检测模型。",
         "- 高精度定位展示更适合选择高精度牙齿病变定位模型。",
     ]
     review_count = sum(len(r.get("review_suggestions", [])) for r in ok)
@@ -2713,9 +2713,9 @@ def system_recommendation(results: list[dict[str, Any]]) -> str:
     ]
     lines = [
         "### 系统推荐结论",
-        "- 速度优先：推荐均衡型基线模型。",
-        "- 精细定位优先：推荐高精度牙齿病变定位模型。",
-        "- 初筛和减少漏检优先：推荐高召回牙齿病变检测模型。",
+        "- 综合均衡：推荐均衡型牙齿病变检测模型。",
+        "- 保守精查和减少误报：推荐高精度牙齿病变定位模型。",
+        "- 初筛、小病灶优先和减少漏检：推荐高召回牙齿病变检测模型。",
     ]
     if consensus_rows:
         lines.append("- 当前存在多模型同类别的相近检测区域，建议结合原图进行人工重点复核。")
@@ -8730,9 +8730,9 @@ python app.py
 
 ## 模型类别说明
 
-- 均衡型基线模型：作为默认对照基线，兼顾速度和基础检测效果。
-- 高精度牙齿病变定位模型：强调定位精度和结果稳定性，适合精细辅助分析。
-- 高召回牙齿病变检测模型：强调减少漏检，适合初筛和人工复核前的辅助提示。
+- 均衡型牙齿病变检测模型（YOLOv8m + PIoU）：兼顾精度、召回率与定位质量，适合常规检测和综合复核。
+- 高精度牙齿病变定位模型（YOLOv8n + CIoU-NWD）：强调较高 Precision 和减少误报，适合保守精查。
+- 高召回牙齿病变检测模型（YOLOv8m + P2 High-Recall）：强调小目标检测与减少漏检，适合初筛和小病灶优先场景。
 
 ## 多模型对比设计
 
@@ -11641,13 +11641,13 @@ def build_app() -> gr.Blocks:
                     elem_id="compare-results",
                 ):
                     with gr.Column(elem_classes=["compare-model-card", "compare-model-baseline"]):
-                        gr.HTML("<div class='model-tag'><b>01 均衡型基线模型</b><span>速度优先 · 默认基线</span></div>")
-                        cmp_img1 = gr.ImageSlider(label="均衡型基线模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
+                        gr.HTML("<div class='model-tag'><b>01 均衡型检测模型</b><span>综合均衡 · 常规检测</span></div>")
+                        cmp_img1 = gr.ImageSlider(label="均衡型模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
                     with gr.Column(elem_classes=["compare-model-card", "compare-model-precision"]):
-                        gr.HTML("<div class='model-tag'><b>02 高精度定位模型</b><span>定位稳定性优先</span></div>")
+                        gr.HTML("<div class='model-tag'><b>02 高精度定位模型</b><span>减少误报 · 保守精查</span></div>")
                         cmp_img2 = gr.ImageSlider(label="高精度模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
                     with gr.Column(elem_classes=["compare-model-card", "compare-model-recall"]):
-                        gr.HTML("<div class='model-tag'><b>03 高召回检测模型</b><span>减少漏检优先</span></div>")
+                        gr.HTML("<div class='model-tag'><b>03 高召回检测模型</b><span>P2 小病灶 · 减少漏检</span></div>")
                         cmp_img3 = gr.ImageSlider(label="高召回模型：原图 / 结果", show_label=False, visible=False, slider_position=50, max_height=440, buttons=["fullscreen", "download"], elem_classes=["sync-model-viewer", "result-compare-slider"])
                 with gr.Group(elem_classes=["compare-analysis-panel", "compare-result-analysis-panel"]):
                     cmp_analysis_overview = gr.HTML(
