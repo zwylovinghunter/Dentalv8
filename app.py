@@ -156,6 +156,7 @@ CLOUD_FEEDBACK_REASONS = [
     "回复不完整",
     "没有解决问题",
     "表达不清楚",
+    "表达过于学术化",
     "检测解释不合理",
     "建议不够专业",
     "过于冗长",
@@ -165,6 +166,7 @@ FEEDBACK_REASON_REQUIREMENTS = {
     "回复不完整": "补充图像检测结论、可能病变区域、置信度解释、风险提示和后续建议，保证回答闭环。",
     "没有解决问题": "先直接回应用户问题本身，再结合检测结果解释原因和下一步操作。",
     "表达不清楚": "改用更自然、分层、短句的表达，像 ChatGPT 一样先讲结论，再分点说明。",
+    "表达过于学术化": "使用通俗、日常的中文解释专业内容；首次出现专业术语时用一句话说明含义，优先用简短句和具体例子帮助理解，同时保留检测结果的原始含义、置信度和不确定性，不因简化表达而夸大或弱化医学结论。",
     "检测解释不合理": "重新检查区域编号、类别、置信度和风险提示，避免把疑似结果说成诊断结论。",
     "建议不够专业": "后续建议应更可执行、更符合口腔影像复核流程，并提醒需要专业口腔医生判断。",
     "过于冗长": "压缩篇幅，删掉重复铺垫和模板化说明；先给核心结论，再只保留与用户问题和当前检测结果直接相关的必要解释与建议。",
@@ -9549,41 +9551,109 @@ def native_ai_assistant_html() -> str:
         #page-assistant #native-ai-assistant .native-ai-actions {{
           display: flex;
           align-items: center;
-          gap: 8px;
-          margin-top: 14px;
-          padding-top: 12px;
-          border-top: 1px solid rgba(226, 232, 240, 0.68);
+          gap: 4px;
+          margin-top: 12px;
+          padding-top: 10px;
+          border-top: 1px solid rgba(148, 163, 184, 0.18);
         }}
         #page-assistant #native-ai-assistant button.native-ai-action {{
           display: inline-flex !important;
-          flex: 0 0 58px;
+          position: relative;
+          flex: 0 0 36px;
           align-items: center;
           justify-content: center;
-          width: 58px !important;
-          min-width: 58px !important;
-          height: 40px !important;
-          min-height: 40px !important;
+          width: 36px !important;
+          min-width: 36px !important;
+          height: 34px !important;
+          min-height: 34px !important;
           margin: 0 !important;
           padding: 0 !important;
           border: 1px solid transparent !important;
-          border-radius: 14px !important;
-          background: #e6e8ec !important;
-          color: #111827 !important;
+          border-radius: 10px !important;
+          background: transparent !important;
+          color: #64748b !important;
           cursor: pointer;
-          font-family: "Segoe UI Emoji", "Segoe UI Symbol", "Microsoft YaHei", sans-serif;
-          font-size: 18px !important;
+          font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+          font-size: 15px !important;
           font-weight: 600 !important;
           line-height: 1;
           box-shadow: none !important;
           transform: none !important;
-          transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease !important;
+          transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
         }}
-        #page-assistant #native-ai-assistant button.native-ai-action[data-action="copy"] {{
-          font-size: 21px !important;
-          letter-spacing: -1px;
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="copy"]::before {{
+          content: "";
+          position: absolute;
+          width: 11px;
+          height: 13px;
+          left: 11px;
+          top: 9px;
+          border: 1.6px solid currentColor;
+          border-radius: 2px;
+          background: var(--ai-card);
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="copy"]::after {{
+          content: "";
+          position: absolute;
+          width: 11px;
+          height: 13px;
+          left: 14px;
+          top: 12px;
+          border: 1.6px solid currentColor;
+          border-radius: 2px;
+          background: var(--ai-card);
+          pointer-events: none;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="copy"].copied::before {{
+          display: none;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="copy"].copied::after {{
+          content: "✓";
+          width: auto;
+          height: auto;
+          left: 0;
+          right: 0;
+          top: 0;
+          border: 0;
+          background: transparent;
+          font-size: 17px;
+          line-height: 32px;
+          text-align: center;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-action-label {{
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          padding: 0;
+          margin: -1px;
+          overflow: hidden;
+          clip: rect(0, 0, 0, 0);
+          white-space: nowrap;
+          border: 0;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="like"]::before,
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="dislike"]::before {{
+          content: "";
+          display: block;
+          width: 17px;
+          height: 17px;
+          background-color: currentColor;
+          -webkit-mask: center / contain no-repeat;
+          mask: center / contain no-repeat;
+          pointer-events: none;
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="like"]::before {{
+          -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4-8a3 3 0 0 1 2 3v5h5a2 2 0 0 1 2 2l-2 7a2 2 0 0 1-2 2H7'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4-8a3 3 0 0 1 2 3v5h5a2 2 0 0 1 2 2l-2 7a2 2 0 0 1-2 2H7'/%3E%3C/svg%3E");
+        }}
+        #page-assistant #native-ai-assistant button.native-ai-action[data-action="dislike"]::before {{
+          transform: rotate(180deg);
+          -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4-8a3 3 0 0 1 2 3v5h5a2 2 0 0 1 2 2l-2 7a2 2 0 0 1-2 2H7'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4-8a3 3 0 0 1 2 3v5h5a2 2 0 0 1 2 2l-2 7a2 2 0 0 1-2 2H7'/%3E%3C/svg%3E");
         }}
         #page-assistant #native-ai-assistant button.native-ai-action[data-action="retry"] {{
           flex: 0 0 auto;
+          min-width: 0 !important;
           width: auto !important;
           padding: 0 12px !important;
           font-size: 14px !important;
@@ -9593,49 +9663,77 @@ def native_ai_assistant_html() -> str:
           cursor: wait;
         }}
         #page-assistant #native-ai-assistant button.native-ai-action:hover {{
-          border-color: rgba(148, 163, 184, 0.18) !important;
-          background: #dcdfe4 !important;
-          color: #0f172a !important;
-          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32) !important;
+          border-color: rgba(148, 163, 184, 0.22) !important;
+          background: rgba(226, 232, 240, 0.62) !important;
+          color: #1e293b !important;
+          box-shadow: none !important;
           transform: none !important;
         }}
         #page-assistant #native-ai-assistant button.native-ai-action:active {{
           background: #d2d6dc !important;
         }}
         #page-assistant #native-ai-assistant button.native-ai-action.active {{
-          border-color: rgba(37, 99, 235, 0.18) !important;
-          background: #dbe7f8 !important;
-          color: #1d4ed8 !important;
-          box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08) !important;
+          border-color: rgba(37, 99, 235, 0.2) !important;
+          background: #eaf2ff !important;
+          color: #2563eb !important;
+          box-shadow: none !important;
         }}
         #page-assistant #native-ai-assistant button.native-ai-action:focus-visible {{
           outline: 3px solid rgba(37, 99, 235, 0.28) !important;
           outline-offset: 2px !important;
         }}
-        .native-ai-reasons {{
+        #page-assistant #native-ai-assistant .native-ai-reasons {{
           display: none;
           flex-wrap: wrap;
-          gap: 8px;
-          margin-top: 10px;
+          gap: 7px;
+          margin-top: 12px;
+          padding: 12px;
+          border: 1px solid rgba(203, 213, 225, 0.72);
+          border-radius: 14px;
+          background: rgba(248, 250, 252, 0.78);
         }}
-        .native-ai-reasons.open {{
+        #page-assistant #native-ai-assistant .native-ai-reasons.open {{
           display: flex;
         }}
-        .native-ai-reason {{
-          border: 1px solid rgba(203,213,225,0.88);
-          border-radius: 999px;
-          padding: 7px 11px;
-          background: rgba(255,255,255,0.9);
-          color: #475569;
-          cursor: pointer;
-          font-size: 12px;
-          font-weight: 800;
+        #page-assistant #native-ai-assistant .native-ai-reasons button.native-ai-reason {{
+          display: inline-flex !important;
+          flex: 0 0 auto !important;
+          align-items: center !important;
+          justify-content: center !important;
+          min-width: 0 !important;
+          min-height: 36px !important;
+          height: auto !important;
+          margin: 0 !important;
+          border: 1px solid #dbe3ec !important;
+          border-radius: 999px !important;
+          padding: 8px 14px !important;
+          background: #ffffff !important;
+          color: #475569 !important;
+          cursor: pointer !important;
+          font-size: 13px !important;
+          font-weight: 600 !important;
+          line-height: 1.35 !important;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.045) !important;
+          transform: none !important;
+          transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease !important;
         }}
-        .native-ai-reason:hover,
-        .native-ai-reason.active {{
-          border-color: rgba(37,99,235,0.45);
-          background: #eff6ff;
-          color: #1d4ed8;
+        #page-assistant #native-ai-assistant .native-ai-reasons button.native-ai-reason:hover {{
+          border-color: #aebdcd !important;
+          background: #f8fafc !important;
+          color: #1e293b !important;
+          box-shadow: 0 2px 5px rgba(15, 23, 42, 0.07) !important;
+          transform: translateY(-1px) !important;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-reasons button.native-ai-reason.active {{
+          border-color: #93b4f7 !important;
+          background: #eaf2ff !important;
+          color: #1d4ed8 !important;
+          box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08) !important;
+          transform: none !important;
+        }}
+        #page-assistant #native-ai-assistant .native-ai-reasons button.native-ai-reason:focus-visible {{
+          outline: 3px solid rgba(37, 99, 235, 0.22) !important;
+          outline-offset: 2px !important;
         }}
         .native-ai-feedback-note {{
           margin-top: 8px;
@@ -10965,9 +11063,9 @@ def native_ai_assistant_js() -> str:
         <div class="native-ai-md">${renderMarkdown(answer || "")}</div>
         <div class="native-ai-evidence-links" aria-label="回答依据"></div>
         <div class="native-ai-actions">
-          <button type="button" class="native-ai-action" data-action="copy" title="复制" aria-label="复制">⧉</button>
-          <button type="button" class="native-ai-action" data-action="like" title="喜欢" aria-label="喜欢">👍</button>
-          <button type="button" class="native-ai-action" data-action="dislike" title="不喜欢" aria-label="不喜欢">👎</button>
+          <button type="button" class="native-ai-action" data-action="copy" title="复制" aria-label="复制"><span class="native-ai-action-label">复制</span></button>
+          <button type="button" class="native-ai-action" data-action="like" title="喜欢" aria-label="喜欢"><span class="native-ai-action-label">喜欢</span></button>
+          <button type="button" class="native-ai-action" data-action="dislike" title="不喜欢" aria-label="不喜欢"><span class="native-ai-action-label">不喜欢</span></button>
         </div>
         ${reasonTemplate.innerHTML}
         <div class="native-ai-feedback-note"></div>
@@ -11215,9 +11313,9 @@ def native_ai_assistant_js() -> str:
         try {
           await navigator.clipboard.writeText(text);
           action.classList.add("active");
-          action.textContent = "✓";
+          action.classList.add("copied");
           setTimeout(() => {
-            action.textContent = "⧉";
+            action.classList.remove("copied");
             action.classList.remove("active");
           }, 1000);
         } catch (_) {
