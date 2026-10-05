@@ -7249,12 +7249,14 @@ def assistant_suggested_questions(
     asked_questions: list[str] | None = None,
 ) -> list[str]:
     try:
+        has_result_context = bool(successful_results(selected_chat_results(scope, detection, comparison, batch_items)))
+        if not has_result_context:
+            return NO_DETECTION_FOLLOWUP_QUESTIONS[:6]
         context_questions = contextual_followup_questions(scope, detection, comparison, batch_items)
         turn_questions = turn_followup_questions(user_message, assistant_answer, scope, detection, comparison, batch_items) if user_message or assistant_answer else []
         asked = [chat_content_to_text(question) for question in (asked_questions or [])]
         if user_message and not any(questions_semantically_similar(user_message, question) for question in asked):
             asked.append(chat_content_to_text(user_message))
-        has_result_context = bool(successful_results(selected_chat_results(scope, detection, comparison, batch_items)))
         if has_result_context and turn_questions:
             candidates = [turn_questions[0], *context_questions[:4], *turn_questions[1:3], *context_questions[4:]]
             return compact_fresh_questions(candidates, context_questions, asked)
@@ -10504,6 +10506,7 @@ def native_ai_assistant_js() -> str:
   let lastSuggestionContextAt = "";
   let lastSuggestionSignature = "";
   let refreshingSuggestions = false;
+  let queuedSuggestionRefresh = null;
   let questionSequence = 0;
   let questionAnchors = [];
   let activeQuestionId = "";
@@ -11319,9 +11322,9 @@ def native_ai_assistant_js() -> str:
     });
   }
 
-  function renderSuggestions(questions) {
+  function renderSuggestions(questions, showInitial = false) {
     const list = Array.isArray(questions) ? questions : defaultSuggestions;
-    const askedQuestions = askedQuestionPayload();
+    const askedQuestions = showInitial ? [] : askedQuestionPayload();
     const visibleQuestions = [...new Set(list.map(question => String(question || "").trim()).filter(Boolean))]
       .filter(question => !suggestionWasAsked(question, askedQuestions))
       .slice(0, 6);
@@ -11349,7 +11352,10 @@ def native_ai_assistant_js() -> str:
   }
 
   async function refreshSuggestions(reason = "manual", options = {}) {
-    if (refreshingSuggestions) return;
+    if (refreshingSuggestions) {
+      if (options.force) queuedSuggestionRefresh = {reason, options: {...options}};
+      return;
+    }
     if (sending && !options.force) return;
     refreshingSuggestions = true;
     try {
@@ -11366,19 +11372,26 @@ def native_ai_assistant_js() -> str:
       if (data.effective_scope && scopeSelect.value !== data.effective_scope) {
         scopeSelect.value = data.effective_scope;
       }
-      const nextSignature = JSON.stringify((data.suggested_questions || []).slice(0, 6));
+      const hasContext = data.has_context === true;
+      const nextQuestions = hasContext ? data.suggested_questions : defaultSuggestions;
+      const nextSignature = JSON.stringify((nextQuestions || []).slice(0, 6));
       const changed = nextSignature && nextSignature !== lastSuggestionSignature;
       if (changed || options.force) {
         lastSuggestionSignature = nextSignature;
-        renderSuggestions(data.suggested_questions);
+        renderSuggestions(nextQuestions, !hasContext);
       }
-      if (changed && reason !== "initial" && data.has_context) {
+      if (changed && reason !== "initial" && hasContext) {
         setStatus("推荐追问已根据最新检测结果更新。");
+      } else if (changed && reason !== "initial" && !hasContext) {
+        setStatus("检测上下文已清空，推荐问答已恢复初始状态。");
       }
     } catch (_) {
       if (options.force) renderSuggestions(defaultSuggestions);
     } finally {
       refreshingSuggestions = false;
+      const queued = queuedSuggestionRefresh;
+      queuedSuggestionRefresh = null;
+      if (queued) Promise.resolve().then(() => refreshSuggestions(queued.reason, queued.options));
     }
   }
 
