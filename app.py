@@ -2734,7 +2734,8 @@ def run_single_detection(
     )
 
 
-def reset_single_detection_outputs():
+@session_request_bound
+def reset_single_detection_outputs(request: gr.Request | None = None):
     update_latest_ai_context(detection={})
     return (
         detection_progress_hide(),
